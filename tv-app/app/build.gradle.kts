@@ -111,7 +111,13 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     // NewPipe Extractor
-    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.25.2")
+    // v0.26.5 is required for YouTube playlist extraction: YouTube now returns playlist
+    // items as "lockupViewModel" in an appendContinuationItemsAction, which v0.25.2
+    // ignores (it only knows playlistVideoRenderer/richItemRenderer/reelItemRenderer).
+    // Result on v0.25.2: playlists resolve with 0 videos and no error.
+    // Fixed upstream in v0.26.3 ("playlist items ... in lockup view models") and
+    // v0.26.4 ("Fix fetching playlists continuations").
+    implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.5")
 
     // Media3 ExoPlayer
     val media3Version = "1.9.2"
