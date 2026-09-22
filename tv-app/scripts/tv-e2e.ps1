@@ -175,6 +175,11 @@ if (-not $SkipBuild) {
     if ($LASTEXITCODE -ne 0) { Log 'BUILD: FAIL'; $buildLog | Select-Object -Last 20 | ForEach-Object { Log "  $_" }; exit 1 }
     Log 'BUILD: PASS'
 }
+# Android names the artifact after the project directory; publish it under the app's own name.
+$namedApk = Join-Path (Split-Path $apk) 'SafeTubeforKids-debug.apk'
+Copy-Item $apk $namedApk -Force
+Log "APK: $namedApk"
+
 if (-not (Test-Path $apk)) { Log "ADB_TEST: BLOCKED - APK not found at $apk"; exit 2 }
 
 Log "=== install ==="
