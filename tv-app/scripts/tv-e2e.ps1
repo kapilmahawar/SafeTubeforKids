@@ -745,6 +745,16 @@ if ($opened) {
                 ($probeLog -split "`n" | Select-Object -Last 5) | ForEach-Object { Log "    $_" }
             }
 
+            # The probe video is played repeatedly across runs, so it can carry a saved position
+            # and open the resume prompt - which then eats these keys: DOWN moves the prompt, RIGHT
+            # falls through to a seek, and OK answers the prompt, leaving the later keys to open
+            # Subtitles instead of Quality. That is why this phase reported "0 options offered"
+            # while the video itself was playing perfectly well.
+            if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
+                Log '  probe: a resume prompt is open - dismissing it so the menu keys land on the player'
+                Key 'KEYCODE_BACK'
+                Start-Sleep -Seconds 2
+            }
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 2
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
