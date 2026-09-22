@@ -1,6 +1,6 @@
 # SafeTube for Kids — handover
 
-State of the work as of commit `66fbd58` on `kapilmahawar/SafeTubeforKids`.
+State of the work as of commit `793afd0` on `kapilmahawar/SafeTubeforKids`.
 
 ## What this is
 
@@ -40,6 +40,13 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - Player: play/pause, pause→resume, timeline, D-pad and media seek (±10s), auto-hide controls,
   buffering indicator, subtitle menu and captions on/off, quality, audio **language** tracks,
   speed, screen fit, resume (position *and* choice), start-over.
+- Resume prompt semantics: it waits for a decision, and ten seconds with no choice starts the video
+  from the beginning (`No resume choice after 10s - starting over`).
+- Held-key seek: the escalation curve is unit-tested and the user confirmed on the real remote that
+  its key-repeat drives it.
+- Error and retry: with the offline simulator on, playing an approved video shows *"Couldn't play
+  this video"* with Retry/Back. Retry while still offline keeps the error rather than bypassing the
+  gate, and Retry once back online plays the video — recovery verified on the TV.
 - Approved queue: next/previous stay inside it; a finished video advances to the next approved
   item, and at the end of the queue playback stops rather than fetching a recommendation.
 - Security: unapproved video blocked with the message *"This video can't be played"* plus
@@ -56,14 +63,12 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
    player chrome. Do it as a small slice at a time, verifying with `-Tier smoke` and a UI dump
    between slices. Note the session's own limitation: the agent could not view images, so a visual
    change needs either the user's eyes or a UI-dump check of the text/structure.
-2. **Remote key-repeat** — `seekStepFor` is unit-tested, but only a physically held remote
-   produces the `repeatCount` the feature keys off; `adb shell input keyevent` cannot inject
-   repeats. One press of the user's thumb settles it.
+2. ~~Remote key-repeat~~ — settled: confirmed by the user on the real remote.
 3. **Export/import browser buttons** — server side verified on the device (`export` returned both
    sources; re-import gave `skipped=2, added=0`; junk gave per-item refusal reasons). The
    dashboard buttons need a phone browser.
-4. **Stale release asset** — `v0.9.3-np0.26.5` still carries `ParentApproved-*.apk`. GitHub has no
-   rename API; it needs delete-and-re-upload from a current build.
+4. ~~Stale release asset~~ — settled: the old release was deleted and `v0.9.3` carries
+   `SafeTubeforKids-0.9.3-debug.apk`.
 5. **Latent, unproven** — a duplicate `Dashboard server started` line appeared once after an
    install-then-launch; a clean force-stop + launch produced exactly one, so it is unconfirmed.
    Watch for a second `Ktor server started on port 8080`.
@@ -74,7 +79,9 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   reports nothing. Normalise line endings before a scripted replace, and always read the file back
   to confirm the change landed. This caused: a missed manifest service declaration (which took the
   dashboard offline), a missed `MainActivity` handover (two servers competing for port 8080), and a
-  missed harness rename.
+  missed harness rename. It has an encoding twin: `Get-Content -Raw` decodes these UTF-8 files as
+  Latin-1, so an anchor containing `→`, `±` or `—` never matches while the script still reports
+  success. Prefer the file tools for edits, or read with `-Encoding utf8`.
 - **PowerShell string interpolation.** `"$apiHost:8080"` parses as a drive-qualified variable and
   becomes empty — use `${apiHost}:8080`. A double-quoted replacement string also interpolates its
   own `$variables` at edit time (`$posRestart` vanished, leaving `(( -lt 15)`).
