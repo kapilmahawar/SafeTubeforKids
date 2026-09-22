@@ -407,9 +407,20 @@ if ($opened) {
     Shot '13-speed-menu'
     $speedChanged = ((& $menuLog) -match 'Player menu SPEED -> sp:1\.25')
     Record 'speed-menu-changes-speed' $speedChanged
-    Key 'KEYCODE_BACK'
+    # Screen fit. This phase used to begin with a BACK meant to close the speed menu; when that
+    # menu had already auto-closed, the BACK left the player and every following key landed in the
+    # library - which is how it failed while the app's own log showed ASPECT -> zoom working.
+    # Reopen the video so no phase depends on the previous one's leftover state.
+    $fitVideo = if (PlayingNow) { (PlayingNow).videoId } else { $videoId }
+    Adb @('logcat', '-c') | Out-Null
+    PlayVideo $fitVideo $fitVideo
+    Start-Sleep -Seconds 18
+    if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 5
+    }
 
-    # screen fit: DOWN, RIGHT to the last button, open, choose crop-to-fill
+    # DOWN into the settings row, RIGHT to the last button, open, choose crop-to-fill
     Key 'KEYCODE_DPAD_DOWN'
     foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }
     Key 'KEYCODE_DPAD_CENTER'
