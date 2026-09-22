@@ -3,6 +3,10 @@ package tv.safetubeforkids.app.server
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.data.ExportedSource
+import tv.safetubeforkids.app.data.ImportFailure
+import tv.safetubeforkids.app.data.ImportSummary
+import tv.safetubeforkids.app.data.SourceTransfer
 import tv.safetubeforkids.app.util.ContentSourceParser
 import tv.safetubeforkids.app.util.ParseResult
 import io.ktor.http.*
@@ -109,6 +113,86 @@ fun Route.playlistRoutes(sessionManager: SessionManager, database: CacheDatabase
     }
 }
 
+/**
+ * Export the approved library as JSON, and import one back.
+ *
+ * Import is deliberately additive and never destructive: existing sources are reported as
+ * skipped rather than replaced, and every refusal comes back with a reason.
+ */
+fun Route.sourceTransferRoutes(sessionManager: SessionManager, database: CacheDatabase) {
+    get("/sources/export") {
+        if (!validateSession(sessionManager)) return@get
+        val sources = database.channelDao().getAll().map { entity ->
+            ExportedSource(
+                sourceType = entity.sourceType,
+                sourceId = entity.sourceId,
+                sourceUrl = entity.sourceUrl,
+                displayName = entity.displayName,
+                videoCount = entity.videoCount,
+            )
+        }
+        call.respondText(
+            text = SourceTransfer.export(sources, System.currentTimeMillis()),
+            contentType = ContentType.Application.Json,
+        )
+    }
+
+    post("/sources/import") {
+        if (!validateSession(sessionManager)) return@post
+
+        val payload = try {
+            call.receiveText()
+        } catch (e: Exception) {
+            ""
+        }
+
+        val parsed = SourceTransfer.parse(payload)
+            ?: return@post call.respond(
+                HttpStatusCode.BadRequest,
+                mapOf("error" to "Unreadable export payload"),
+            )
+
+        val (candidates, failures) = SourceTransfer.validate(SourceTransfer.distinctBySourceId(parsed))
+        val dao = database.channelDao()
+        val added = mutableListOf<String>()
+        val skipped = mutableListOf<String>()
+        val failed = failures.toMutableList()
+
+        for (source in candidates) {
+            if (dao.count() >= MAX_SOURCES) {
+                failed += ImportFailure(source.sourceId, "source limit of $MAX_SOURCES reached")
+                continue
+            }
+            if (dao.getBySourceId(source.sourceId) != null) {
+                skipped += source.sourceId
+                continue
+            }
+            // Re-validate the URL through the same parser the dashboard uses, so an edited or
+            // hand-written export cannot introduce something the app would not otherwise accept.
+            when (ContentSourceParser.parse(source.sourceUrl)) {
+                is ParseResult.Rejected -> failed += ImportFailure(
+                    source.sourceId,
+                    "URL not accepted: ${source.sourceUrl}",
+                )
+                is ParseResult.Success -> {
+                    dao.insert(
+                        ChannelEntity(
+                            sourceType = source.sourceType,
+                            sourceId = source.sourceId,
+                            sourceUrl = source.sourceUrl,
+                            displayName = source.displayName.ifBlank { source.sourceId },
+                        )
+                    )
+                    added += source.sourceId
+                }
+            }
+        }
+
+        call.respond(
+            ImportSummary(added = added, skipped = skipped, failed = failed),
+        )
+    }
+}
 private fun ChannelEntity.toResponse() = PlaylistResponse(
     id = id,
     sourceType = sourceType,
