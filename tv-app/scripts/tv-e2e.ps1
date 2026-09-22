@@ -718,7 +718,18 @@ if ($opened) {
         }
 
         if ($probeSourceId) {
-            Start-Sleep -Seconds 12
+            # A newly approved source has to be resolved AND cached before the player is allowed to
+            # play it; a blind 12-second wait was not always enough, the video then never opened, and
+            # the whole probe reported "0 options offered" as if the quality menu were broken. Resolve
+            # it explicitly and wait for the app to say so, with a timeout so a genuinely unavailable
+            # video still fails honestly.
+            Adb @('shell', "am broadcast -a $pkg.DEBUG_RESOLVE_PLAYLIST -p $pkg --es playlist_id $probeVideo") | Out-Null
+            $probeReady = $false
+            for ($i = 0; $i -lt 20; $i++) {
+                Start-Sleep -Seconds 3
+                if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match "Resolved video $probeVideo") { $probeReady = $true; break }
+            }
+            Log "  probe source resolved and cached: $probeReady"
             Adb @('logcat', '-c') | Out-Null
             PlayVideo $probeVideo $probeVideo
             Start-Sleep -Seconds 20
