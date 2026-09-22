@@ -17,7 +17,7 @@ import androidx.core.app.NotificationCompat
 import tv.parentapproved.app.MainActivity
 
 /**
- * Foreground service that ensures HOME returns to ParentApproved.
+ * Foreground service that ensures HOME returns to SafeTube for Kids.
  *
  * Two mechanisms:
  * 1. Listens for ACTION_CLOSE_SYSTEM_DIALOGS "homekey" broadcast
@@ -154,7 +154,7 @@ class HomeWatcherService : Service() {
                 "Home Watcher",
                 NotificationManager.IMPORTANCE_MIN,
             ).apply {
-                description = "Keeps ParentApproved as the home screen"
+                description = "Keeps SafeTube for Kids as the home screen"
                 setShowBadge(false)
             }
             val nm = getSystemService(NotificationManager::class.java)
