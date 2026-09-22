@@ -307,7 +307,13 @@ class PlaybackController(
         errorMessage = null
         val media = VideoResolver.resolve(videoId)
         if (media == null) {
-            errorMessage = "Couldn't play this video"
+            // YouTube throttles anonymous access from an IP that has asked too often. That passes,
+            // so it must not be reported the same way as a video that cannot be played at all.
+            errorMessage = if (VideoResolver.lastFailureWasRateLimit) {
+                "YouTube is busy right now - try again in a minute"
+            } else {
+                "Couldn't play this video"
+            }
             return
         }
         resolved = media

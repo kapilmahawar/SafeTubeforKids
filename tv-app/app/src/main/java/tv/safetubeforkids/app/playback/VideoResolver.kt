@@ -187,8 +187,24 @@ object VideoResolver {
             )
         } catch (e: Exception) {
             AppLogger.error("Resolution failed for $videoId: ${e.message}")
+            lastFailureWasRateLimit = looksLikeRateLimit(e.message)
             null
         }
+    }
+
+    /**
+     * True when the last failure was YouTube refusing anonymous access from this IP ("Sign in to
+     * confirm that you're not a bot"). That clears on its own, unlike a video that genuinely cannot
+     * be played, and the player says something different for each: telling a family a video is
+     * broken when YouTube is merely busy sends them hunting for a problem that is not there.
+     */
+    @Volatile
+    var lastFailureWasRateLimit: Boolean = false
+        private set
+
+    private fun looksLikeRateLimit(message: String?): Boolean {
+        val text = message?.lowercase() ?: return false
+        return text.contains("login_required") || text.contains("not a bot") || text.contains("429")
     }
 
     /** "1080p" / "720p60" -> 1080 / 720 (leading digits only). */
