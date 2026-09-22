@@ -341,7 +341,7 @@ private fun PlaylistRowSection(
         ) {
             Text(
                 text = if (row.videoCount > 0) "${row.displayName} \u2014 ${row.videoCount} videos" else row.displayName,
-                style = MaterialTheme.typography.titleMedium,
+                style = MaterialTheme.typography.headlineSmall,
                 color = KidText,
             )
             if (row.isOffline) {

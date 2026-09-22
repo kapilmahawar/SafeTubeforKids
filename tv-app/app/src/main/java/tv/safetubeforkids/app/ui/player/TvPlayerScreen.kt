@@ -490,8 +490,8 @@ private fun BottomBar(
         }
         Spacer(Modifier.height(14.dp))
         Text(
-            text = "Down  settings      Left / Right  seek 10s      OK  play or pause      Back  exit",
-            style = MaterialTheme.typography.bodyLarge,
+            text = "Down  settings        Left / Right  seek 10s        OK  play or pause        Back  exit",
+            style = MaterialTheme.typography.bodyMedium,
             color = KidTextDim,
         )
     }
