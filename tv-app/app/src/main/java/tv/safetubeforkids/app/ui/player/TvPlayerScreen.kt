@@ -631,7 +631,7 @@ private fun PlayerMenuOverlay(
  * Hold-to-accelerate seeking: one press moves 10s, and a held key escalates through 20s, 30s,
  * 60s and 120s as the remote repeats, so long videos are not a key-mashing exercise.
  */
-private fun seekStepFor(repeatCount: Int): Long = when {
+internal fun seekStepFor(repeatCount: Int): Long = when {
     repeatCount >= 12 -> 120_000L
     repeatCount >= 8 -> 60_000L
     repeatCount >= 4 -> 30_000L

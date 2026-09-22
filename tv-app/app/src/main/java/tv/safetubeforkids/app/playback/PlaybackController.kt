@@ -132,7 +132,7 @@ class PlaybackController(
 
         /** Menus disappear after this long without input, so they never linger as a distraction. */
         const val MENU_IDLE_MS = 8_000L
-        const val MENU_AFTER_CHOICE_MS = 3_000L
+        const val MENU_AFTER_CHOICE_MS = 5_000L
     }
 
     private var queue: List<VideoItem> = emptyList()

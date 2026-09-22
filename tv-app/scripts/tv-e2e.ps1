@@ -371,7 +371,11 @@ if ($opened) {
         Log '  CAPTION_TEST: LIMITED - no video with caption tracks could be opened'
     }
 
-    # BACK must close the menu, not leave the player
+    # Make sure a menu is genuinely open before asserting that BACK closes it: the idle timer may
+    # already have closed the previous one, in which case BACK would leave the player instead.
+    Key 'KEYCODE_DPAD_DOWN'
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 1
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 2
     $stillPlayingAfterBack = ($null -ne (PlayingNow))
@@ -441,7 +445,7 @@ if ($opened) {
     Key 'KEYCODE_DPAD_CENTER'                            # first option is "Resume from ..."
     Start-Sleep -Seconds 6
     $posAfter = [int](PlayingNow).positionSec
-    Record 'resume-continues-position' ([Math]::Abs($posAfter - $posBefore) -lt 20) "resumed at ${posAfter}s (left at ${posBefore}s)"
+    Record 'resume-continues-position' (($posBefore -gt 20) -and ([Math]::Abs($posAfter - $posBefore) -lt 20)) "resumed at ${posAfter}s (left at ${posBefore}s)"
     Record 'resume-choice-applied' (((& $menuLog)) -match 'Resume chosen')
     Shot '16-resumed'
 
@@ -454,7 +458,7 @@ if ($opened) {
     Start-Sleep -Seconds 6
     $posRestart = [int](PlayingNow).positionSec
     Record 'resume-start-over' (((& $menuLog)) -match 'Start over chosen')
-    Record 'start-over-begins-at-zero' ($posRestart -lt 15) "restarted at ${posRestart}s"
+    Record 'start-over-begins-at-zero' (( -lt 15) -and (((& $menuLog)) -match 'Start over chosen')) "restarted at ${posRestart}s"
 
     # --- security: an unapproved video id must never reach the player ---
     $fgSecurity = EnsureApp 'security'
