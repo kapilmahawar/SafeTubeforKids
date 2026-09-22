@@ -46,6 +46,11 @@ class ParentApprovedServer(private val context: Context, private val port: Int =
                         prettyPrint = true
                         isLenient = true
                         ignoreUnknownKeys = true
+                        // Emit fields whose value equals the default too. Without this, a
+                        // paused player reports no "playing" field at all (and a zero
+                        // position reports no "positionSec"), which makes the API ambiguous
+                        // for the dashboard, the relay and automated device tests.
+                        encodeDefaults = true
                     })
                 }
 

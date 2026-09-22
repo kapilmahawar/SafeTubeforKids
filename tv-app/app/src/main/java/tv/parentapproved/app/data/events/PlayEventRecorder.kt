@@ -28,6 +28,13 @@ object PlayEventRecorder {
     @Volatile var isPlaying: Boolean = false
         private set
 
+    /**
+     * Live playhead position, published by the player while it runs. Exposed through the status
+     * API so remote-control behaviour (seeking, pause, resume) can be verified from outside the
+     * app on a real device.
+     */
+    @Volatile var currentPositionMs: Long = 0
+
     fun init(database: CacheDatabase, clock: () -> Long = { System.currentTimeMillis() }) {
         this.db = database
         this.clock = clock

@@ -39,3 +39,6 @@ tv-app/scripts/test-results/
 
 # Claude Code
 .claude/
+
+# TV end-to-end test artifacts (screenshots, logs)
+test-results/

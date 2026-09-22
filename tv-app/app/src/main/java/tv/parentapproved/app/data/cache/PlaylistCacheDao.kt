@@ -21,4 +21,11 @@ interface PlaylistCacheDao {
 
     @Query("SELECT COUNT(*) FROM videos")
     suspend fun count(): Int
+
+    /** Authorization lookup: a video is playable only while it is in the approved cache. */
+    @Query("SELECT * FROM videos WHERE videoId = :videoId LIMIT 1")
+    suspend fun getByVideoId(videoId: String): VideoEntity?
+
+    @Query("SELECT COUNT(*) FROM videos WHERE videoId = :videoId")
+    suspend fun countByVideoId(videoId: String): Int
 }

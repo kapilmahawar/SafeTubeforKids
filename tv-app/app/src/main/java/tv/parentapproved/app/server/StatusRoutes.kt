@@ -33,6 +33,7 @@ data class NowPlayingResponse(
     val title: String = "",
     val playlistTitle: String = "",
     val elapsedSec: Int = 0,
+    val positionSec: Int = 0,
     val durationSec: Int = 0,
     val playing: Boolean = false,
 )
@@ -66,6 +67,7 @@ fun Route.statusRoutes(sessionManager: SessionManager) {
                 title = PlayEventRecorder.currentTitle ?: "",
                 playlistTitle = PlayEventRecorder.currentPlaylistTitle ?: "",
                 elapsedSec = (PlayEventRecorder.getElapsedMs() / 1000).toInt(),
+                positionSec = (PlayEventRecorder.currentPositionMs / 1000).toInt(),
                 durationSec = (PlayEventRecorder.currentDurationMs / 1000).toInt(),
                 playing = PlayEventRecorder.isPlaying,
             )

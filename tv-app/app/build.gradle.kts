@@ -119,8 +119,9 @@ dependencies {
     // v0.26.4 ("Fix fetching playlists continuations").
     implementation("com.github.teamnewpipe:NewPipeExtractor:v0.26.5")
 
-    // Media3 ExoPlayer
-    val media3Version = "1.9.2"
+    // Media3 ExoPlayer — pinned to the current stable release for track selection,
+    // DASH multi-track playback and subtitle support used by the TV player.
+    val media3Version = "1.11.1"
     implementation("androidx.media3:media3-exoplayer:$media3Version")
     implementation("androidx.media3:media3-exoplayer-dash:$media3Version")
     implementation("androidx.media3:media3-ui:$media3Version")
