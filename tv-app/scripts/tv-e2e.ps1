@@ -194,6 +194,10 @@ Record 'install' $installed
 if (-not $installed) { $install | ForEach-Object { Log "  $_" }; exit 1 }
 
 # ---------------------------------------------------------------- launch + pin
+# A long run with verbose player logging rotates the default ring buffer, which silently ate
+# lines the log-based assertions look for. Give it room up front.
+Adb @('logcat', '-G', '16M') | Out-Null
+
 Log "=== launch ==="
 Adb @('logcat', '-c') | Out-Null
 Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
@@ -467,8 +471,9 @@ if ($opened) {
     Key 'KEYCODE_DPAD_CENTER'
     Start-Sleep -Seconds 6
     $posRestart = [int](PlayingNow).positionSec
-    Record 'resume-start-over' (((& $menuLog)) -match 'Start over chosen')
-    Record 'start-over-begins-at-zero' (( -lt 15) -and (((& $menuLog)) -match 'Start over chosen')) "restarted at ${posRestart}s"
+        $startOverOk = ((& $menuLog)) -match 'Start over chosen'
+        Record 'resume-start-over' $startOverOk
+        Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and ($startOverOk)) "restarted at ${posRestart}s"
 
     # --- security: an unapproved video id must never reach the player ---
     $fgSecurity = EnsureApp 'security'
