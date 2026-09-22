@@ -133,6 +133,13 @@ class PlaybackController(
         /** Menus disappear after this long without input, so they never linger as a distraction. */
         const val MENU_IDLE_MS = 8_000L
         const val MENU_AFTER_CHOICE_MS = 5_000L
+
+        /**
+         * How long the resume prompt waits for a decision before starting the video from the
+         * beginning. Long enough to read and choose, short enough that nobody is left staring at
+         * a prompt they do not understand.
+         */
+        const val RESUME_CHOICE_TIMEOUT_MS = 10_000L
     }
 
     private var queue: List<VideoItem> = emptyList()
@@ -434,12 +441,29 @@ class PlaybackController(
         // Settings menus are transient and must not linger. The resume prompt is a decision, not
         // a menu: auto-closing it after 8s silently made the choice for the viewer, and a press
         // arriving later landed on the player as play/pause instead of answering the prompt.
-        if (menu != PlayerMenu.RESUME) scheduleMenuAutoClose()
+        if (menu == PlayerMenu.RESUME) scheduleResumeTimeout() else scheduleMenuAutoClose()
     }
 
     /** Menus must not linger as a distraction: they close themselves when left alone. */
     fun noteMenuInteraction() {
-        if (activeMenu != null) scheduleMenuAutoClose()
+        // Browsing is not choosing, so the resume prompt's countdown is not extended by it.
+        if (activeMenu != null && activeMenu != PlayerMenu.RESUME) scheduleMenuAutoClose()
+    }
+
+    /**
+     * The resume prompt is a decision, not a menu: it waits as long as it takes, but if nothing is
+     * chosen within [RESUME_CHOICE_TIMEOUT_MS] the video starts from the beginning - what a child
+     * who has not asked to continue would expect.
+     */
+    private fun scheduleResumeTimeout() {
+        menuAutoCloseJob?.cancel()
+        menuAutoCloseJob = scope.launch {
+            delay(RESUME_CHOICE_TIMEOUT_MS)
+            if (activeMenu == PlayerMenu.RESUME) {
+                AppLogger.log("No resume choice after ${RESUME_CHOICE_TIMEOUT_MS / 1000}s - starting over")
+                selectMenuOption("restart")
+            }
+        }
     }
 
     private fun scheduleMenuAutoClose(delayMs: Long = MENU_IDLE_MS) {
