@@ -12,6 +12,8 @@ data class QualityOption(
     val videoUrl: String,
     val audioUrl: String?,
     val isMerged: Boolean,
+    /** Stream bitrate in kbps, or 0 when the extractor does not report one. */
+    val bitrateKbps: Int = 0,
 )
 
 /**
@@ -105,7 +107,17 @@ object VideoResolver {
                 val height = heightOf(runCatching { stream.resolution }.getOrNull())
                 val url = runCatching { stream.content }.getOrNull()
                 if (height in 1..MAX_HEIGHT && !url.isNullOrBlank()) {
-                    byHeight.putIfAbsent(height, QualityOption(height, "${height}p", url, null, false))
+                    byHeight.putIfAbsent(
+                        height,
+                        QualityOption(
+                            height = height,
+                            label = "${height}p",
+                            videoUrl = url,
+                            audioUrl = null,
+                            isMerged = false,
+                            bitrateKbps = runCatching { stream.bitrate }.getOrDefault(0),
+                        ),
+                    )
                 }
             }
             videoOnly.forEach { stream ->
@@ -115,7 +127,14 @@ object VideoResolver {
                 if (height in 1..MAX_HEIGHT && !url.isNullOrBlank()
                     && !audioUrl.isNullOrBlank() && !byHeight.containsKey(height)
                 ) {
-                    byHeight[height] = QualityOption(height, "${height}p", url, audioUrl, true)
+                    byHeight[height] = QualityOption(
+                        height = height,
+                        label = "${height}p",
+                        videoUrl = url,
+                        audioUrl = audioUrl,
+                        isMerged = true,
+                        bitrateKbps = runCatching { stream.bitrate }.getOrDefault(0),
+                    )
                 }
             }
 

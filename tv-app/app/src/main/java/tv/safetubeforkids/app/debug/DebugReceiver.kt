@@ -10,6 +10,7 @@ import tv.safetubeforkids.app.data.ContentSourceRepository
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.util.AppLogger
+import tv.safetubeforkids.app.util.BandwidthOverride
 import tv.safetubeforkids.app.util.ContentSourceParser
 import tv.safetubeforkids.app.util.NetworkUtils
 import tv.safetubeforkids.app.timelimits.TimeLimitConfig
@@ -85,6 +86,7 @@ class DebugReceiver : BroadcastReceiver() {
             // --- Lifecycle ---
             "$PKG.DEBUG_FULL_RESET" -> handleFullReset(context)
             "$PKG.DEBUG_SIMULATE_OFFLINE" -> handleSimulateOffline()
+            "$PKG.DEBUG_SET_BANDWIDTH" -> handleSetBandwidth(intent)
             "$PKG.DEBUG_GET_STATE_DUMP" -> handleGetStateDump(context)
             "$PKG.DEBUG_CLEAR_PLAY_EVENTS" -> handleClearPlayEvents()
         }
@@ -421,6 +423,17 @@ class DebugReceiver : BroadcastReceiver() {
     private fun handleSimulateOffline() {
         OfflineSimulator.toggle()
         logResult("""{"offline":${OfflineSimulator.isOffline}}""")
+    }
+
+    /**
+     * Stand in for the player's bandwidth measurement, so the Auto quality policy can be checked
+     * on a real TV: a stall cannot be produced on demand. A missing or non-positive value clears
+     * the override and the player's own measurement is used again.
+     */
+    private fun handleSetBandwidth(intent: Intent) {
+        val kbps = intent.getIntExtra("kbps", 0)
+        BandwidthOverride.set(kbps.takeIf { it > 0 })
+        logResult("""{"bandwidthKbps":${BandwidthOverride.kbps ?: "null"}}""")
     }
 
     private fun handleGetStateDump(context: Context) {

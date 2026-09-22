@@ -467,16 +467,17 @@ private fun BottomBar(
     durationMs: Long,
     modifier: Modifier = Modifier,
 ) {
-    // One rounded deck instead of a full-width slab, so the video keeps its edges.
+    // One rounded deck instead of a full-width slab, so the video keeps its edges. Kept shallow
+    // on purpose: a taller deck climbs into the middle of the screen and collides with the menus.
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 32.dp, vertical = 24.dp)
-            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(22.dp))
-            .padding(horizontal = 26.dp, vertical = 20.dp),
+            .padding(horizontal = 32.dp, vertical = 10.dp)
+            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(20.dp))
+            .padding(horizontal = 24.dp, vertical = 12.dp),
     ) {
         SeekBar(positionMs = positionMs, durationMs = durationMs)
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(10.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -484,7 +485,7 @@ private fun BottomBar(
             // Play/pause is the control a child reaches for, so it is the only filled disc.
             Box(
                 modifier = Modifier
-                    .size(62.dp)
+                    .size(46.dp)
                     .background(KidAccent, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
@@ -492,24 +493,24 @@ private fun BottomBar(
                     imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
                     tint = Color.Black,
-                    modifier = Modifier.size(38.dp),
+                    modifier = Modifier.size(28.dp),
                 )
             }
-            Spacer(Modifier.width(24.dp))
+            Spacer(Modifier.width(18.dp))
             Icon(
                 imageVector = Icons.Rounded.Replay10,
                 contentDescription = "Rewind 10 seconds",
                 tint = KidText,
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(30.dp),
             )
-            Spacer(Modifier.width(20.dp))
+            Spacer(Modifier.width(16.dp))
             Icon(
                 imageVector = Icons.Rounded.Forward10,
                 contentDescription = "Forward 10 seconds",
                 tint = KidText,
-                modifier = Modifier.size(40.dp),
+                modifier = Modifier.size(30.dp),
             )
-            Spacer(Modifier.width(30.dp))
+            Spacer(Modifier.width(22.dp))
             Text(
                 text = formatTime(positionMs),
                 style = MaterialTheme.typography.titleMedium,
@@ -537,7 +538,7 @@ private fun SeekBar(positionMs: Long, durationMs: Long, modifier: Modifier = Mod
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(32.dp),
+            .height(20.dp),
     ) {
         val barHeight = size.height * 0.32f
         val top = (size.height - barHeight) / 2f
@@ -582,7 +583,7 @@ private fun labelFor(menu: PlayerMenu, controller: PlaybackController): String =
     // Not in the settings row: the resume prompt is shown automatically when relevant.
     PlayerMenu.RESUME -> "Continue"
     PlayerMenu.CAPTIONS -> "Subtitles: ${controller.captionsLabel}"
-    PlayerMenu.QUALITY -> "Quality"
+    PlayerMenu.QUALITY -> "Quality: ${controller.qualityLabel}"
     PlayerMenu.AUDIO -> "Audio: ${controller.audioLabel}"
     PlayerMenu.SPEED -> "Speed: ${controller.speed}x"
     PlayerMenu.ASPECT -> when (controller.aspectId) {
@@ -597,7 +598,7 @@ private fun MenuBar(controller: PlaybackController, active: Boolean, selectedInd
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 32.dp, vertical = 10.dp),
+            .padding(horizontal = 32.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -618,7 +619,7 @@ private fun MenuBar(controller: PlaybackController, active: Boolean, selectedInd
                         color = if (highlighted) Color.Transparent else Color.White.copy(alpha = 0.16f),
                         shape = CircleShape,
                     )
-                    .padding(horizontal = 22.dp, vertical = 11.dp),
+                    .padding(horizontal = 20.dp, vertical = 8.dp),
             )
         }
     }

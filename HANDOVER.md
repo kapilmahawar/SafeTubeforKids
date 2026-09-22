@@ -40,8 +40,9 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - Player: play/pause, pause→resume, timeline, D-pad and media seek (±10s), auto-hide controls,
   buffering indicator, subtitle menu and captions on/off, quality, audio **language** tracks,
   speed, screen fit, resume (position *and* choice), start-over.
-- Resume prompt semantics: it waits for a decision, and ten seconds with no choice starts the video
-  from the beginning (`No resume choice after 10s - starting over`).
+- Resume prompt semantics: it waits for a decision, any remote interaction hands it a full window
+  again, and thirty seconds with no choice starts the video from the beginning
+  (`No resume choice after 30s - starting over`).
 - Held-key seek: the escalation curve is unit-tested and the user confirmed on the real remote that
   its key-repeat drives it.
 - Error and retry: with the offline simulator on, playing an approved video shows *"Couldn't play
@@ -56,16 +57,25 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - Dashboard: the TV serves its own dashboard at `/` and that response, plus `app.js` and
   `style.css`, are byte-identical to this repo's assets; every `getElementById` target resolves. The
   user confirmed **Export list** works in a browser.
+- Auto quality on the real TV, using the debug bandwidth override (`DEBUG_SET_BANDWIDTH`): at
+  25000 kbps it chose 1080p, at 4000 kbps 480p and at 900 kbps 360p, from a video whose renditions
+  report `1080p=6933kbps, 720p=4206kbps, 480p=1098kbps, 360p=359kbps, 240p=245kbps, 144p=111kbps`
+  - in each case the best rendition inside 70% of the stated bandwidth. The stall step-down also
+  fired for real: `Auto quality: stalled at 360p (900 kbps measured) - stepping down to 240p`.
 - Stability: no crash or ANR across full runs.
 - Device-free: `SeekStepTest` (escalation curve 10→20→30→60→120s), `SourceTransferTest` (export
   shape, bare array, unreadable payloads, refusal reasons, duplicate collapsing).
 
 ## Not done
 
-1. **YouTube-Kids-style redesign** — the largest outstanding item and untouched: library grid and
-   player chrome. Do it as a small slice at a time, verifying with `-Tier smoke` and a UI dump
-   between slices. Note the session's own limitation: the agent could not view images, so a visual
-   change needs either the user's eyes or a UI-dump check of the text/structure.
+1. **YouTube-Kids-style redesign** — in progress, one slice at a time, each verified with a tier and
+   then shown to the user, who is the only one who can judge it (the agent cannot view images).
+   Landed so far: the player's bottom slab became a rounded deck inset from the edges, the progress
+   bar is thicker, play/pause is a filled accent disc, the settings chips are pills, the top bar is
+   a gradient scrim, the menu panel is rounded and the seek badge is an accent pill; the key-map
+   hint line is gone. Reverted at the user's request, because they read as too large: the video
+   card size and the shelf header (back to `titleMedium` on one combined line). Still untouched: the
+   library grid and shelf styling beyond that header.
 2. ~~Remote key-repeat~~ — settled: confirmed by the user on the real remote.
 3. **Export/import browser buttons** — server side verified on the device (`export` returned both
    sources; re-import gave `skipped=2, added=0`; junk gave per-item refusal reasons). The static
@@ -101,3 +111,18 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - **Two starters, one port.** Anything that starts the dashboard server must go through
   `ServerHolder`, which is idempotent; `MainActivity` starts it directly as well as via the
   service so a foreground-service failure cannot take the dashboard down.
+- **Two APK filenames.** Gradle writes `app/build/outputs/apk/debug/app-debug.apk`; the harness
+  copies that to `SafeTubeforKids-debug.apk` for the release asset. Installing the *renamed* copy
+  after a plain build therefore reinstalls an old APK and the new code appears to do nothing - this
+  cost a full verification round (`quality Auto` missing from the log while the build was green).
+  Install `app-debug.apk`, or let the harness install for you.
+- **Debug broadcasts must be registered twice.** `DebugReceiver` handles an action *and* the debug
+  manifest lists it in the receiver's `intent-filter`. Adding only the `when` branch gives a
+  silently dropped broadcast: the action never runs and nothing is logged.
+- **Bitrate units differ by stream type.** NewPipe's `VideoStream.getBitrate()` is bits per second
+  while this app budgets in kbps, so an unnormalised value makes every rendition look unaffordable
+  and Auto pins to the floor. `AutoQuality` normalises anything above 100_000 as per-second.
+  `VideoStream` has no `getAverageBitrate()` at all - that one is on `AudioStream`.
+- **A measurement is not a verdict.** The first bandwidth reading of a stream is often low simply
+  because little has been downloaded, so Auto keeps a floor (`MIN_AUTO_HEIGHT`) for its first
+  choice and relies on the 8s stall step-down to go lower once the connection has proven itself.

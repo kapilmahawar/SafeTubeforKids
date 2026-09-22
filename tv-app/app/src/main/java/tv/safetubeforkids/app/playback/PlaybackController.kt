@@ -11,6 +11,7 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.ui.AspectRatioFrameLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -25,6 +26,7 @@ import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.data.models.VideoItem
 import tv.safetubeforkids.app.timelimits.TimeLimitStatus
 import tv.safetubeforkids.app.util.AppLogger
+import tv.safetubeforkids.app.util.BandwidthOverride
 
 /**
  * Maps Android TV remote keys onto player actions.
@@ -85,7 +87,16 @@ class PlaybackController(
     private val onExit: () -> Unit,
     private val onLocked: (String) -> Unit,
 ) {
-    val player: ExoPlayer = ExoPlayer.Builder(context).build().apply { playWhenReady = true }
+    /**
+     * Owned here so Auto quality can ask what the connection has actually delivered. The same
+     * meter is handed to the player, so DASH adaptation and this policy agree on the measurement.
+     */
+    private val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
+
+    val player: ExoPlayer = ExoPlayer.Builder(context)
+        .setBandwidthMeter(bandwidthMeter)
+        .build()
+        .apply { playWhenReady = true }
 
     var title by mutableStateOf("")
         private set
@@ -113,11 +124,22 @@ class PlaybackController(
         private set
     var aspectId by mutableStateOf(AspectChoices.FIT)
         private set
+    /** Shown on the Quality chip: "Auto (720p)", "Auto", or the rendition the viewer pinned. */
+    var qualityLabel by mutableStateOf("Auto")
+        private set
 
     val speedChoices = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
 
     private var selectedCaptionTag: String? = null
     private var forcedQualityHeight: Int? = null
+    /** True while quality follows the measured bandwidth instead of a pinned rendition. */
+    private var autoQuality = true
+    /** Never pick above this: set after a stall so Auto stops climbing into a bad rendition. */
+    private var qualityCeilingHeight: Int? = null
+    /** The rendition Auto is playing, so a stall knows what to step down from. */
+    private var autoQualityHeight: Int? = null
+    private var stepDownsThisVideo = 0
+    private var stallWatchJob: Job? = null
     private var forcedAudioTrackId: String? = null
     private var resumePositionMs: Long = 0L
     private var released = false
@@ -139,7 +161,13 @@ class PlaybackController(
          * beginning. Long enough to read and choose, short enough that nobody is left staring at
          * a prompt they do not understand.
          */
-        const val RESUME_CHOICE_TIMEOUT_MS = 10_000L
+        const val RESUME_CHOICE_TIMEOUT_MS = 30_000L
+
+        /** How long buffering must last before Auto quality treats it as a stall. */
+        const val STALL_STEP_DOWN_MS = 8_000L
+
+        /** How many renditions Auto will drop within a single video. */
+        const val MAX_AUTO_STEP_DOWNS = 2
     }
 
     private var queue: List<VideoItem> = emptyList()
@@ -159,6 +187,11 @@ class PlaybackController(
                 if (playbackState == androidx.media3.common.Player.STATE_ENDED) {
                     // End of an approved video: continue only inside the approved queue.
                     next()
+                }
+                if (playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
+                    watchForStall()
+                } else {
+                    stallWatchJob?.cancel()
                 }
             }
 
@@ -235,7 +268,16 @@ class PlaybackController(
         }
     }
 
-    private suspend fun prepare(videoId: String, restorePositionMs: Long = 0L) {
+    /**
+     * @param isQualityReopen true when the same video is reopened to change rendition or audio
+     *   track. The watch event then stays open, because it is still the same viewing session:
+     *   starting a new one per change would inflate the history a parent reads.
+     */
+    private suspend fun prepare(
+        videoId: String,
+        restorePositionMs: Long = 0L,
+        isQualityReopen: Boolean = false,
+    ) {
         errorMessage = null
         val media = VideoResolver.resolve(videoId)
         if (media == null) {
@@ -243,6 +285,8 @@ class PlaybackController(
             return
         }
         resolved = media
+        // The stall budget belongs to one video; reopening it is not a fresh start.
+        if (!isQualityReopen) stepDownsThisVideo = 0
 
         // Drop any menu selection the new video cannot honour.
         if (forcedQualityHeight != null && media.qualities.none { it.height == forcedQualityHeight }) {
@@ -280,18 +324,45 @@ class PlaybackController(
         title = media.title.ifBlank { queueItem?.title ?: videoId }
         playStartTime = System.currentTimeMillis()
 
-        PlayEventRecorder.startEvent(
-            videoId = videoId,
-            playlistId = sourceId,
-            title = title,
-            playlistTitle = playlistTitle,
-            durationMs = media.durationMs,
-        )
+        if (!isQualityReopen) {
+            PlayEventRecorder.startEvent(
+                videoId = videoId,
+                playlistId = sourceId,
+                title = title,
+                playlistTitle = playlistTitle,
+                durationMs = media.durationMs,
+            )
+        }
 
         try {
-            val quality = forcedQualityHeight
-                ?.let { height -> media.qualities.firstOrNull { it.height == height } }
-                ?: media.defaultQuality
+            val dashInUse = useDash && media.isAdaptive
+            val quality = if (autoQuality) {
+                AutoQuality.choose(
+                    qualities = media.qualities,
+                    bandwidthKbps = measuredBandwidthKbps(),
+                    ceilingHeight = qualityCeilingHeight,
+                ) ?: media.defaultQuality
+            } else {
+                forcedQualityHeight
+                    ?.let { height -> media.qualities.firstOrNull { it.height == height } }
+                    ?: media.defaultQuality
+            }
+            autoQualityHeight = quality?.height
+            if (autoQuality) {
+                // The renditions and what each costs, so a wrong choice can be read off the log
+                // rather than guessed at.
+                AppLogger.log(
+                    "Auto quality: ${quality?.height ?: 0}p chosen from " +
+                        media.qualities.joinToString { "${it.height}p=${AutoQuality.bitrateOf(it)}kbps" } +
+                        " with ${measuredBandwidthKbps() ?: 0} kbps measured",
+                )
+            }
+            qualityLabel = when {
+                !autoQuality -> quality?.label ?: "Auto"
+                // DASH is adapted by the player itself, so naming a rendition here would be a lie.
+                dashInUse -> "Auto"
+                else -> quality?.let { "Auto (${it.height}p)" } ?: "Auto"
+            }
             val audio = forcedAudioTrackId
                 ?.let { trackId -> media.audioOptions.firstOrNull { it.trackId == trackId } }
                 ?: media.defaultAudio
@@ -309,8 +380,9 @@ class PlaybackController(
             if (restorePositionMs > 0L) player.seekTo(restorePositionMs)
             player.play()
             AppLogger.success(
-                "Playing $videoId (${if (useDash && media.isAdaptive) "dash" else "progressive"}, " +
-                    "${media.qualities.size} renditions, ${media.captions.size} caption tracks)"
+                "Playing $videoId (${if (dashInUse) "dash" else "progressive"}, " +
+                    "${media.qualities.size} renditions, ${media.captions.size} caption tracks) - " +
+                    "quality $qualityLabel"
             )
 
             // Re-apply the caption choice to the freshly prepared track list.
@@ -446,8 +518,15 @@ class PlaybackController(
 
     /** Menus must not linger as a distraction: they close themselves when left alone. */
     fun noteMenuInteraction() {
-        // Browsing is not choosing, so the resume prompt's countdown is not extended by it.
-        if (activeMenu != null && activeMenu != PlayerMenu.RESUME) scheduleMenuAutoClose()
+        // Browsing a settings menu is not choosing, so it only restarts that menu's idle timer.
+        // The resume prompt is the opposite case: a child fumbling for the remote is about to
+        // answer it, so any interaction hands the decision a full window again rather than
+        // letting the countdown expire while they are still deciding.
+        if (activeMenu == PlayerMenu.RESUME) {
+            scheduleResumeTimeout()
+        } else if (activeMenu != null) {
+            scheduleMenuAutoClose()
+        }
     }
 
     /**
@@ -521,10 +600,16 @@ class PlaybackController(
                 }
             } else {
                 val media = resolved
-                val current = forcedQualityHeight ?: media?.defaultQuality?.height
-                val options = media?.qualities.orEmpty().map { quality ->
-                    PlayerOption("h${quality.height}", quality.label, quality.height == current)
-                }
+                // Auto comes first and is the default, so a child who never opens this menu gets a
+                // rendition their connection can actually sustain.
+                val options = listOf(PlayerOption("auto", "Auto", autoQuality)) +
+                    media?.qualities.orEmpty().map { quality ->
+                        PlayerOption(
+                            id = "h${quality.height}",
+                            label = quality.label,
+                            selected = !autoQuality && quality.height == forcedQualityHeight,
+                        )
+                    }
                 options.ifEmpty { listOf(PlayerOption("none", "No quality options", true)) }
             }
         }
@@ -622,6 +707,50 @@ class PlaybackController(
             override.mediaTrackGroup == group && override.trackIndices.contains(trackIndex)
         }
 
+    // --- auto quality -------------------------------------------------------
+
+    /** Measured throughput in kbps, or null when nothing is known yet. */
+    private fun measuredBandwidthKbps(): Int? {
+        BandwidthOverride.kbps?.let { return it }
+        val estimate = runCatching { bandwidthMeter.bitrateEstimate }.getOrNull() ?: return null
+        return estimate.takeIf { it > 0 }?.let { (it / 1000).toInt() }
+    }
+
+    /** Buffering that lasts long enough to be called a stall, not an ordinary load. */
+    private fun watchForStall() {
+        stallWatchJob?.cancel()
+        stallWatchJob = scope.launch {
+            delay(STALL_STEP_DOWN_MS)
+            if (player.playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
+                stepDownAfterStall()
+            }
+        }
+    }
+
+    /**
+     * A progressive rendition cannot be switched mid-stream, so a stall is answered by reopening
+     * the same video one step lower, at the same playhead - a smaller picture that keeps playing
+     * beats a sharp one that stops. Two steps per video is the limit: past that, the connection
+     * rather than the rendition is the problem.
+     */
+    private fun stepDownAfterStall() {
+        val media = resolved ?: return
+        // DASH adapts by itself, and a pinned rendition is the viewer's explicit choice.
+        if (!autoQuality || (useDash && media.isAdaptive)) return
+        if (stepDownsThisVideo >= MAX_AUTO_STEP_DOWNS) return
+        val current = autoQualityHeight ?: return
+        val lower = media.qualities.filter { it.height < current }.maxByOrNull { it.height } ?: return
+
+        stepDownsThisVideo++
+        qualityCeilingHeight = lower.height
+        AppLogger.log(
+            "Auto quality: stalled at ${current}p (${measuredBandwidthKbps() ?: 0} kbps measured) " +
+                "- stepping down to ${lower.height}p",
+        )
+        val position = player.currentPosition
+        scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
+    }
+
     private fun applyQuality(id: String) {
         val media = resolved ?: return
         val group = adaptiveVideoGroup()
@@ -629,22 +758,38 @@ class PlaybackController(
             val builder = player.trackSelectionParameters.buildUpon()
             if (id == "auto") {
                 builder.clearOverrides()
+                autoQuality = true
+                forcedQualityHeight = null
+                qualityCeilingHeight = null
+                qualityLabel = "Auto"
             } else {
                 val height = id.removePrefix("h").toIntOrNull() ?: return
                 val trackIndex = videoHeights(group).firstOrNull { it.first == height }?.second ?: return
                 builder.setOverrideForType(TrackSelectionOverride(group, trackIndex))
+                autoQuality = false
+                forcedQualityHeight = height
+                qualityLabel = "${height}p"
             }
             player.trackSelectionParameters = builder.build()
+            AppLogger.log("Quality set to $qualityLabel")
             return
         }
 
         // Progressive: the rendition is baked into the stream, so reopening it is the only
         // honest way to change quality - keeping the playhead so the child sees no restart.
-        val height = id.removePrefix("h").toIntOrNull() ?: return
-        if (media.qualities.none { it.height == height }) return
-        forcedQualityHeight = height
+        if (id == "auto") {
+            autoQuality = true
+            forcedQualityHeight = null
+            // Asking for Auto again also forgets the stall that lowered it.
+            qualityCeilingHeight = null
+        } else {
+            val height = id.removePrefix("h").toIntOrNull() ?: return
+            if (media.qualities.none { it.height == height }) return
+            autoQuality = false
+            forcedQualityHeight = height
+        }
         val position = player.currentPosition
-        scope.launch { prepare(currentVideoId, position) }
+        scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
     }
 
     private fun applyAudio(id: String) {
@@ -658,7 +803,7 @@ class PlaybackController(
         // Multi-language audio arrives as separate YouTube tracks, so the played stream has to
         // be reopened with the chosen language - keeping the playhead so nothing restarts.
         val position = player.currentPosition
-        scope.launch { prepare(currentVideoId, position) }
+        scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
     }
 
     private fun applyAspect(id: String) {

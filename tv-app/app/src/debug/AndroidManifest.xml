@@ -43,6 +43,7 @@
                 <!-- Lifecycle -->
                 <action android:name="tv.safetubeforkids.app.DEBUG_FULL_RESET" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_SIMULATE_OFFLINE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SET_BANDWIDTH" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_STATE_DUMP" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_PLAY_EVENTS" />
             </intent-filter>
