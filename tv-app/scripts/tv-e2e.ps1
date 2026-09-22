@@ -444,6 +444,15 @@ if ($opened) {
         Key 'KEYCODE_DPAD_CENTER'
         Start-Sleep -Seconds 6
     }
+    # The baseline step above only works when a resume prompt is actually showing. When it is
+    # not, its DOWN+OK opens a settings menu instead, and every later key press moves the menu
+    # rather than the video - which is why this phase once measured "left at 0s". Close it.
+    if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: (CAPTIONS|QUALITY|AUDIO|SPEED|ASPECT)') {
+        Log '  a settings menu was open - closing it so the seek keys reach the player'
+        Key 'KEYCODE_BACK'
+        Start-Sleep -Seconds 2
+    }
+
     foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }   # ~40s in
     Start-Sleep -Seconds 14                              # let the periodic save happen
     $posBefore = [int](PlayingNow).positionSec
@@ -503,7 +512,7 @@ if ($opened) {
             for ($i = 1; $i -le $autoPresses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
             Start-Sleep -Seconds 45
             $afterAuto = PlayingNow
-            Record 'autoplay-advances-to-next-approved' (($null -ne $afterAuto) -and ($afterAuto.videoId -ne $beforeAuto.videoId)) "queue $($beforeAuto.videoId) -> $($afterAuto.videoId)"
+            Record 'autoplay-advances-to-next-approved' (($null -ne $afterAuto) -and ($afterAuto.videoId -ne $beforeAuto.videoId)) "queue $($beforeAuto.videoId) -> $($afterAuto.videoId) (reached $($afterAuto.positionSec)s of $($beforeAuto.durationSec)s)"
             Record 'autoplay-stays-in-same-source' (($null -ne $afterAuto) -and ($afterAuto.playlistId -eq $beforeAuto.playlistId))
             Shot '21-autoplay'
         } else {
@@ -533,7 +542,7 @@ if ($opened) {
         } elseif ($endAfter.videoId -ne $endBefore.videoId) {
             Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
         } else {
-            Record 'end-of-video-handling' $false "still on $($endAfter.videoId) long after the video ended"
+            Record 'end-of-video-handling' $false "still on $($endAfter.videoId) at $($endAfter.positionSec)s of $($endAfter.durationSec)s after waiting"
         }
     } else {
         Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
