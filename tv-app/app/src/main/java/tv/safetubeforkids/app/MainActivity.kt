@@ -9,6 +9,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.HomeWatcherService
+import tv.safetubeforkids.app.server.ServerService
 import tv.safetubeforkids.app.server.SafeTubeServer
 import tv.safetubeforkids.app.ui.navigation.AppNavigation
 import tv.safetubeforkids.app.ui.theme.SafeTubeTheme
