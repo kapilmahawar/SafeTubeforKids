@@ -284,6 +284,14 @@ for ($i = 0; $i -lt 3; $i++) {
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 2
 }
+# YouTube throttles anonymous watch access from an IP that has asked too often, and then every
+# video resolution fails with LOGIN_REQUIRED. Nothing is wrong with the app or with the remote, so
+# name the cause here: for two rounds this read as "the remote cannot start a video", and the fix
+# looked like harness state when the real answer was in one log line.
+if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'LOGIN_REQUIRED') {
+    Log 'NOTE: YouTube is refusing anonymous watch access from this IP (LOGIN_REQUIRED) - playback phases will fail for that reason, not because of the app'
+}
+
 Log "=== navigate with D-pad only ==="
 function PlayingNow {
     $s = ApiState
