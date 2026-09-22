@@ -38,7 +38,7 @@ import tv.safetubeforkids.app.ui.theme.KidSurface
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
 
-private val CardShape = RoundedCornerShape(12.dp)
+private val CardShape = RoundedCornerShape(20.dp)
 
 @Composable
 fun VideoCard(
@@ -47,16 +47,16 @@ fun VideoCard(
     modifier: Modifier = Modifier,
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (isFocused) 1.05f else 1f, label = "scale")
+    val scale by animateFloatAsState(if (isFocused) 1.07f else 1f, label = "scale")
 
     Column(
         modifier = modifier
-            .width(200.dp)
+            .width(300.dp)
             .scale(scale)
             .clip(CardShape)
-            .background(if (isFocused) KidSurface.copy(alpha = 0.9f) else KidSurface.copy(alpha = 0.5f))
+            .background(if (isFocused) KidSurface.copy(alpha = 0.96f) else KidSurface.copy(alpha = 0.55f))
             .then(
-                if (isFocused) Modifier.border(2.dp, KidFocusRing, CardShape)
+                if (isFocused) Modifier.border(4.dp, KidFocusRing, CardShape)
                 else Modifier
             )
             .onFocusChanged { isFocused = it.isFocused }
@@ -75,29 +75,29 @@ fun VideoCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
+                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
             )
             // Duration badge
             if (video.durationSeconds > 0) {
                 Text(
                     text = formatDuration(video.durationSeconds),
-                    fontSize = 11.sp,
+                    fontSize = 14.sp,
                     color = KidText,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(4.dp)
+                        .padding(8.dp)
                         .background(KidSurface.copy(alpha = 0.85f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
         }
         Text(
             text = video.title,
-            style = MaterialTheme.typography.bodySmall,
+            style = MaterialTheme.typography.titleSmall,
             color = if (isFocused) KidText else KidTextDim,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(8.dp),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
         )
     }
 }
