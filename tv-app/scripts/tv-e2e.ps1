@@ -108,6 +108,29 @@ function Get-RemoteActions {
     return @([regex]::Matches($lines, 'Remote key -> (\w+)') | ForEach-Object { $_.Groups[1].Value })
 }
 
+function ForegroundPackage {
+    $line = (Adb @('shell', "dumpsys activity activities | grep -m1 mResumedActivity")) -join ''
+    if ($line -match '([A-Za-z0-9_.]+)/[A-Za-z0-9_.$]+') { return $Matches[1] }
+    return ''
+}
+
+# A phase must never run against a headless app: if the activity is gone, saying so is part of
+# the result. Relaunch so the phase can still execute, and report whether it was already there.
+function EnsureApp([string]$phase) {
+    $foreground = (ForegroundPackage) -eq $pkg
+    if ($foreground) { return $true }
+    Log "  app was NOT foreground at '$phase' - relaunching before continuing"
+    Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
+    Start-Sleep -Seconds 20
+    $recovered = (ForegroundPackage) -eq $pkg
+    if ($recovered) { Log "  app recovered for '$phase'" }
+    return $false
+}
+
+function PlayVideo([string]$videoId, [string]$sourceId) {
+    Adb @('shell', "am broadcast -a $pkg.DEBUG_PLAY_VIDEO -p $pkg --es video_id $videoId --es playlist_id $sourceId") | Out-Null
+}
+
 # ---------------------------------------------------------------- device identity
 Log "=== device identity ==="
 $devices = (Adb @('devices', '-l')) -join "`n"
@@ -176,9 +199,18 @@ $pin = ([regex]::Match($pinLine, '"pin":"(\d{6})"')).Groups[1].Value
 Log "dashboard pin acquired: $($pin -ne '')"
 $headers = @{}
 if ($pin) {
-    $auth = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/auth" -Method Post `
-        -Body (@{ pin = $pin } | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 15
-    if ($auth.token) { $headers['Authorization'] = "Bearer $($auth.token)" }
+    # The embedded server can refuse a connection right after launch; retry before giving up,
+    # and never let a transient failure abort the whole run.
+    foreach ($attempt in 1..3) {
+        try {
+            $auth = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/auth" -Method Post `
+                -Body (@{ pin = $pin } | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 20
+            if ($auth.token) { $headers['Authorization'] = "Bearer $($auth.token)"; break }
+        } catch {
+            Log "  auth attempt ${attempt} failed: $($_.Exception.Message)"
+            Start-Sleep -Seconds 4
+        }
+    }
 }
 function ApiState {
     if (-not $headers.ContainsKey('Authorization')) { return $null }
@@ -237,14 +269,20 @@ if ($opened) {
     Log "  playing $videoId from source $sourceId ($sourceCount approved videos)"
 
     # Wait until playback is genuinely running (playhead advancing) before asserting controls,
-    # otherwise a pause press would land while the video is still buffering.
+    # otherwise a pause press would land while the video is still buffering. A resume prompt is
+    # legitimate here (the previous run left a position), so dismiss it to reach playback.
     $running = $false
-    for ($attempt = 0; $attempt -lt 12; $attempt++) {
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
         Start-Sleep -Seconds 2
         $snapshot = PlayingNow
         if ($snapshot -and $snapshot.playing -eq $true -and [int]$snapshot.positionSec -gt 0) {
             $running = $true
             break
+        }
+        if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+            Log '  resume prompt is open - choosing Resume so the control tests have a live player'
+            Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 5
         }
     }
     Record 'playback-running' $running
@@ -289,18 +327,25 @@ if ($opened) {
     # button, OK opens it, UP/DOWN pick an option, OK applies, BACK closes it.
     $menuLog = { (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n" }
 
-    # Subtitles are per-video: open the multi-video playlist row so the tested video actually
-    # has caption tracks (the single-video source has none).
+    $fgMenus = EnsureApp 'menus'
+    Record 'app-foreground-at-menus' $fgMenus
+
+    # Subtitles are per-video: play a video from the multi-video playlist that has caption
+    # tracks (the single-video source has none).
     $captionsVideo = $false
     if ($sourceCount -le 1) {
-        Key 'KEYCODE_BACK'
-        Start-Sleep -Seconds 3
-        Key 'KEYCODE_DPAD_DOWN'
-        Key 'KEYCODE_DPAD_DOWN'
-        Key 'KEYCODE_DPAD_CENTER'
-        Start-Sleep -Seconds 14
+        # Clear the log first so the resume-prompt check below only sees this phase.
+        Adb @('logcat', '-c') | Out-Null
+        PlayVideo 'e_04ZrNroTo' 'PLT1rvk7Trkw5qNnjS-y7-0FZQOsdQOvHT'
+        Start-Sleep -Seconds 18
+        # A resume prompt may legitimately appear first; clear it so the menu tests are clean.
+        if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+            Log '  resume prompt opened first - continuing playback before the caption test'
+            Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 5
+        }
         $captionsVideo = $null -ne (PlayingNow)
-        Log "  re-opened a playlist video for the caption test: $captionsVideo"
+        Log "  opened a playlist video for the caption test: $captionsVideo"
     } else {
         $captionsVideo = $true
     }
@@ -359,6 +404,54 @@ if ($opened) {
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 1
 
+    # --- resume (deterministic setup via the debug play intent) ---
+    $fgResume = EnsureApp 'resume'
+    Record 'app-foreground-at-resume' $fgResume
+
+    $resumeVideo = '9Yq08C8UIHw'
+    PlayVideo $resumeVideo $resumeVideo
+    Start-Sleep -Seconds 16
+    foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }   # ~40s in
+    Start-Sleep -Seconds 14                              # let the periodic save happen
+    $posBefore = [int](PlayingNow).positionSec
+    Key 'KEYCODE_BACK'
+    Start-Sleep -Seconds 5
+    Record 'resume-remembers-position' ($posBefore -gt 20) "left at ${posBefore}s"
+
+    PlayVideo $resumeVideo $resumeVideo
+    Start-Sleep -Seconds 18
+    Record 'resume-prompt-appears' (((& $menuLog)) -match 'Menu opened: RESUME')
+    Shot '15-resume-prompt'
+
+    Key 'KEYCODE_DPAD_CENTER'                            # first option is "Resume from ..."
+    Start-Sleep -Seconds 6
+    $posAfter = [int](PlayingNow).positionSec
+    Record 'resume-continues-position' ([Math]::Abs($posAfter - $posBefore) -lt 20) "resumed at ${posAfter}s (left at ${posBefore}s)"
+    Record 'resume-choice-applied' (((& $menuLog)) -match 'Resume chosen')
+    Shot '16-resumed'
+
+    # start over on the same video (no BACK here: if the player is already gone, BACK would
+    # leave the app entirely and poison every later phase)
+    PlayVideo $resumeVideo $resumeVideo
+    Start-Sleep -Seconds 18
+    Key 'KEYCODE_DPAD_DOWN'                              # second option is "Start over"
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 6
+    $posRestart = [int](PlayingNow).positionSec
+    Record 'resume-start-over' (((& $menuLog)) -match 'Start over chosen')
+    Record 'start-over-begins-at-zero' ($posRestart -lt 15) "restarted at ${posRestart}s"
+
+    # --- security: an unapproved video id must never reach the player ---
+    $fgSecurity = EnsureApp 'security'
+    Record 'app-foreground-at-security' $fgSecurity
+    PlayVideo 'dQw4w9WgXcQ' 'dQw4w9WgXcQ'
+    Start-Sleep -Seconds 10
+    Record 'unapproved-video-blocked' (((& $menuLog)) -match 'Blocked playback of unapproved video')
+    Record 'unapproved-video-not-playing' ($null -eq (PlayingNow))
+    Shot '17-unapproved-blocked'
+    Key 'KEYCODE_BACK'
+    Start-Sleep -Seconds 3
+
     # --- approved-queue navigation ----------------------------------
     # Recompute the queue size for whatever is playing now (the caption step may have switched
     # to a video from the multi-video playlist).
@@ -415,9 +508,25 @@ Record 'survives-home-return' $alive
 
 # ---------------------------------------------------------------- logs + crash check
 Adb @('logcat', '-d') | Set-Content (Join-Path $out 'logcat.txt')
-$logcat = Get-Content (Join-Path $out 'logcat.txt') -Raw
-$crash = $logcat -match 'FATAL EXCEPTION' -or $logcat -match 'ANR in tv.parentapproved'
-Record 'no-crash-or-anr' (-not $crash)
+$logcatLines = Get-Content (Join-Path $out 'logcat.txt')
+$fatalIndex = -1
+for ($i = 0; $i -lt $logcatLines.Count; $i++) {
+    if ($logcatLines[$i] -match 'FATAL EXCEPTION') { $fatalIndex = $i; break }
+}
+if ($fatalIndex -ge 0) {
+    # Persist the trace next to the run so a wrapped logcat buffer cannot hide it.
+    $from = [Math]::Max(0, $fatalIndex - 4)
+    $to = [Math]::Min($logcatLines.Count - 1, $fatalIndex + 45)
+    $logcatLines[$from..$to] | Set-Content (Join-Path $out 'crash.txt')
+    Log '  CRASH TRACE captured in crash.txt'
+}
+$appCrash = $false
+if ($fatalIndex -ge 0) {
+    # Only a crash belonging to this app counts; the TV logs unrelated processes too.
+    $window = $logcatLines[$fatalIndex..([Math]::Min($logcatLines.Count - 1, $fatalIndex + 45))] -join "`n"
+    $appCrash = $window -match 'tv\.parentapproved'
+}
+Record 'no-app-crash' (-not $appCrash)
 Shot '08-final'
 
 # ---------------------------------------------------------------- summary

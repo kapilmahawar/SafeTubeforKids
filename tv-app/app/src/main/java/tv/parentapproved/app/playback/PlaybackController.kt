@@ -19,6 +19,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import tv.parentapproved.app.ServiceLocator
 import tv.parentapproved.app.data.cache.CacheDatabase
+import tv.parentapproved.app.data.cache.PlaybackPositionEntity
 import tv.parentapproved.app.data.events.PlayEventRecorder
 import tv.parentapproved.app.data.models.VideoItem
 import tv.parentapproved.app.timelimits.TimeLimitStatus
@@ -115,6 +116,16 @@ class PlaybackController(
     private var selectedCaptionTag: String? = null
     private var forcedQualityHeight: Int? = null
     private var forcedAudioBitrate: Int? = null
+    private var resumePositionMs: Long = 0L
+    private var released = false
+
+    private companion object {
+        /** Below this, restarting is more natural than resuming. */
+        const val RESUME_MIN_MS = 20_000L
+
+        /** At or beyond this fraction the video counts as finished, not resumable. */
+        const val RESUME_MAX_PERCENT = 95
+    }
 
     private var queue: List<VideoItem> = emptyList()
     private var index = 0
@@ -147,10 +158,29 @@ class PlaybackController(
         })
 
         // Publish the playhead so remote behaviour is observable from the status API.
+        // Never touch a released player: these loops outlive the screen by a few frames, and
+        // an uncaught exception in a composition-scoped coroutine would take the app down.
         scope.launch {
-            while (true) {
-                PlayEventRecorder.currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+            while (!released) {
+                try {
+                    PlayEventRecorder.currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                } catch (e: Exception) {
+                    AppLogger.warn("Playhead loop stopped: ${e.message}")
+                    return@launch
+                }
                 delay(500)
+            }
+        }
+
+        // Persist the playhead so "resume" survives leaving the video or restarting the app.
+        scope.launch {
+            while (!released) {
+                delay(10_000)
+                try {
+                    savePosition()
+                } catch (e: Exception) {
+                    AppLogger.warn("Position save loop error: ${e.message}")
+                }
             }
         }
     }
@@ -168,6 +198,10 @@ class PlaybackController(
                 // Security boundary: never resolve or prepare media for anything unapproved.
                 errorMessage = "This video can't be played"
                 AppLogger.warn("Playback rejected: ${approval.reason}")
+                // Nothing is playing, so the status API must stop reporting the previous video.
+                PlayEventRecorder.endEvent(0, 0)
+                currentVideoId = ""
+                resolved = null
                 return
             }
             is PlaybackApproval.Approved -> {
@@ -205,6 +239,26 @@ class PlaybackController(
         if (selectedCaptionTag != null && media.captions.none { it.languageTag == selectedCaptionTag }) {
             selectedCaptionTag = null
             captionsLabel = "Off"
+        }
+
+        // Resume: offer to continue where the child left off, unless the video was finished.
+        resumePositionMs = 0L
+        if (restorePositionMs == 0L) {
+            val saved = try {
+                withContext(Dispatchers.IO) { db.playbackPositionDao().get(videoId) }
+            } catch (e: Exception) {
+                null
+            }
+            val durationMs = media.durationMs
+            if (saved != null && saved.positionMs >= RESUME_MIN_MS) {
+                if (durationMs > 0 && saved.positionMs >= durationMs * RESUME_MAX_PERCENT / 100) {
+                    withContext(Dispatchers.IO) { db.playbackPositionDao().delete(videoId) }
+                    AppLogger.log("Previous session reached the end of $videoId - starting over")
+                } else {
+                    resumePositionMs = saved.positionMs
+                    AppLogger.log("Resumable position for $videoId: ${saved.positionMs / 1000}s")
+                }
+            }
         }
 
         val queueItem = queue.getOrNull(index)
@@ -247,6 +301,12 @@ class PlaybackController(
             scope.launch {
                 delay(600)
                 applyCaptionSelection()
+            }
+
+            if (resumePositionMs > 0L) {
+                // Ask instead of guessing, and stay paused so nothing plays under the prompt.
+                player.pause()
+                openMenu(PlayerMenu.RESUME)
             }
         } catch (e: Exception) {
             AppLogger.error("Preparing playback failed: ${e.message}")
@@ -302,6 +362,7 @@ class PlaybackController(
         if (player.playWhenReady) {
             player.pause()
             PlayEventRecorder.onPause()
+            savePosition()
         } else {
             player.play()
             PlayEventRecorder.onResume()
@@ -336,10 +397,14 @@ class PlaybackController(
     }
 
     fun release() {
+        // Order matters: persist while the player is still alive, then stop the background
+        // loops, and only then release the player they were reading from.
+        savePosition()
         if (playStartTime > 0) {
             val elapsed = elapsedSeconds()
             if (elapsed > 0) PlayEventRecorder.endEvent(elapsed, currentPercent())
         }
+        released = true
         player.release()
     }
 
@@ -348,6 +413,7 @@ class PlaybackController(
     fun openMenu(menu: PlayerMenu) {
         activeMenu = menu
         menuTitle = when (menu) {
+            PlayerMenu.RESUME -> "Continue watching?"
             PlayerMenu.CAPTIONS -> "Subtitles"
             PlayerMenu.QUALITY -> "Video quality"
             PlayerMenu.AUDIO -> "Audio"
@@ -359,11 +425,23 @@ class PlaybackController(
     }
 
     fun closeMenu() {
+        if (activeMenu == PlayerMenu.RESUME && resumePositionMs > 0L) {
+            // Dismissing the prompt means "carry on watching", not "sit there paused".
+            player.seekTo(resumePositionMs)
+            player.play()
+            AppLogger.log("Resume prompt dismissed - continuing at ${resumePositionMs / 1000}s")
+            resumePositionMs = 0L
+        }
         activeMenu = null
         menuOptions = emptyList()
     }
 
     private fun buildOptions(menu: PlayerMenu): List<PlayerOption> = when (menu) {
+        PlayerMenu.RESUME -> listOf(
+            PlayerOption("resume", "Resume from ${formatClock(resumePositionMs)}", true),
+            PlayerOption("restart", "Start over", false),
+        )
+
         PlayerMenu.CAPTIONS -> {
             val captions = resolved?.captions.orEmpty()
             if (captions.isEmpty()) {
@@ -426,6 +504,22 @@ class PlaybackController(
 
     fun selectMenuOption(id: String) {
         val menu = activeMenu ?: return
+
+        if (menu == PlayerMenu.RESUME) {
+            if (id == "restart") {
+                player.seekTo(0)
+                scope.launch(Dispatchers.IO) { db.playbackPositionDao().delete(currentVideoId) }
+                AppLogger.log("Start over chosen for $currentVideoId")
+            } else {
+                player.seekTo(resumePositionMs)
+                AppLogger.log("Resume chosen: ${resumePositionMs / 1000}s into $currentVideoId")
+            }
+            player.play()
+            resumePositionMs = 0L
+            closeMenu()
+            return
+        }
+
         when {
             id == "none" -> Unit
 
@@ -589,6 +683,41 @@ class PlaybackController(
 
     private fun updateQueueLabel() {
         queueLabel = if (queue.isEmpty()) null else "${index + 1} of ${queue.size}"
+    }
+
+    /** Persists the playhead for resume. Called periodically, on pause and on leaving. */
+    private fun savePosition() {
+        val videoId = currentVideoId
+        if (videoId.isBlank()) return
+        val position = player.currentPosition
+        if (position <= 0L) return
+        val reported = player.duration
+        val durationMs = if (reported == C.TIME_UNSET || reported < 0) {
+            resolved?.durationMs ?: 0L
+        } else {
+            reported
+        }
+        scope.launch(Dispatchers.IO) {
+            try {
+                db.playbackPositionDao().upsert(
+                    PlaybackPositionEntity(
+                        videoId = videoId,
+                        positionMs = position,
+                        durationMs = durationMs,
+                        updatedAt = System.currentTimeMillis(),
+                    )
+                )
+            } catch (e: Exception) {
+                AppLogger.warn("Could not persist position for $videoId: ${e.message}")
+            }
+        }
+    }
+
+    private fun formatClock(ms: Long): String {
+        val totalSeconds = (ms / 1000).coerceAtLeast(0)
+        val minutes = totalSeconds / 60
+        val seconds = totalSeconds % 60
+        return "%d:%02d".format(minutes, seconds)
     }
 
     private fun elapsedSeconds(): Int = ((System.currentTimeMillis() - playStartTime) / 1000).toInt()

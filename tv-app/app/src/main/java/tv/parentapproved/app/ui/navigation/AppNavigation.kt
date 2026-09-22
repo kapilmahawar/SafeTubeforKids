@@ -1,11 +1,13 @@
 package tv.parentapproved.app.ui.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import tv.parentapproved.app.debug.DebugReceiver
 import tv.parentapproved.app.ui.screens.ConnectScreen
 import tv.parentapproved.app.ui.screens.HomeScreen
 import tv.parentapproved.app.ui.screens.LockScreen
@@ -33,6 +35,27 @@ fun AppNavigation() {
         }
     }
 
+    // Wire the debug play/stop intents (debug builds only - DebugReceiver ignores them in
+    // release). Without this the DEBUG_PLAY_VIDEO broadcast reported success but did nothing,
+    // which made automated device testing far harder than it needed to be.
+    DisposableEffect(navController) {
+        DebugReceiver.onPlayVideo = { videoId, playlistId ->
+            // Keep exactly one player entry: a stacked player would stay alive behind the new
+            // one, keep playing and keep writing the shared now-playing state.
+            navController.navigate(Routes.playback(videoId, playlistId.ifBlank { videoId }, 0)) {
+                launchSingleTop = true
+                popUpTo(Routes.HOME) { inclusive = false }
+            }
+        }
+        DebugReceiver.onStopPlayback = {
+            navController.popBackStack(Routes.HOME, inclusive = false)
+        }
+        onDispose {
+            DebugReceiver.onPlayVideo = null
+            DebugReceiver.onStopPlayback = null
+        }
+    }
+
     NavHost(navController = navController, startDestination = Routes.HOME) {
         composable(Routes.CONNECT) {
             ConnectScreen(onBack = { navController.popBackStack() })
@@ -41,7 +64,10 @@ fun AppNavigation() {
         composable(Routes.HOME) {
             HomeScreen(
                 onPlayVideo = { videoId, playlistId, videoIndex ->
-                    navController.navigate(Routes.playback(videoId, playlistId, videoIndex))
+                    navController.navigate(Routes.playback(videoId, playlistId, videoIndex)) {
+                        launchSingleTop = true
+                        popUpTo(Routes.HOME) { inclusive = false }
+                    }
                 },
                 onSettings = {
                     navController.navigate(Routes.SETTINGS)

@@ -2,6 +2,7 @@ package tv.parentapproved.app.playback
 
 /** TV player menus. Each one opens an overlay list that BACK closes before leaving the player. */
 enum class PlayerMenu {
+    RESUME,
     CAPTIONS,
     QUALITY,
     AUDIO,

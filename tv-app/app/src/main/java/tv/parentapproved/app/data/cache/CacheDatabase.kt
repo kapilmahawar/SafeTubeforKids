@@ -10,8 +10,8 @@ import tv.parentapproved.app.data.events.PlayEventDao
 import tv.parentapproved.app.data.events.PlayEventEntity
 
 @Database(
-    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class],
-    version = 5,
+    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class],
+    version = 6,
     exportSchema = false,
 )
 abstract class CacheDatabase : RoomDatabase() {
@@ -21,6 +21,7 @@ abstract class CacheDatabase : RoomDatabase() {
     abstract fun timeLimitDao(): TimeLimitDao
     abstract fun kioskDao(): KioskDao
     abstract fun whitelistDao(): WhitelistDao
+    abstract fun playbackPositionDao(): PlaybackPositionDao
 
     companion object {
         @Volatile
@@ -150,6 +151,22 @@ abstract class CacheDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Resume positions: one row per approved video.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS playback_positions (
+                        videoId TEXT NOT NULL PRIMARY KEY,
+                        positionMs INTEGER NOT NULL,
+                        durationMs INTEGER NOT NULL,
+                        updatedAt INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): CacheDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -157,7 +174,7 @@ abstract class CacheDatabase : RoomDatabase() {
                     CacheDatabase::class.java,
                     "parentapproved_cache"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .build()
                 INSTANCE = instance
                 instance

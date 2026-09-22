@@ -347,7 +347,6 @@ fun TvPlayerScreen(
                     .align(Alignment.CenterEnd)
                     .padding(end = 48.dp),
             )
-            AppLogger.log("Menu shown: ${menu.name}")
         }
 
         warningText?.let { warning ->
@@ -547,6 +546,8 @@ private val menuButtons = listOf(
 )
 
 private fun labelFor(menu: PlayerMenu, controller: PlaybackController): String = when (menu) {
+    // Not in the settings row: the resume prompt is shown automatically when relevant.
+    PlayerMenu.RESUME -> "Continue"
     PlayerMenu.CAPTIONS -> "Subtitles: ${controller.captionsLabel}"
     PlayerMenu.QUALITY -> "Quality"
     PlayerMenu.AUDIO -> "Audio"
