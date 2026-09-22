@@ -202,6 +202,12 @@ Adb @('logcat', '-G', '16M') | Out-Null
 
 Log "=== launch ==="
 Adb @('logcat', '-c') | Out-Null
+# Start from a clean UI state. Resuming onto whatever screen and focus the previous run left behind -
+# the settings screen, the player, its error overlay, or a toolbar button holding focus - makes the
+# remote-only navigation phase drive the wrong screen, which reads as "the remote cannot play
+# anything" while playback is perfectly healthy. A fresh launch is also what a real install does.
+Adb @('shell', "am force-stop $pkg") | Out-Null
+Start-Sleep -Seconds 3
 Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
 Start-Sleep -Seconds $LaunchWaitSec
 

@@ -165,3 +165,13 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   registered with `RECEIVE_BOOT_COMPLETED` declared. What is NOT verified is a real reboot: the
   shell is not allowed to send `BOOT_COMPLETED` (`am broadcast` refuses), so the only honest test is
   power-cycling the TV and checking `http://172.16.1.2:8080/status` before opening the app.
+- **When every resolution fails, suspect YouTube, not the app.** A long day of automated runs ended
+  with the suite reporting `dpad-opens-approved-video` FAIL and "the remote cannot play anything",
+  which looked like a regression at the same commit that had just passed 39/39. The log held the
+  answer: `Resolution failed for ...: YouTube probably temporarily blocked anonymous watch access
+  with this IP, got error LOGIN_REQUIRED: "Sign in to confirm that you're not a bot"`. The
+  child-facing behaviour was correct throughout - the player showed "Couldn't play this video" with
+  Retry/Back, which is the error path it is supposed to show - and the approved library was
+  untouched. Waited out, it recurs. Before blaming the app, grep the log for `LOGIN_REQUIRED`, and
+  note that the harness still reports this as a navigation failure rather than as BLOCKED with the
+  real reason.
