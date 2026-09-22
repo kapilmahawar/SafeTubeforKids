@@ -269,8 +269,12 @@ Log "  library ready before navigating: $libraryReady"
 for ($i = 0; $i -lt 3; $i++) {
     Adb @('shell', 'uiautomator dump /sdcard/ui.xml') | Out-Null
     $screenDump = (Adb @('shell', 'cat /sdcard/ui.xml')) -join ' '
-    if ($screenDump -notmatch 'Current PIN|TV Info') { break }
-    Log '  a parent screen was restored - returning to the library before driving the remote'
+    # The library is the only screen carrying both of these. Anything else - a parent screen, the
+    # player, or the player's error overlay - has to be backed out of first, or the remote is driving
+    # the wrong UI: on the error screen the D-pad belongs to Retry/Back, so no sequence can ever
+    # start a video and the run reads as "playback is broken" while playback is fine.
+    if ($screenDump -match 'SafeTube for Kids' -and $screenDump -match 'Refresh') { break }
+    Log '  the app was restored onto another screen - returning to the library first'
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 2
 }
