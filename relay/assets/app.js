@@ -1,1 +1,0 @@
-../../tv-app/app/src/main/assets/app.js

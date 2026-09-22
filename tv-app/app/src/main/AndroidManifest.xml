@@ -17,7 +17,7 @@
     <application
         android:name=".ParentApprovedApp"
         android:allowBackup="true"
-        android:label="ParentApproved"
+        android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@style/Theme.ParentApprovedTV"
         android:banner="@drawable/banner"
