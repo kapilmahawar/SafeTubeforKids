@@ -53,6 +53,9 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   Retry/Back; unauthenticated `GET`/`POST /playlists` return 401; a `VIEW` deep link is not
   handled by the app; a URL passed as an activity extra starts nothing; the child-facing library
   exposes no search, no URL entry and no source editing.
+- Dashboard: the TV serves its own dashboard at `/` and that response, plus `app.js` and
+  `style.css`, are byte-identical to this repo's assets; every `getElementById` target resolves. The
+  user confirmed **Export list** works in a browser.
 - Stability: no crash or ANR across full runs.
 - Device-free: `SeekStepTest` (escalation curve 10→20→30→60→120s), `SourceTransferTest` (export
   shape, bare array, unreadable payloads, refusal reasons, duplicate collapsing).
@@ -65,8 +68,14 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
    change needs either the user's eyes or a UI-dump check of the text/structure.
 2. ~~Remote key-repeat~~ — settled: confirmed by the user on the real remote.
 3. **Export/import browser buttons** — server side verified on the device (`export` returned both
-   sources; re-import gave `skipped=2, added=0`; junk gave per-item refusal reasons). The
-   dashboard buttons need a phone browser.
+   sources; re-import gave `skipped=2, added=0`; junk gave per-item refusal reasons). The static
+   half is now verified too: the TV serves its dashboard at `/` (note `/index.html` is a 404 by
+   design — `DashboardRoutes` serves the HTML at the root and assets at `/$file`) and that response
+   is byte-identical to `assets/index.html`; `app.js` and `style.css` are byte-identical as well, so
+   the device runs exactly the dashboard in this repo. Every one of the 61 `getElementById` targets
+   exists in the HTML and `showTransfer(message, isError)` matches its call sites, so the buttons are
+   wired. **Export list** was then confirmed working by the user in a real browser, which closes
+   that half end to end. The import half still awaits a human tap and an OS file-picker choice.
 4. ~~Stale release asset~~ — settled: the old release was deleted and `v0.9.3` carries
    `SafeTubeforKids-0.9.3-debug.apk`.
 5. **Latent, unproven** — a duplicate `Dashboard server started` line appeared once after an

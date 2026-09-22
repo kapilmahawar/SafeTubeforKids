@@ -304,6 +304,10 @@ if ($opened) {
     # otherwise a pause press would land while the video is still buffering. A resume prompt is
     # legitimate here (the previous run left a position), so dismiss it to reach playback.
     $running = $false
+    # Only lines written from here on can say whether a prompt is live right now: a buffer-wide
+    # match keeps finding the previous phase's prompt, and an OK sent to a player with no prompt
+    # merely toggles play/pause.
+    $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     for ($attempt = 0; $attempt -lt 15; $attempt++) {
         Start-Sleep -Seconds 2
         $snapshot = PlayingNow
@@ -311,9 +315,11 @@ if ($opened) {
             $running = $true
             break
         }
-        if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $logBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') {
             Log '  resume prompt is open - choosing Resume so the control tests have a live player'
             Key 'KEYCODE_DPAD_CENTER'
+            $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
             Start-Sleep -Seconds 5
         }
     }
@@ -495,29 +501,50 @@ if ($opened) {
     Start-Sleep -Seconds 5
     Record 'resume-remembers-position' ($posBefore -gt 20) "left at ${posBefore}s"
 
+    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     PlayVideo $resumeVideo $resumeVideo
-    Start-Sleep -Seconds 18
-    Record 'resume-prompt-appears' (((& $menuLog)) -match 'Menu opened: RESUME')
+    # The prompt answers itself after 10s - a deliberate rule: no choice means start from the
+    # beginning - so it has to be answered the moment it appears. A fixed sleep longer than that
+    # window measures the start-over rule rather than the resume choice.
+    $promptSeen = $false
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 500
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') { $promptSeen = $true; break }
+    }
+    Record 'resume-prompt-appears' $promptSeen
     Shot '15-resume-prompt'
 
-    Key 'KEYCODE_DPAD_CENTER'                            # first option is "Resume from ..."
-    Start-Sleep -Seconds 6
+    Key 'KEYCODE_DPAD_CENTER'                            # the prompt opens on "Resume from ..."
+    Start-Sleep -Seconds 4
     $posAfter = [int](PlayingNow).positionSec
+    $resumeSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+    # Without this, a choice sent late would let the start-over rule satisfy the assertion below.
+    $answeredInTime = $resumeSlice -notmatch 'No resume choice'
     Record 'resume-continues-position' (($posBefore -gt 20) -and ([Math]::Abs($posAfter - $posBefore) -lt 20)) "resumed at ${posAfter}s (left at ${posBefore}s)"
-    Record 'resume-choice-applied' (((& $menuLog)) -match 'Resume chosen')
+    Record 'resume-choice-applied' ($answeredInTime -and (((& $menuLog)) -match 'Resume chosen'))
     Shot '16-resumed'
 
     # start over on the same video (no BACK here: if the player is already gone, BACK would
     # leave the app entirely and poison every later phase)
+    $restartLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     PlayVideo $resumeVideo $resumeVideo
-    Start-Sleep -Seconds 18
+    $promptAgain = $false
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 500
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') { $promptAgain = $true; break }
+    }
     Key 'KEYCODE_DPAD_DOWN'                              # second option is "Start over"
     Key 'KEYCODE_DPAD_CENTER'
-    Start-Sleep -Seconds 6
+    Start-Sleep -Seconds 4
     $posRestart = [int](PlayingNow).positionSec
-        $startOverOk = ((& $menuLog)) -match 'Start over chosen'
+        $restartSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
+        # The 10s auto-restart logs the very same "Start over chosen" line, so require that the
+        # prompt was live when the keys were sent - otherwise this passes for the wrong reason.
+        $startOverOk = ($promptAgain -and ($restartSlice -notmatch 'No resume choice') -and ($restartSlice -match 'Start over chosen'))
         Record 'resume-start-over' $startOverOk
-        Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and ($startOverOk)) "restarted at ${posRestart}s"
+        Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and $startOverOk) "restarted at ${posRestart}s"
 
     # --- security: an unapproved video id must never reach the player ---
     $fgSecurity = EnsureApp 'security'

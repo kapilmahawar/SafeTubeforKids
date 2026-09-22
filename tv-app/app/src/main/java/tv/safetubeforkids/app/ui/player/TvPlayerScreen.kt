@@ -4,6 +4,7 @@ import android.view.KeyEvent
 import android.view.ViewGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Forward10
@@ -43,6 +45,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
@@ -148,6 +151,15 @@ fun TvPlayerScreen(
     }
 
     LaunchedEffect(Unit) { surfaceFocus.requestFocus() }
+
+    // A menu does not always open from the settings row - the resume prompt is raised by the
+    // controller - so the highlight must follow whichever menu is open. Left stale, it pointed OK
+    // at a row that does not exist in a two-option prompt, and pressing OK did nothing at all.
+    LaunchedEffect(controller.activeMenu) {
+        if (controller.activeMenu != null) {
+            optionIndex = controller.menuOptions.indexOfFirst { it.selected }.coerceAtLeast(0)
+        }
+    }
 
     Box(
         modifier = Modifier
@@ -300,7 +312,15 @@ fun TvPlayerScreen(
 
         if (isBuffering) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator(color = KidAccent, strokeWidth = 5.dp)
+                // A soft disc keeps the spinner legible over bright video.
+                Box(
+                    modifier = Modifier
+                        .size(104.dp)
+                        .background(Color.Black.copy(alpha = 0.45f), CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(color = KidAccent, strokeWidth = 5.dp)
+                }
             }
         }
 
@@ -308,12 +328,12 @@ fun TvPlayerScreen(
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Text(
                     text = badge,
-                    style = MaterialTheme.typography.headlineLarge,
-                    color = KidText,
-                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.headlineMedium,
+                    color = Color.Black,
+                    fontWeight = FontWeight.Bold,
                     modifier = Modifier
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-                        .padding(horizontal = 28.dp, vertical = 14.dp),
+                        .background(KidAccent, CircleShape)
+                        .padding(horizontal = 34.dp, vertical = 16.dp),
                 )
             }
         }
@@ -407,11 +427,16 @@ fun TvPlayerScreen(
 
 @Composable
 private fun TopBar(title: String, queueLabel: String?, modifier: Modifier = Modifier) {
+    // A gradient scrim instead of a solid slab: the video stays the focus, the title stays legible.
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.5f))
-            .padding(horizontal = 32.dp, vertical = 20.dp),
+            .background(
+                Brush.verticalGradient(
+                    listOf(Color.Black.copy(alpha = 0.72f), Color.Transparent),
+                ),
+            )
+            .padding(start = 40.dp, end = 40.dp, top = 28.dp, bottom = 48.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -425,8 +450,11 @@ private fun TopBar(title: String, queueLabel: String?, modifier: Modifier = Modi
             Spacer(Modifier.width(24.dp))
             Text(
                 text = label,
-                style = MaterialTheme.typography.titleMedium,
-                color = KidTextDim,
+                style = MaterialTheme.typography.labelLarge,
+                color = KidText,
+                modifier = Modifier
+                    .background(Color.White.copy(alpha = 0.16f), CircleShape)
+                    .padding(horizontal = 20.dp, vertical = 9.dp),
             )
         }
     }
@@ -439,61 +467,62 @@ private fun BottomBar(
     durationMs: Long,
     modifier: Modifier = Modifier,
 ) {
+    // One rounded deck instead of a full-width slab, so the video keeps its edges.
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(Color.Black.copy(alpha = 0.5f))
-            .padding(horizontal = 32.dp, vertical = 20.dp),
+            .padding(horizontal = 32.dp, vertical = 24.dp)
+            .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(22.dp))
+            .padding(horizontal = 26.dp, vertical = 20.dp),
     ) {
+        SeekBar(positionMs = positionMs, durationMs = durationMs)
+        Spacer(Modifier.height(16.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // Play/pause is the control a child reaches for, so it is the only filled disc.
+            Box(
+                modifier = Modifier
+                    .size(62.dp)
+                    .background(KidAccent, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                    contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = Color.Black,
+                    modifier = Modifier.size(38.dp),
+                )
+            }
+            Spacer(Modifier.width(24.dp))
             Icon(
                 imageVector = Icons.Rounded.Replay10,
                 contentDescription = "Rewind 10 seconds",
                 tint = KidText,
-                modifier = Modifier.size(34.dp),
+                modifier = Modifier.size(40.dp),
             )
-            Spacer(Modifier.width(16.dp))
-            Icon(
-                imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                contentDescription = if (isPlaying) "Pause" else "Play",
-                tint = KidText,
-                modifier = Modifier.size(42.dp),
-            )
-            Spacer(Modifier.width(16.dp))
+            Spacer(Modifier.width(20.dp))
             Icon(
                 imageVector = Icons.Rounded.Forward10,
                 contentDescription = "Forward 10 seconds",
                 tint = KidText,
-                modifier = Modifier.size(34.dp),
+                modifier = Modifier.size(40.dp),
             )
-            Spacer(Modifier.width(28.dp))
+            Spacer(Modifier.width(30.dp))
             Text(
                 text = formatTime(positionMs),
                 style = MaterialTheme.typography.titleMedium,
                 color = KidText,
+                fontWeight = FontWeight.SemiBold,
             )
-            Spacer(Modifier.width(20.dp))
-            SeekBar(
-                positionMs = positionMs,
-                durationMs = durationMs,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(Modifier.width(20.dp))
+            Spacer(Modifier.weight(1f))
             Text(
                 text = formatTime(durationMs),
                 style = MaterialTheme.typography.titleMedium,
-                color = KidText,
+                color = KidTextDim,
             )
         }
-        Spacer(Modifier.height(14.dp))
-        Text(
-            text = "Down  settings        Left / Right  seek 10s        OK  play or pause        Back  exit",
-            style = MaterialTheme.typography.bodyMedium,
-            color = KidTextDim,
-        )
     }
 }
 
@@ -508,14 +537,14 @@ private fun SeekBar(positionMs: Long, durationMs: Long, modifier: Modifier = Mod
     Canvas(
         modifier = modifier
             .fillMaxWidth()
-            .height(28.dp),
+            .height(32.dp),
     ) {
-        val barHeight = size.height * 0.28f
+        val barHeight = size.height * 0.32f
         val top = (size.height - barHeight) / 2f
         val radius = CornerRadius(barHeight / 2f, barHeight / 2f)
 
         drawRoundRect(
-            color = Color.White.copy(alpha = 0.28f),
+            color = Color.White.copy(alpha = 0.26f),
             topLeft = Offset(0f, top),
             size = Size(size.width, barHeight),
             cornerRadius = radius,
@@ -531,7 +560,7 @@ private fun SeekBar(positionMs: Long, durationMs: Long, modifier: Modifier = Mod
             )
         }
 
-        val knobRadius = size.height * 0.34f
+        val knobRadius = size.height * 0.30f
         val knobX = played.coerceIn(knobRadius, (size.width - knobRadius).coerceAtLeast(knobRadius))
         drawCircle(
             color = Color.White,
@@ -581,10 +610,15 @@ private fun MenuBar(controller: PlaybackController, active: Boolean, selectedInd
                 fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
                 modifier = Modifier
                     .background(
-                        color = if (highlighted) KidAccent else Color.White.copy(alpha = 0.14f),
-                        shape = RoundedCornerShape(10.dp),
+                        color = if (highlighted) KidAccent else Color.Black.copy(alpha = 0.55f),
+                        shape = CircleShape,
                     )
-                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                    .border(
+                        width = 1.dp,
+                        color = if (highlighted) Color.Transparent else Color.White.copy(alpha = 0.16f),
+                        shape = CircleShape,
+                    )
+                    .padding(horizontal = 22.dp, vertical = 11.dp),
             )
         }
     }
@@ -599,16 +633,17 @@ private fun PlayerMenuOverlay(
 ) {
     Column(
         modifier = modifier
-            .width(440.dp)
-            .background(Color.Black.copy(alpha = 0.9f), RoundedCornerShape(14.dp))
-            .padding(vertical = 18.dp),
+            .width(460.dp)
+            .background(Color.Black.copy(alpha = 0.92f), RoundedCornerShape(20.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(20.dp))
+            .padding(vertical = 20.dp),
     ) {
         Text(
             text = title,
             style = MaterialTheme.typography.titleLarge,
             color = KidText,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 26.dp, vertical = 8.dp),
         )
         Spacer(Modifier.height(6.dp))
         options.forEachIndexed { index, option ->
@@ -621,7 +656,7 @@ private fun PlayerMenuOverlay(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(if (highlighted) KidAccent else Color.Transparent)
-                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                    .padding(horizontal = 26.dp, vertical = 14.dp),
             )
         }
     }
