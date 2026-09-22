@@ -26,6 +26,8 @@ param(
     [string]$Adb = '',
     [string]$ApiHost = '',
     [switch]$SkipBuild,
+    [ValidateSet('smoke', 'player', 'full')]
+    [string]$Tier = 'full',
     [switch]$ClearState,
     [switch]$QualityProbe,
     [int]$LaunchWaitSec = 25
@@ -138,7 +140,7 @@ function PlayVideo([string]$videoId, [string]$sourceId) {
 }
 
 # ---------------------------------------------------------------- device identity
-Log "=== device identity ==="
+Log "=== device identity === (tier: $Tier)"
 $devices = (Adb @('devices', '-l')) -join "`n"
 if ($devices -notmatch [regex]::Escape($Serial)) {
     Log "device not attached - attempting adb connect $Serial"
@@ -337,6 +339,7 @@ if ($opened) {
     Start-Sleep -Milliseconds 900
     Shot '06-controls-shown'
 
+    if ($Tier -ne 'smoke') {
     # --- player menus (subtitles / quality / audio / speed / screen fit) ---
     # Menus are driven entirely from the remote: DOWN enters the button row, LEFT/RIGHT pick a
     # button, OK opens it, UP/DOWN pick an option, OK applies, BACK closes it.
@@ -506,6 +509,8 @@ if ($opened) {
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 3
 
+    }
+    if ($Tier -eq 'full') {
     # --- autoplay: a finished video must advance to the next APPROVED queue item ---------
     EnsureApp 'autoplay' | Out-Null
     Adb @('logcat', '-c') | Out-Null
@@ -749,6 +754,8 @@ Record 'no-app-crash' (-not $appCrash)
 Shot '08-final'
 
 # ---------------------------------------------------------------- summary
+    }
+
 Log "=== SUMMARY ==="
 Dump '09-final-ui'
 $script:results.GetEnumerator() | ForEach-Object { Log ("  {0,-30} {1}" -f $_.Key, $_.Value) }
