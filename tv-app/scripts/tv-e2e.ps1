@@ -409,7 +409,12 @@ if ($opened) {
     $fgResume = EnsureApp 'resume'
     Record 'app-foreground-at-resume' $fgResume
 
-    $resumeVideo = '9Yq08C8UIHw'
+    # Discover the test video from what is actually approved and playing rather than hardcoding
+    # an id: a parent may remove a source, and a stale id silently turns this phase into a
+    # series of vacuous passes.
+    $playingNow0 = PlayingNow
+    $resumeVideo = if ($playingNow0) { $playingNow0.videoId } else { $videoId }
+    Log "  resume test video: $resumeVideo"
     Adb @('logcat', '-c') | Out-Null
     PlayVideo $resumeVideo $resumeVideo
     Start-Sleep -Seconds 16

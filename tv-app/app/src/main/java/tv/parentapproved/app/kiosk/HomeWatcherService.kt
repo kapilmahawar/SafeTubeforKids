@@ -122,7 +122,7 @@ class HomeWatcherService : Service() {
         startForeground(
             NOTIFICATION_ID,
             NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("ParentApproved")
+                .setContentTitle("SafeTube for Kids")
                 .setContentText("Managing TV access")
                 .setSmallIcon(android.R.drawable.ic_lock_lock)
                 .setPriority(NotificationCompat.PRIORITY_MIN)

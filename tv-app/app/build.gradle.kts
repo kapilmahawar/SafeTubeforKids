@@ -23,7 +23,7 @@ android {
 
         buildConfigField("String", "RELAY_URL", "\"https://relay.parentapproved.tv\"")
         buildConfigField("int", "PROTOCOL_VERSION", "1")
-        buildConfigField("String", "VERSION_CHECK_URL", "\"https://parentapproved.tv/version.json\"")
+        buildConfigField("String", "VERSION_CHECK_URL", "\"\"")
     }
 
     signingConfigs {

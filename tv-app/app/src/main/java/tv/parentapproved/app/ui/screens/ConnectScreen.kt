@@ -184,7 +184,7 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
-                            text = "ParentApproved",
+                            text = "SafeTube for Kids",
                             style = MaterialTheme.typography.headlineMedium,
                             fontWeight = FontWeight.Bold,
                             fontFamily = NunitoSans,
@@ -257,7 +257,7 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
 
                     // Charityware
                     Text(
-                        text = "ParentApproved.tv is free, forever.",
+                        text = "SafeTube for Kids is free to use.",
                         style = MaterialTheme.typography.bodySmall,
                         color = KidTextDim,
                     )

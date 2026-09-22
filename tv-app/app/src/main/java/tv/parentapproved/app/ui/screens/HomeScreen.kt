@@ -142,7 +142,7 @@ fun HomeScreen(
                         Text("Videos", style = MaterialTheme.typography.headlineMedium, color = KidText)
                     }
                 } else {
-                    Text("ParentApproved", style = MaterialTheme.typography.headlineMedium, color = KidText)
+                    Text("SafeTube for Kids", style = MaterialTheme.typography.headlineMedium, color = KidText)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(

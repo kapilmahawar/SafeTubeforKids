@@ -146,7 +146,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.Top,
         ) {
             Text(
-                text = "ParentApproved.tv is free, forever.",
+                text = "SafeTube for Kids is free to use.",
                 style = MaterialTheme.typography.bodySmall,
                 color = KidTextDim,
             )

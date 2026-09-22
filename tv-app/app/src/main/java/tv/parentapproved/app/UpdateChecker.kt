@@ -53,6 +53,9 @@ class UpdateChecker(
     }
 
     internal suspend fun checkForUpdate(): VersionInfo? {
+        // Disabled (blank URL) until this fork publishes its own version manifest: pointing at
+        // upstream's would advertise releases that are not this app.
+        if (versionCheckUrl.isBlank()) return null
         return try {
             val request = Request.Builder().url(versionCheckUrl).build()
             val response = client.newCall(request).execute()
