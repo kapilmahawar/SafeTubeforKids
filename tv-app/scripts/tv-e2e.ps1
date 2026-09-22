@@ -24,6 +24,7 @@
 param(
     [string]$Serial = "172.16.1.2:5555",
     [string]$Adb = '',
+    [string]$ApiHost = '',
     [switch]$SkipBuild,
     [switch]$ClearState,
     [switch]$QualityProbe,
@@ -41,6 +42,10 @@ $adb = if ($Adb) {
     'adb'
 }
 $pkg = 'tv.safetubeforkids.app'
+# Where the dashboard answers: the TV's own address normally, or 127.0.0.1 when a remote
+# emulator's guest port has been tunnelled here with adb forward (a guest's 8080 is not exposed
+# on its host, so the emulator host address cannot be used directly).
+$apiHost = if ($ApiHost) { $ApiHost } else { $Serial.Split(':')[0] }
 $stamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'
 $out = Join-Path $repoRoot "test-results\tv\$stamp"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -204,7 +209,7 @@ if ($pin) {
     # and never let a transient failure abort the whole run.
     foreach ($attempt in 1..3) {
         try {
-            $auth = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/auth" -Method Post `
+            $auth = Invoke-RestMethod -Uri "http://$apiHost:8080/auth" -Method Post `
                 -Body (@{ pin = $pin } | ConvertTo-Json -Compress) -ContentType 'application/json' -TimeoutSec 20
             if ($auth.token) { $headers['Authorization'] = "Bearer $($auth.token)"; break }
         } catch {
@@ -215,7 +220,7 @@ if ($pin) {
 }
 function ApiState {
     if (-not $headers.ContainsKey('Authorization')) { return $null }
-    try { return Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/status" -Headers $headers -TimeoutSec 10 } catch { return $null }
+    try { return Invoke-RestMethod -Uri "http://$apiHost:8080/status" -Headers $headers -TimeoutSec 10 } catch { return $null }
 }
 
 Shot '01-library'
@@ -263,7 +268,7 @@ if ($opened) {
     $sourceId = $opened.playlistId
     $sourceCount = 0
     try {
-        $allSources = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Headers $headers -TimeoutSec 10
+        $allSources = Invoke-RestMethod -Uri "http://$apiHost:8080/playlists" -Headers $headers -TimeoutSec 10
         $match = $allSources | Where-Object { $_.sourceId -eq $sourceId } | Select-Object -First 1
         if ($match) { $sourceCount = [int]$match.videoCount }
     } catch { Log "  could not read source size: $($_.Exception.Message)" }
@@ -536,10 +541,10 @@ if ($opened) {
     $unauthRead = 0
     $unauthWrite = 0
     try {
-        Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -TimeoutSec 10 | Out-Null
+        Invoke-RestMethod -Uri "http://$apiHost:8080/playlists" -TimeoutSec 10 | Out-Null
     } catch { $unauthRead = $_.Exception.Response.StatusCode.value__ }
     try {
-        Invoke-WebRequest -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Method Post `
+        Invoke-WebRequest -Uri "http://$apiHost:8080/playlists" -Method Post `
             -Body '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}' -ContentType 'application/json' `
             -TimeoutSec 10 -UseBasicParsing | Out-Null
     } catch { $unauthWrite = $_.Exception.Response.StatusCode.value__ }
@@ -573,7 +578,7 @@ if ($opened) {
         $probeVideo = 'aqz-KE-bpKQ'
         $probeSourceId = $null
         try {
-            $added = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Method Post `
+            $added = Invoke-RestMethod -Uri "http://$apiHost:8080/playlists" -Method Post `
                 -Headers $headers -Body (@{ url = "https://www.youtube.com/watch?v=$probeVideo" } | ConvertTo-Json -Compress) `
                 -ContentType 'application/json' -TimeoutSec 20
             $probeSourceId = $added.id
@@ -612,7 +617,7 @@ if ($opened) {
             Shot '20-audio'
 
             try {
-                Invoke-WebRequest -Uri "http://$($Serial.Split(':')[0]):8080/playlists/$probeSourceId" -Method Delete `
+                Invoke-WebRequest -Uri "http://$apiHost:8080/playlists/$probeSourceId" -Method Delete `
                     -Headers $headers -TimeoutSec 20 -UseBasicParsing | Out-Null
                 Log '  removed the probe video again'
             } catch {
@@ -630,7 +635,7 @@ if ($opened) {
     $queueCount = 0
     if ($current) {
         try {
-            $sources = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Headers $headers -TimeoutSec 10
+            $sources = Invoke-RestMethod -Uri "http://$apiHost:8080/playlists" -Headers $headers -TimeoutSec 10
             $entry = $sources | Where-Object { $_.sourceId -eq $current.playlistId } | Select-Object -First 1
             if ($entry) { $queueCount = [int]$entry.videoCount }
         } catch { }
