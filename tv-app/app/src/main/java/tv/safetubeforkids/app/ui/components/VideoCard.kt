@@ -38,7 +38,7 @@ import tv.safetubeforkids.app.ui.theme.KidSurface
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
 
-private val CardShape = RoundedCornerShape(20.dp)
+private val CardShape = RoundedCornerShape(12.dp)
 
 @Composable
 fun VideoCard(
@@ -47,11 +47,11 @@ fun VideoCard(
     modifier: Modifier = Modifier,
 ) {
     var isFocused by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (isFocused) 1.07f else 1f, label = "scale")
+    val scale by animateFloatAsState(if (isFocused) 1.05f else 1f, label = "scale")
 
     Column(
         modifier = modifier
-            .width(300.dp)
+            .width(200.dp)
             .scale(scale)
             .clip(CardShape)
             .background(if (isFocused) KidSurface.copy(alpha = 0.96f) else KidSurface.copy(alpha = 0.55f))
@@ -75,13 +75,13 @@ fun VideoCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .aspectRatio(16f / 9f)
-                    .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp)),
+                    .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)),
             )
             // Duration badge
             if (video.durationSeconds > 0) {
                 Text(
                     text = formatDuration(video.durationSeconds),
-                    fontSize = 14.sp,
+                    fontSize = 11.sp,
                     color = KidText,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
@@ -93,7 +93,7 @@ fun VideoCard(
         }
         Text(
             text = video.title,
-            style = MaterialTheme.typography.titleSmall,
+            style = MaterialTheme.typography.bodySmall,
             color = if (isFocused) KidText else KidTextDim,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,

@@ -340,7 +340,7 @@ private fun PlaylistRowSection(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = if (row.videoCount > 0) "${row.displayName} \u2014 ${row.videoCount} videos" else row.displayName,
+                text = row.displayName,
                 style = MaterialTheme.typography.headlineSmall,
                 color = KidText,
             )
@@ -350,6 +350,13 @@ private fun PlaylistRowSection(
                     text = "Offline",
                     style = MaterialTheme.typography.bodySmall,
                     color = StatusWarning,
+                )
+            }
+            if (row.videoCount > 0) {
+                Text(
+                    text = "${row.videoCount} videos",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = KidTextDim,
                 )
             }
             if (row.isLoading) {
