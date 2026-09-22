@@ -62,6 +62,11 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   report `1080p=6933kbps, 720p=4206kbps, 480p=1098kbps, 360p=359kbps, 240p=245kbps, 144p=111kbps`
   - in each case the best rendition inside 70% of the stated bandwidth. The stall step-down also
   fired for real: `Auto quality: stalled at 360p (900 kbps measured) - stepping down to 240p`.
+  Recovery is verified in the same run: started at 900 kbps (360p), that stall dropped it to 240p,
+  and once the override read 25000 kbps it climbed back -
+  `Auto quality: connection recovered - stepping up from 240p to 1080p`. A climb requires
+  [AutoQuality.STEP_UP_AFTER_MS] of playback uninterrupted by a stall and clears a stricter budget
+  (50% of the measurement against the 70% used to open), at most twice per video.
 - Stability: no crash or ANR across full runs.
 - Device-free: `SeekStepTest` (escalation curve 10→20→30→60→120s), `SourceTransferTest` (export
   shape, bare array, unreadable payloads, refusal reasons, duplicate collapsing).

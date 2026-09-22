@@ -15,6 +15,19 @@ internal object AutoQuality {
     private const val SAFETY_PERCENT = 70
 
     /**
+     * Share required before Auto climbs back to a rendition it already dropped. Stricter than the
+     * opening choice on purpose: climbing costs a visible reopen, so the connection must look
+     * comfortably able to carry the higher rendition rather than merely able to afford it.
+     */
+    private const val UPGRADE_SAFETY_PERCENT = 50
+
+    /** Clean playback required before Auto climbs back up. */
+    const val STEP_UP_AFTER_MS = 30_000L
+
+    /** How many renditions Auto will climb back within one video. */
+    const val MAX_STEP_UPS = 2
+
+    /**
      * Used when a video starts before anything has been measured, so that Auto never opens with the
      * largest rendition on an unknown connection.
      */
@@ -94,5 +107,31 @@ internal object AutoQuality {
         val floor = if (ceilingHeight == null) MIN_AUTO_HEIGHT else 0
         return allowed.filter { it.height >= floor }.minByOrNull { bitrateOf(it) }
             ?: allowed.minByOrNull { bitrateOf(it) }
+    }
+
+    /**
+     * The rendition Auto should climb back to, or null to stay where it is.
+     *
+     * A connection that recovers must not leave a child on the rendition they were dropped to, but
+     * climbing reopens the stream, so it waits for [STEP_UP_AFTER_MS] of uninterrupted playback and
+     * then demands the stricter [UPGRADE_SAFETY_PERCENT] budget. The ceiling set by an earlier
+     * stall is deliberately ignored: a measurement that clears the stricter budget is exactly the
+     * evidence that lifts it.
+     */
+    fun stepUpTarget(
+        qualities: List<QualityOption>,
+        currentHeight: Int?,
+        bandwidthKbps: Int?,
+        cleanPlaybackMs: Long,
+        stepUpsThisVideo: Int,
+    ): QualityOption? {
+        if (currentHeight == null || bandwidthKbps == null || bandwidthKbps <= 0) return null
+        if (stepUpsThisVideo >= MAX_STEP_UPS) return null
+        if (cleanPlaybackMs < STEP_UP_AFTER_MS) return null
+
+        val budget = bandwidthKbps * UPGRADE_SAFETY_PERCENT / 100
+        return qualities
+            .filter { it.height > currentHeight && bitrateOf(it) <= budget }
+            .maxByOrNull { it.height }
     }
 }

@@ -137,6 +137,77 @@ class AutoQualityTest {
         assertNull(AutoQuality.choose(emptyList(), bandwidthKbps = 5000))
     }
 
+    // --- climbing back up ---------------------------------------------------
+
+    private val dropped = listOf(
+        rendition(1080, 5000),
+        rendition(720, 2500),
+        rendition(480, 1200),
+        rendition(360, 600),
+    )
+
+    @Test
+    fun `a recovered connection climbs back to the best rendition it can carry`() {
+        val target = AutoQuality.stepUpTarget(
+            qualities = dropped,
+            currentHeight = 360,
+            bandwidthKbps = 20_000,
+            cleanPlaybackMs = AutoQuality.STEP_UP_AFTER_MS,
+            stepUpsThisVideo = 0,
+        )
+        assertEquals(1080, target?.height)
+    }
+
+    @Test
+    fun `climbing waits for uninterrupted playback`() {
+        val target = AutoQuality.stepUpTarget(
+            qualities = dropped,
+            currentHeight = 360,
+            bandwidthKbps = 20_000,
+            cleanPlaybackMs = AutoQuality.STEP_UP_AFTER_MS - 1,
+            stepUpsThisVideo = 0,
+        )
+        assertNull(target)
+    }
+
+    @Test
+    fun `climbing demands more headroom than the opening choice did`() {
+        // 720p costs 3000 kbps. At 5000 kbps the opening choice affords it (70 percent = 3500), but
+        // a climb requires half the bandwidth (2500), so Auto settles for 480p instead of jumping
+        // straight back to the rendition it was just dropped from.
+        val strict = listOf(
+            rendition(1080, 5000),
+            rendition(720, 3000),
+            rendition(480, 1200),
+            rendition(360, 600),
+        )
+        assertEquals(720, AutoQuality.choose(strict, bandwidthKbps = 5000, ceilingHeight = 720)?.height)
+        assertEquals(480, AutoQuality.stepUpTarget(strict, 360, 5000, AutoQuality.STEP_UP_AFTER_MS, 0)?.height)
+    }
+
+    @Test
+    fun `climbing stops after its own budget of steps`() {
+        val target = AutoQuality.stepUpTarget(
+            qualities = dropped,
+            currentHeight = 360,
+            bandwidthKbps = 20_000,
+            cleanPlaybackMs = AutoQuality.STEP_UP_AFTER_MS * 10,
+            stepUpsThisVideo = AutoQuality.MAX_STEP_UPS,
+        )
+        assertNull(target)
+    }
+
+    @Test
+    fun `climbing never happens without a measurement or a current rendition`() {
+        assertNull(AutoQuality.stepUpTarget(dropped, 360, null, 60_000, 0))
+        assertNull(AutoQuality.stepUpTarget(dropped, null, 20_000, 60_000, 0))
+    }
+
+    @Test
+    fun `already at the top there is nothing to climb to`() {
+        assertNull(AutoQuality.stepUpTarget(dropped, 1080, 20_000, 60_000, 0))
+    }
+
     @Test
     fun `an extractor that reported no bitrates still respects the measurement`() {
         // Every rendition reports 0, so the height table decides: 1080p is 5000 kbps.

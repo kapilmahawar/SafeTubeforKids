@@ -139,6 +139,9 @@ class PlaybackController(
     /** The rendition Auto is playing, so a stall knows what to step down from. */
     private var autoQualityHeight: Int? = null
     private var stepDownsThisVideo = 0
+    private var stepUpsThisVideo = 0
+    /** When uninterrupted playback began, which is what earns a climb back up. */
+    private var cleanSinceMs = 0L
     private var stallWatchJob: Job? = null
     private var forcedAudioTrackId: String? = null
     private var resumePositionMs: Long = 0L
@@ -168,6 +171,9 @@ class PlaybackController(
 
         /** How many renditions Auto will drop within a single video. */
         const val MAX_AUTO_STEP_DOWNS = 2
+
+        /** How often Auto checks whether the connection has recovered enough to climb back up. */
+        const val STEP_UP_CHECK_MS = 5_000L
     }
 
     private var queue: List<VideoItem> = emptyList()
@@ -189,9 +195,14 @@ class PlaybackController(
                     next()
                 }
                 if (playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
+                    // Only a stall worth stepping down for restarts the recovery clock: an ordinary
+                    // mid-stream top-up must not keep resetting it, or Auto would never climb back.
                     watchForStall()
                 } else {
                     stallWatchJob?.cancel()
+                    if (playbackState == androidx.media3.common.Player.STATE_READY && cleanSinceMs == 0L) {
+                        cleanSinceMs = System.currentTimeMillis()
+                    }
                 }
             }
 
@@ -204,6 +215,21 @@ class PlaybackController(
                 AppLogger.log("Player isPlaying=$nowPlaying")
             }
         })
+
+        // Auto quality also climbs back up. A progressive stream only changes rendition by being
+        // reopened, which costs a visible pause, so this is checked on a timer rather than eagerly -
+        // AutoQuality decides whether enough clean playback and headroom have accrued.
+        scope.launch {
+            while (!released) {
+                delay(STEP_UP_CHECK_MS)
+                try {
+                    if (player.isPlaying) maybeStepUpQuality()
+                } catch (e: Exception) {
+                    AppLogger.warn("Quality recovery loop stopped: ${e.message}")
+                    return@launch
+                }
+            }
+        }
 
         // Publish the playhead so remote behaviour is observable from the status API.
         // Never touch a released player: these loops outlive the screen by a few frames, and
@@ -285,8 +311,14 @@ class PlaybackController(
             return
         }
         resolved = media
-        // The stall budget belongs to one video; reopening it is not a fresh start.
-        if (!isQualityReopen) stepDownsThisVideo = 0
+        // The stall and recovery budgets belong to one video; reopening it is not a fresh start.
+        if (!isQualityReopen) {
+            stepDownsThisVideo = 0
+            stepUpsThisVideo = 0
+        }
+        // Every load restarts the clean-playback clock, so a climb back up is never credited with
+        // time that was earned before the reopen.
+        cleanSinceMs = 0L
 
         // Drop any menu selection the new video cannot honour.
         if (forcedQualityHeight != null && media.qualities.none { it.height == forcedQualityHeight }) {
@@ -743,9 +775,40 @@ class PlaybackController(
 
         stepDownsThisVideo++
         qualityCeilingHeight = lower.height
+        // A stall is what the recovery clock is measured from.
+        cleanSinceMs = 0L
         AppLogger.log(
             "Auto quality: stalled at ${current}p (${measuredBandwidthKbps() ?: 0} kbps measured) " +
                 "- stepping down to ${lower.height}p",
+        )
+        val position = player.currentPosition
+        scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
+    }
+
+    /**
+     * Climb back to a higher rendition once the connection has proved it can carry one. The cap
+     * and the clean-playback requirement live in [AutoQuality.stepUpTarget]; this only acts on them.
+     */
+    private fun maybeStepUpQuality() {
+        val media = resolved ?: return
+        // DASH adapts by itself, and a pinned rendition is the viewer's explicit choice.
+        if (!autoQuality || (useDash && media.isAdaptive)) return
+        val cleanSince = cleanSinceMs
+        if (cleanSince == 0L) return
+
+        val target = AutoQuality.stepUpTarget(
+            qualities = media.qualities,
+            currentHeight = autoQualityHeight,
+            bandwidthKbps = measuredBandwidthKbps(),
+            cleanPlaybackMs = System.currentTimeMillis() - cleanSince,
+            stepUpsThisVideo = stepUpsThisVideo,
+        ) ?: return
+
+        stepUpsThisVideo++
+        // The connection has now demonstrated it can carry this, so the stall ceiling moves with it.
+        qualityCeilingHeight = target.height
+        AppLogger.log(
+            "Auto quality: connection recovered - stepping up from ${autoQualityHeight}p to ${target.height}p",
         )
         val position = player.currentPosition
         scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
