@@ -9,6 +9,7 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.HomeWatcherService
+import tv.safetubeforkids.app.server.ServerHolder
 import tv.safetubeforkids.app.server.ServerService
 import tv.safetubeforkids.app.ui.navigation.AppNavigation
 import tv.safetubeforkids.app.ui.theme.SafeTubeTheme
@@ -24,6 +25,8 @@ class MainActivity : ComponentActivity() {
 
         // The dashboard server is owned by a foreground service so it survives the UI closing.
         ServerService.start(this)
+        // Belt and braces: the dashboard must not depend on the foreground service succeeding.
+        ServerHolder.start(this)
 
         setContent {
             SafeTubeTheme {

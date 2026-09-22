@@ -34,8 +34,6 @@ class ServerService : Service() {
         }
     }
 
-    private var server: SafeTubeServer? = null
-
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -44,7 +42,7 @@ class ServerService : Service() {
         // Must happen within a few seconds of startForegroundService(), or Android kills us.
         startForeground(NOTIFICATION_ID, buildNotification())
         Thread {
-            server = SafeTubeServer(this).also { it.start() }
+            ServerHolder.start(this)
             AppLogger.log("Dashboard server is being kept alive in the background")
         }.start()
     }
@@ -53,8 +51,7 @@ class ServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = START_STICKY
 
     override fun onDestroy() {
-        server?.stop()
-        server = null
+        // Leve the server running: the activity may still be alive, and ServerHolder owns it.
         super.onDestroy()
     }
 
