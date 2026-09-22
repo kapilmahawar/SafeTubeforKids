@@ -62,6 +62,7 @@ fun PlaybackScreen(
 
     TvPlayerScreen(
         player = controller.player,
+        controller = controller,
         title = controller.title,
         queueLabel = controller.queueLabel,
         errorMessage = controller.errorMessage,

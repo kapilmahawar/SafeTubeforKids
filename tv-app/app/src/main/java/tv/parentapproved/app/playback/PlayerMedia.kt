@@ -57,12 +57,13 @@ object PlayerMedia {
         quality: QualityOption?,
         audio: AudioOption?,
         preferDash: Boolean,
+        captions: List<CaptionOption> = media.captions,
     ): MediaSource {
         val factory = dataSourceFactory()
         val dashUrl = media.dashMpdUrl
 
         if (preferDash && !dashUrl.isNullOrBlank()) {
-            val item = mediaItem(media, Uri.parse(dashUrl), media.captions)
+            val item = mediaItem(media, Uri.parse(dashUrl), captions)
             return DashMediaSource.Factory(factory).createMediaSource(item)
         }
 
@@ -70,7 +71,7 @@ object PlayerMedia {
             ?: throw IllegalStateException("No playable rendition for ${media.videoId}")
         val audioUrl = audio?.url ?: selected.audioUrl
 
-        val videoItem = mediaItem(media, Uri.parse(selected.videoUrl), media.captions)
+        val videoItem = mediaItem(media, Uri.parse(selected.videoUrl), captions)
         val videoSource = ProgressiveMediaSource.Factory(factory).createMediaSource(videoItem)
 
         if (audioUrl.isNullOrBlank()) {

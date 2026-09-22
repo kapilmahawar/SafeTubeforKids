@@ -31,6 +31,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -55,7 +56,11 @@ import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.delay
+import tv.parentapproved.app.playback.AspectChoices
+import tv.parentapproved.app.playback.PlaybackController
 import tv.parentapproved.app.playback.PlaybackKeys
+import tv.parentapproved.app.playback.PlayerMenu
+import tv.parentapproved.app.playback.PlayerOption
 import tv.parentapproved.app.ui.theme.KidAccent
 import tv.parentapproved.app.ui.theme.KidText
 import tv.parentapproved.app.ui.theme.KidTextDim
@@ -78,6 +83,7 @@ private const val TICK_MS = 300L
 @Composable
 fun TvPlayerScreen(
     player: Player,
+    controller: PlaybackController,
     title: String,
     queueLabel: String?,
     errorMessage: String?,
@@ -99,6 +105,9 @@ fun TvPlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     var lastInteraction by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var seekFeedback by remember { mutableStateOf<String?>(null) }
+    var buttonRowActive by remember { mutableStateOf(false) }
+    var buttonIndex by remember { mutableIntStateOf(0) }
+    var optionIndex by remember { mutableIntStateOf(0) }
 
     val surfaceFocus = remember { FocusRequester() }
     val retryFocus = remember { FocusRequester() }
@@ -151,12 +160,73 @@ fun TvPlayerScreen(
                 controlsVisible = true
 
                 val keyCode = event.nativeKeyEvent.keyCode
+
+                // An open menu owns the remote: UP/DOWN move, OK selects, BACK just closes it.
+                // An open menu owns the D-pad; transport keys must keep working underneath.
+                if (controller.activeMenu != null) {
+                    val consumed = when (keyCode) {
+                        KeyEvent.KEYCODE_BACK -> {
+                            controller.closeMenu()
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            optionIndex = (optionIndex - 1).coerceAtLeast(0)
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            optionIndex = (optionIndex + 1).coerceAtMost(controller.menuOptions.size - 1)
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                        KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A,
+                        -> {
+                            controller.menuOptions.getOrNull(optionIndex)?.let { option ->
+                                controller.selectMenuOption(option.id)
+                            }
+                            true
+                        }
+                        else -> false
+                    }
+                    if (consumed) return@onKeyEvent true
+                }
+
                 if (keyCode == KeyEvent.KEYCODE_BACK) {
                     onBack()
                     return@onKeyEvent true
                 }
                 // Let the error actions own D-pad movement and clicks.
                 if (errorMessage != null) return@onKeyEvent false
+
+                // The settings row owns the D-pad while it is active, but only the D-pad:
+                // play/pause, next, previous and seeking must stay live.
+                if (buttonRowActive) {
+                    val consumed = when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP -> {
+                            buttonRowActive = false
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_LEFT -> {
+                            buttonIndex = (buttonIndex - 1).coerceAtLeast(0)
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                            buttonIndex = (buttonIndex + 1).coerceAtMost(menuButtons.size - 1)
+                            true
+                        }
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                        KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A,
+                        -> {
+                            controller.openMenu(menuButtons[buttonIndex])
+                            // Open on the current choice so the child sees where they are.
+                            optionIndex = controller.menuOptions
+                                .indexOfFirst { it.selected }
+                                .coerceAtLeast(0)
+                            true
+                        }
+                        else -> false
+                    }
+                    if (consumed) return@onKeyEvent true
+                }
 
                 val action = PlaybackKeys.actionOf(keyCode)
                 if (action != null) AppLogger.log("Remote key -> ${action.name}")
@@ -186,7 +256,14 @@ fun TvPlayerScreen(
                         onPreviousApproved()
                         true
                     }
-                    PlaybackKeys.Action.RevealControls -> true
+                    PlaybackKeys.Action.RevealControls -> {
+                        // DOWN hands the remote to the menu buttons; UP keeps the controls up.
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                            buttonRowActive = true
+                            buttonIndex = 0
+                        }
+                        true
+                    }
                     null -> true
                 }
             }
@@ -243,12 +320,34 @@ fun TvPlayerScreen(
                 queueLabel = queueLabel,
                 modifier = Modifier.align(Alignment.TopStart),
             )
-            BottomBar(
-                isPlaying = isPlaying,
-                positionMs = positionMs,
-                durationMs = durationMs,
-                modifier = Modifier.align(Alignment.BottomStart),
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth(),
+            ) {
+                MenuBar(
+                    controller = controller,
+                    active = buttonRowActive,
+                    selectedIndex = buttonIndex,
+                )
+                BottomBar(
+                    isPlaying = isPlaying,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                )
+            }
+        }
+
+        controller.activeMenu?.let { menu ->
+            PlayerMenuOverlay(
+                title = controller.menuTitle,
+                options = controller.menuOptions,
+                selectedIndex = optionIndex,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 48.dp),
             )
+            AppLogger.log("Menu shown: ${menu.name}")
         }
 
         warningText?.let { warning ->
@@ -388,7 +487,7 @@ private fun BottomBar(
         }
         Spacer(Modifier.height(14.dp))
         Text(
-            text = "Left / Right  seek 10s      OK  play or pause      Back  exit",
+            text = "Down  settings      Left / Right  seek 10s      OK  play or pause      Back  exit",
             style = MaterialTheme.typography.bodyLarge,
             color = KidTextDim,
         )
@@ -436,6 +535,90 @@ private fun SeekBar(positionMs: Long, durationMs: Long, modifier: Modifier = Mod
             radius = knobRadius,
             center = Offset(knobX, size.height / 2f),
         )
+    }
+}
+
+private val menuButtons = listOf(
+    PlayerMenu.CAPTIONS,
+    PlayerMenu.QUALITY,
+    PlayerMenu.AUDIO,
+    PlayerMenu.SPEED,
+    PlayerMenu.ASPECT,
+)
+
+private fun labelFor(menu: PlayerMenu, controller: PlaybackController): String = when (menu) {
+    PlayerMenu.CAPTIONS -> "Subtitles: ${controller.captionsLabel}"
+    PlayerMenu.QUALITY -> "Quality"
+    PlayerMenu.AUDIO -> "Audio"
+    PlayerMenu.SPEED -> "Speed: ${controller.speed}x"
+    PlayerMenu.ASPECT -> when (controller.aspectId) {
+        AspectChoices.ZOOM -> "Fit: Crop"
+        AspectChoices.FILL -> "Fit: Stretch"
+        else -> "Fit: Fit"
+    }
+}
+
+@Composable
+private fun MenuBar(controller: PlaybackController, active: Boolean, selectedIndex: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 32.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        menuButtons.forEachIndexed { index, menu ->
+            val highlighted = active && index == selectedIndex
+            Text(
+                text = labelFor(menu, controller),
+                style = MaterialTheme.typography.titleMedium,
+                color = if (highlighted) Color.Black else KidText,
+                fontWeight = if (highlighted) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier
+                    .background(
+                        color = if (highlighted) KidAccent else Color.White.copy(alpha = 0.14f),
+                        shape = RoundedCornerShape(10.dp),
+                    )
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+            )
+        }
+    }
+}
+
+@Composable
+private fun PlayerMenuOverlay(
+    title: String,
+    options: List<PlayerOption>,
+    selectedIndex: Int,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .width(440.dp)
+            .background(Color.Black.copy(alpha = 0.9f), RoundedCornerShape(14.dp))
+            .padding(vertical = 18.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleLarge,
+            color = KidText,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp),
+        )
+        Spacer(Modifier.height(6.dp))
+        options.forEachIndexed { index, option ->
+            val highlighted = index == selectedIndex
+            Text(
+                text = if (option.selected) "\u2713  ${option.label}" else "     ${option.label}",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (highlighted) Color.Black else KidText,
+                fontWeight = if (option.selected) FontWeight.SemiBold else FontWeight.Normal,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(if (highlighted) KidAccent else Color.Transparent)
+                    .padding(horizontal = 24.dp, vertical = 12.dp),
+            )
+        }
     }
 }
 

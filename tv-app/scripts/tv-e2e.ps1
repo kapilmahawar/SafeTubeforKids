@@ -284,18 +284,106 @@ if ($opened) {
     Start-Sleep -Milliseconds 900
     Shot '06-controls-shown'
 
+    # --- player menus (subtitles / quality / audio / speed / screen fit) ---
+    # Menus are driven entirely from the remote: DOWN enters the button row, LEFT/RIGHT pick a
+    # button, OK opens it, UP/DOWN pick an option, OK applies, BACK closes it.
+    $menuLog = { (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n" }
+
+    # Subtitles are per-video: open the multi-video playlist row so the tested video actually
+    # has caption tracks (the single-video source has none).
+    $captionsVideo = $false
+    if ($sourceCount -le 1) {
+        Key 'KEYCODE_BACK'
+        Start-Sleep -Seconds 3
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 14
+        $captionsVideo = $null -ne (PlayingNow)
+        Log "  re-opened a playlist video for the caption test: $captionsVideo"
+    } else {
+        $captionsVideo = $true
+    }
+
+    Key 'KEYCODE_DPAD_DOWN'          # enter the settings row (Subtitles is first)
+    Start-Sleep -Milliseconds 600
+    Key 'KEYCODE_DPAD_CENTER'        # open the Subtitles menu
+    Start-Sleep -Seconds 2
+    Shot '10-subtitles-menu'
+    $menuOpened = ((& $menuLog) -match 'Menu opened: CAPTIONS')
+    Record 'menu-subtitles-opens' $menuOpened
+
+    # choose the first subtitle track after "Off"
+    Key 'KEYCODE_DPAD_DOWN'
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 3
+    Shot '11-subtitles-on'
+    $captionsOn = ((& $menuLog) -match 'Captions selection: (?!off)')
+    if ($captionsVideo) {
+        Record 'captions-enable' $captionsOn
+    } else {
+        Log '  CAPTION_TEST: LIMITED - no video with caption tracks could be opened'
+    }
+
+    # BACK must close the menu, not leave the player
+    Key 'KEYCODE_BACK'
+    Start-Sleep -Seconds 2
+    $stillPlayingAfterBack = ($null -ne (PlayingNow))
+    Record 'menu-back-closes-menu-only' $stillPlayingAfterBack
+    Shot '12-after-menu-back'
+
+    # playback speed: DOWN into the row, RIGHT x3 to Speed, open, then 1.0x -> 1.25x
+    Key 'KEYCODE_DPAD_DOWN'
+    foreach ($i in 1..3) { Key 'KEYCODE_DPAD_RIGHT' }
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 2
+    Key 'KEYCODE_DPAD_DOWN'
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 2
+    Shot '13-speed-menu'
+    $speedChanged = ((& $menuLog) -match 'Player menu SPEED -> sp:1\.25')
+    Record 'speed-menu-changes-speed' $speedChanged
+    Key 'KEYCODE_BACK'
+
+    # screen fit: DOWN, RIGHT to the last button, open, choose crop-to-fill
+    Key 'KEYCODE_DPAD_DOWN'
+    foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 2
+    Key 'KEYCODE_DPAD_DOWN'
+    Key 'KEYCODE_DPAD_CENTER'
+    Start-Sleep -Seconds 2
+    Shot '14-aspect-crop'
+    $aspectChanged = ((& $menuLog) -match 'Player menu ASPECT -> zoom')
+    Record 'aspect-menu-changes-fit' $aspectChanged
+    Key 'KEYCODE_BACK'
+    Start-Sleep -Seconds 1
+
     # --- approved-queue navigation ----------------------------------
-    if ($sourceCount -gt 1) {
+    # Recompute the queue size for whatever is playing now (the caption step may have switched
+    # to a video from the multi-video playlist).
+    $current = PlayingNow
+    $queueCount = 0
+    if ($current) {
+        try {
+            $sources = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Headers $headers -TimeoutSec 10
+            $entry = $sources | Where-Object { $_.sourceId -eq $current.playlistId } | Select-Object -First 1
+            if ($entry) { $queueCount = [int]$entry.videoCount }
+        } catch { }
+    }
+    Log "  queue under test: source=$($current.playlistId) videos=$queueCount"
+
+    if ($queueCount -gt 1) {
         Key 'KEYCODE_MEDIA_NEXT'
         Start-Sleep -Seconds 12
         $nextId = (PlayingNow).videoId
-        Record 'next-is-approved-queue' (($null -ne $nextId) -and ($nextId -ne $videoId)) "queue $videoId -> $nextId"
+        Record 'next-is-approved-queue' (($null -ne $nextId) -and ($nextId -ne $current.videoId)) "queue $($current.videoId) -> $nextId"
         Shot '04-next'
 
         Key 'KEYCODE_MEDIA_PREVIOUS'
         Start-Sleep -Seconds 12
         $prevId = (PlayingNow).videoId
-        Record 'previous-is-approved-queue' ($prevId -eq $videoId) "queue $nextId -> $prevId"
+        Record 'previous-is-approved-queue' ($prevId -eq $current.videoId) "queue $nextId -> $prevId"
     } else {
         # A single-video source has no next item: NEXT must end playback rather than ask
         # YouTube for a recommendation.
