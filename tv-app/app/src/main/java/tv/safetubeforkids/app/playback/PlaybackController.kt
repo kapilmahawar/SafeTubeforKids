@@ -431,7 +431,10 @@ class PlaybackController(
         }
         menuOptions = buildOptions(menu)
         AppLogger.log("Menu opened: ${menu.name} (${menuOptions.size} options)")
-        scheduleMenuAutoClose()
+        // Settings menus are transient and must not linger. The resume prompt is a decision, not
+        // a menu: auto-closing it after 8s silently made the choice for the viewer, and a press
+        // arriving later landed on the player as play/pause instead of answering the prompt.
+        if (menu != PlayerMenu.RESUME) scheduleMenuAutoClose()
     }
 
     /** Menus must not linger as a distraction: they close themselves when left alone. */

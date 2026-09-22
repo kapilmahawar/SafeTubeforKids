@@ -534,8 +534,21 @@ if ($opened) {
         # Seek to just before the end and let it play out, so the end is reached naturally.
         $presses = [Math]::Max(1, [int](($durationSec - 14) / 10))
         for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+        # Watch the playhead instead of sleeping a fixed amount: reaching the end by remote
+        # seeking consumes most of any fixed window, which is why this check once reported a
+        # video "still playing" at 164s of 165s.
         $endBefore = PlayingNow
-        Start-Sleep -Seconds 32
+        $lastPos = -1
+        $stalled = 0
+        for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 5
+            $snap = PlayingNow
+            if ($null -eq $snap) { break }
+            if ($snap.videoId -ne $endBefore.videoId) { break }
+            $pos = [int]$snap.positionSec
+            if ($pos -eq $lastPos) { $stalled++; if ($stalled -ge 3) { break } } else { $stalled = 0 }
+            $lastPos = $pos
+        }
         $endAfter = PlayingNow
         if ($null -eq $endAfter) {
             Record 'end-of-video-handling' $true "queue ended: playback stopped"
