@@ -175,3 +175,24 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   untouched. Waited out, it recurs. Before blaming the app, grep the log for `LOGIN_REQUIRED`, and
   note that the harness still reports this as a navigation failure rather than as BLOCKED with the
   real reason.
+
+## Verification notes (rounds 52-54)
+
+- The approved queue is now covered for real: with a 50-video queue under test,
+  `next-is-approved-queue` and `previous-is-approved-queue` pass. They used to be skipped as
+  NOT APPLICABLE because the queue source held a single video.
+- Auto quality is verified against a real measurement, not only the debug override: on the
+  six-rendition probe video the app measured 3200 kbps and chose 480p, which is exactly the policy
+  (70 percent of 3200 is 2240; 480p costs 1098, 720p costs 4206).
+- The opt-in `-QualityProbe` phase fails for a reason of its own, and it is NOT the video. Driven by
+  hand - approve, resolve, play by broadcast - the same video resolves with 6 qualities and plays
+  with `quality Auto (480p)`. Resolution, caching and the video are therefore all exonerated, and
+  what remains is the phase's own sequencing: the state the app is in when its `PlayVideo` fires and
+  its menu keys are sent. Next time, take a UI dump immediately after that broadcast instead of
+  adding more waits.
+- `back-returns-to-library` fails only in runs where the probe phase also fails. Treat it as
+  collateral until the probe is fixed, not as a regression.
+- `uiautomator dump` returns no text while the video surface is on screen (nodes come back as
+  "Skipping invisible child ... ViewFactoryHolder"), so player-screen assertions must read the app
+  log rather than UI dumps.
+- YouTube throttling: see the earlier note. It clears on its own; the harness now names it.
