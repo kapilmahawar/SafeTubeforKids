@@ -7,6 +7,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <!-- Starting the dashboard at boot is what makes it available on a TV nobody has opened the app
+         on since it was switched on. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <uses-feature
         android:name="android.software.leanback"
@@ -61,6 +64,19 @@
             android:name=".server.ServerService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Both cases need the dashboard back without a human opening the app: a boot, because the
+             TV was just switched on, and a package replacement, because updating the APK kills the
+             process that was serving. Only the system can send these, so exporting is safe. -->
+        <receiver
+            android:name=".server.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>

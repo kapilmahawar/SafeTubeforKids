@@ -158,3 +158,10 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   error a parent could act on, just a dashboard that stopped working, permanently, because sessions
   last 90 days. It now evicts the oldest session and still issues a token; `SessionEvictionTest`
   pins that, and the old test that asserted the refusal was updated rather than deleted.
+- **The dashboard outlives the app, but the boot path is unproven.** `ServerService` (foreground,
+  `START_STICKY`) keeps port 8080 answering with the TV UI closed - verified on the device by
+  sending the app to the launcher and still getting `/status`. `BootReceiver` now starts that
+  service on `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED`, and `dumpsys package` confirms it is
+  registered with `RECEIVE_BOOT_COMPLETED` declared. What is NOT verified is a real reboot: the
+  shell is not allowed to send `BOOT_COMPLETED` (`am broadcast` refuses), so the only honest test is
+  power-cycling the TV and checking `http://172.16.1.2:8080/status` before opening the app.
