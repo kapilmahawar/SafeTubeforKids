@@ -507,6 +507,14 @@ if ($opened) {
         Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
     }
 
+    # The checks below assert that nothing is playing, so start from a stopped state: the
+    # autoplay check deliberately leaves a video running.
+    Adb @('shell', "am broadcast -a $pkg.DEBUG_STOP_PLAYBACK -p $pkg") | Out-Null
+    Start-Sleep -Seconds 5
+    Adb @('shell', "am broadcast -a $pkg.DEBUG_STOP_PLAYBACK -p $pkg") | Out-Null
+    Start-Sleep -Seconds 4
+    Record 'stopped-before-security' ($null -eq (PlayingNow))
+
     # --- security: the API must refuse anything unauthenticated -------------------------
     $unauthRead = 0
     $unauthWrite = 0

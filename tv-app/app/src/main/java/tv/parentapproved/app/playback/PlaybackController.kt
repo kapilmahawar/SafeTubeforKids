@@ -600,6 +600,7 @@ class PlaybackController(
         val option = media.audioOptions.firstOrNull { it.trackId == trackId } ?: return
         forcedAudioTrackId = trackId
         audioLabel = option.label
+        AppLogger.log("Audio track selected: '${option.label}' (${option.languageTag}, ${option.bitrateKbps} kbps)")
 
         // Multi-language audio arrives as separate YouTube tracks, so the played stream has to
         // be reopened with the chosen language - keeping the playhead so nothing restarts.
