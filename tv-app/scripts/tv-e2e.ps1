@@ -243,6 +243,21 @@ Record 'api-reachable' ($null -ne $state)
 # The child UI must be reachable with the remote alone: no touch, no intents, no adb tricks.
 # The library needs a D-pad press before a card holds focus, so several realistic remote
 # sequences are tried and each attempt is verified against the app's own status API.
+# The library renders nothing until its sources resolve, and a 50-video playlist takes a while
+# after a fresh install. Navigating before then presses keys at an empty screen - which is how
+# the D-pad check failed while the same sequence worked by hand a minute later.
+$libraryReady = $false
+for ($attempt = 1; $attempt -le 20; $attempt++) {
+    if ($headers.ContainsKey('Authorization')) {
+        try {
+            $lib = Invoke-RestMethod -Uri "http://${apiHost}:8080/playlists" -Headers $headers -TimeoutSec 10
+            if (($lib | Where-Object { $_.videoCount -gt 0 } | Measure-Object).Count -gt 0) { $libraryReady = $true; break }
+        } catch { }
+    }
+    Start-Sleep -Seconds 5
+}
+Log "  library ready before navigating: $libraryReady"
+
 Log "=== navigate with D-pad only ==="
 function PlayingNow {
     $s = ApiState
