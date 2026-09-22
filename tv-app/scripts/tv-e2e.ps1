@@ -733,6 +733,17 @@ if ($opened) {
             Adb @('logcat', '-c') | Out-Null
             PlayVideo $probeVideo $probeVideo
             Start-Sleep -Seconds 20
+            # Say WHERE this phase went wrong. The video is known to play when driven by hand, so
+            # if it did not reach the player here the cause is this phase (or the screen the app was
+            # left on), and the next person should not have to guess at it the way this one did.
+            $probeLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
+            if ($probeLog -match "Playing $probeVideo") {
+                Log '  probe: the video reached the player'
+            } else {
+                $resumedLine = (Adb @('shell', 'dumpsys activity activities') | Select-String -SimpleMatch 'ResumedActivity' | Select-Object -First 1)
+                Log "  probe: the video did NOT reach the player. Foreground: $($resumedLine -replace '\s+', ' ')"
+                ($probeLog -split "`n" | Select-Object -Last 5) | ForEach-Object { Log "    $_" }
+            }
 
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 2
