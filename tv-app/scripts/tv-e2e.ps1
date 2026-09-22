@@ -506,8 +506,16 @@ if ($opened) {
         # Seek to just before the end and let it play out, so the end is reached naturally.
         $presses = [Math]::Max(1, [int](($durationSec - 14) / 10))
         for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+        $endBefore = PlayingNow
         Start-Sleep -Seconds 32
-        Record 'end-of-video-stops-at-queue-end' ($null -eq (PlayingNow)) "video ${durationSec}s, single approved item"
+        $endAfter = PlayingNow
+        if ($null -eq $endAfter) {
+            Record 'end-of-video-handling' $true "queue ended: playback stopped"
+        } elseif ($endAfter.videoId -ne $endBefore.videoId) {
+            Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
+        } else {
+            Record 'end-of-video-handling' $false "still on $($endAfter.videoId) long after the video ended"
+        }
     } else {
         Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
     }

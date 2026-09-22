@@ -14,6 +14,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -120,6 +121,7 @@ class PlaybackController(
     private var forcedAudioTrackId: String? = null
     private var resumePositionMs: Long = 0L
     private var released = false
+    private var menuAutoCloseJob: Job? = null
 
     private companion object {
         /** Below this, restarting is more natural than resuming. */
@@ -127,6 +129,10 @@ class PlaybackController(
 
         /** At or beyond this fraction the video counts as finished, not resumable. */
         const val RESUME_MAX_PERCENT = 95
+
+        /** Menus disappear after this long without input, so they never linger as a distraction. */
+        const val MENU_IDLE_MS = 8_000L
+        const val MENU_AFTER_CHOICE_MS = 3_000L
     }
 
     private var queue: List<VideoItem> = emptyList()
@@ -425,9 +431,27 @@ class PlaybackController(
         }
         menuOptions = buildOptions(menu)
         AppLogger.log("Menu opened: ${menu.name} (${menuOptions.size} options)")
+        scheduleMenuAutoClose()
+    }
+
+    /** Menus must not linger as a distraction: they close themselves when left alone. */
+    fun noteMenuInteraction() {
+        if (activeMenu != null) scheduleMenuAutoClose()
+    }
+
+    private fun scheduleMenuAutoClose(delayMs: Long = MENU_IDLE_MS) {
+        menuAutoCloseJob?.cancel()
+        menuAutoCloseJob = scope.launch {
+            delay(delayMs)
+            if (activeMenu != null) {
+                AppLogger.log("Menu closed after ${delayMs / 1000}s of no input")
+                closeMenu()
+            }
+        }
     }
 
     fun closeMenu() {
+        menuAutoCloseJob?.cancel()
         if (activeMenu == PlayerMenu.RESUME && resumePositionMs > 0L) {
             // Dismissing the prompt means "carry on watching", not "sit there paused".
             player.seekTo(resumePositionMs)
@@ -545,6 +569,8 @@ class PlaybackController(
         }
         AppLogger.log("Player menu ${menu.name} -> $id")
         menuOptions = buildOptions(menu)
+        // Give the child a moment to see the change before the menu goes away.
+        scheduleMenuAutoClose(MENU_AFTER_CHOICE_MS)
     }
 
     // --- track selection ----------------------------------------------------

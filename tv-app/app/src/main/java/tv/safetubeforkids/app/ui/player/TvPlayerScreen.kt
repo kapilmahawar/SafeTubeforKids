@@ -171,10 +171,12 @@ fun TvPlayerScreen(
                         }
                         KeyEvent.KEYCODE_DPAD_UP -> {
                             optionIndex = (optionIndex - 1).coerceAtLeast(0)
+                            controller.noteMenuInteraction()
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_DOWN -> {
                             optionIndex = (optionIndex + 1).coerceAtMost(controller.menuOptions.size - 1)
+                            controller.noteMenuInteraction()
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
@@ -239,13 +241,15 @@ fun TvPlayerScreen(
                         true
                     }
                     PlaybackKeys.Action.SeekBackward -> {
-                        onSeekBy(-SEEK_STEP_MS)
-                        seekFeedback = "<< 10s"
+                        val step = seekStepFor(event.nativeKeyEvent.repeatCount)
+                        onSeekBy(-step)
+                        seekFeedback = "<< ${step / 1000}s"
                         true
                     }
                     PlaybackKeys.Action.SeekForward -> {
-                        onSeekBy(SEEK_STEP_MS)
-                        seekFeedback = "10s >>"
+                        val step = seekStepFor(event.nativeKeyEvent.repeatCount)
+                        onSeekBy(step)
+                        seekFeedback = "${step / 1000}s >>"
                         true
                     }
                     PlaybackKeys.Action.NextApproved -> {
@@ -621,6 +625,18 @@ private fun PlayerMenuOverlay(
             )
         }
     }
+}
+
+/**
+ * Hold-to-accelerate seeking: one press moves 10s, and a held key escalates through 20s, 30s,
+ * 60s and 120s as the remote repeats, so long videos are not a key-mashing exercise.
+ */
+private fun seekStepFor(repeatCount: Int): Long = when {
+    repeatCount >= 12 -> 120_000L
+    repeatCount >= 8 -> 60_000L
+    repeatCount >= 4 -> 30_000L
+    repeatCount >= 2 -> 20_000L
+    else -> 10_000L
 }
 
 private fun formatTime(ms: Long): String {
