@@ -1,4 +1,4 @@
-package tv.parentapproved.app.playback
+package tv.safetubeforkids.app.playback
 
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take

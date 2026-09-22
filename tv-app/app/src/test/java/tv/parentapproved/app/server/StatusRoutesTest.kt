@@ -1,11 +1,11 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
-import tv.parentapproved.app.ServiceLocator
-import tv.parentapproved.app.auth.PinManager
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.data.cache.CacheDatabase
-import tv.parentapproved.app.data.cache.ChannelDao
-import tv.parentapproved.app.data.events.PlayEventRecorder
+import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.cache.ChannelDao
+import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -39,7 +39,7 @@ class StatusRoutesTest {
         coEvery { mockChannelDao.count() } returns 3
         every { mockDb.channelDao() } returns mockChannelDao
 
-        val mockPlayEventDao = mockk<tv.parentapproved.app.data.events.PlayEventDao>(relaxed = true)
+        val mockPlayEventDao = mockk<tv.safetubeforkids.app.data.events.PlayEventDao>(relaxed = true)
         coEvery { mockPlayEventDao.insert(any()) } returns 1L
         every { mockDb.playEventDao() } returns mockPlayEventDao
 

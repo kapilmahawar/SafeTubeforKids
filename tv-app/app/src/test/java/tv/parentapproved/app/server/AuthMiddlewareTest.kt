@@ -1,6 +1,6 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
-import tv.parentapproved.app.auth.SessionManager
+import tv.safetubeforkids.app.auth.SessionManager
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*

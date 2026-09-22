@@ -1,0 +1,84 @@
+package tv.safetubeforkids.app.server
+
+import tv.safetubeforkids.app.BuildConfig
+import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.events.PlayEventRecorder
+import io.ktor.server.application.*
+import io.ktor.server.request.*
+import io.ktor.server.response.*
+import io.ktor.server.routing.*
+import kotlinx.serialization.Serializable
+
+@Serializable
+data class StatusResponse(
+    val version: String,
+    val serverRunning: Boolean,
+    val playlistCount: Int,
+    val activeSessions: Int,
+    val currentlyPlaying: NowPlayingResponse?,
+)
+
+@Serializable
+data class PublicStatusResponse(
+    val version: String,
+    val serverRunning: Boolean,
+    val protocolVersion: Int = BuildConfig.PROTOCOL_VERSION,
+)
+
+@Serializable
+data class NowPlayingResponse(
+    val videoId: String,
+    val playlistId: String,
+    val title: String = "",
+    val playlistTitle: String = "",
+    val elapsedSec: Int = 0,
+    val positionSec: Int = 0,
+    val durationSec: Int = 0,
+    val playing: Boolean = false,
+)
+
+fun Route.statusRoutes(sessionManager: SessionManager) {
+    get("/status") {
+        // Check if authenticated — return full or minimal response
+        val authHeader = call.request.header("Authorization")
+        val token = authHeader?.removePrefix("Bearer ")
+            ?: call.request.cookies["session"]
+        val isAuthed = token != null && sessionManager.validateSession(token)
+
+        if (!isAuthed) {
+            call.respond(PublicStatusResponse(
+                version = BuildConfig.VERSION_NAME,
+                serverRunning = true,
+            ))
+            return@get
+        }
+
+        val playlistCount = try {
+            ServiceLocator.database.channelDao().count()
+        } catch (e: Exception) { 0 }
+
+        val activeSessions = sessionManager.getActiveSessionCount()
+
+        val nowPlaying = PlayEventRecorder.currentVideoId?.let { vid ->
+            NowPlayingResponse(
+                videoId = vid,
+                playlistId = PlayEventRecorder.currentPlaylistId ?: "",
+                title = PlayEventRecorder.currentTitle ?: "",
+                playlistTitle = PlayEventRecorder.currentPlaylistTitle ?: "",
+                elapsedSec = (PlayEventRecorder.getElapsedMs() / 1000).toInt(),
+                positionSec = (PlayEventRecorder.currentPositionMs / 1000).toInt(),
+                durationSec = (PlayEventRecorder.currentDurationMs / 1000).toInt(),
+                playing = PlayEventRecorder.isPlaying,
+            )
+        }
+
+        call.respond(StatusResponse(
+            version = BuildConfig.VERSION_NAME,
+            serverRunning = true,
+            playlistCount = playlistCount,
+            activeSessions = activeSessions,
+            currentlyPlaying = nowPlaying,
+        ))
+    }
+}

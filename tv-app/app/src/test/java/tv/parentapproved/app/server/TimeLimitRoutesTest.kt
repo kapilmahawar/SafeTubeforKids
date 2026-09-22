@@ -1,12 +1,12 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.playback.PlaybackCommand
-import tv.parentapproved.app.playback.PlaybackCommandBus
-import tv.parentapproved.app.timelimits.TimeLimitConfig
-import tv.parentapproved.app.timelimits.TimeLimitManager
-import tv.parentapproved.app.timelimits.TimeLimitManagerTest.FakeTimeLimitStore
-import tv.parentapproved.app.timelimits.TimeLimitManagerTest.FakeWatchTimeProvider
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.playback.PlaybackCommand
+import tv.safetubeforkids.app.playback.PlaybackCommandBus
+import tv.safetubeforkids.app.timelimits.TimeLimitConfig
+import tv.safetubeforkids.app.timelimits.TimeLimitManager
+import tv.safetubeforkids.app.timelimits.TimeLimitManagerTest.FakeTimeLimitStore
+import tv.safetubeforkids.app.timelimits.TimeLimitManagerTest.FakeWatchTimeProvider
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*

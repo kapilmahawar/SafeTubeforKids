@@ -1,4 +1,4 @@
-package tv.parentapproved.app.playback
+package tv.safetubeforkids.app.playback
 
 import org.junit.Assert.*
 import org.junit.Test

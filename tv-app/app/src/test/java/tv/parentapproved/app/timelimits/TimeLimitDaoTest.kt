@@ -1,11 +1,11 @@
-package tv.parentapproved.app.timelimits
+package tv.safetubeforkids.app.timelimits
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
-import tv.parentapproved.app.data.cache.TimeLimitConfigEntity
-import tv.parentapproved.app.data.cache.TimeLimitDao
+import tv.safetubeforkids.app.data.cache.TimeLimitConfigEntity
+import tv.safetubeforkids.app.data.cache.TimeLimitDao
 
 class TimeLimitDaoTest {
 

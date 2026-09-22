@@ -1,7 +1,7 @@
-package tv.parentapproved.app.data
+package tv.safetubeforkids.app.data
 
-import tv.parentapproved.app.data.cache.ChannelDao
-import tv.parentapproved.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.data.cache.ChannelDao
+import tv.safetubeforkids.app.data.cache.ChannelEntity
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Before

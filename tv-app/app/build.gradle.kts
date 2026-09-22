@@ -9,11 +9,11 @@ plugins {
 }
 
 android {
-    namespace = "tv.parentapproved.app"
+    namespace = "tv.safetubeforkids.app"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "tv.parentapproved.app"
+        applicationId = "tv.safetubeforkids.app"
         minSdk = 24
         targetSdk = 34
         versionCode = 15

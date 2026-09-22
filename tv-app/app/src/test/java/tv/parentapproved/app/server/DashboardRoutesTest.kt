@@ -1,4 +1,4 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -37,7 +37,7 @@ class DashboardRoutesTest {
             response.contentType()?.match(ContentType.Text.Html) == true
         )
         val body = response.bodyAsText()
-        assertTrue("Fallback should contain ParentApproved", body.contains("ParentApproved"))
+        assertTrue("Fallback should contain SafeTube", body.contains("SafeTube"))
     }
 
     @Test

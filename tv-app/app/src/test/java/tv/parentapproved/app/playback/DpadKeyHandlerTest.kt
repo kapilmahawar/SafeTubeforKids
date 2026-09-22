@@ -1,4 +1,4 @@
-package tv.parentapproved.app.playback
+package tv.safetubeforkids.app.playback
 
 import android.view.KeyEvent
 import org.junit.Assert.*

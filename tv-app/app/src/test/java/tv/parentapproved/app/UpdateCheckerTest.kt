@@ -1,4 +1,4 @@
-package tv.parentapproved.app
+package tv.safetubeforkids.app
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient

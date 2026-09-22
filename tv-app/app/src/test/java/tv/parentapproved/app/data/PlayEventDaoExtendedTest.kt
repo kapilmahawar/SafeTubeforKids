@@ -1,7 +1,7 @@
-package tv.parentapproved.app.data
+package tv.safetubeforkids.app.data
 
-import tv.parentapproved.app.data.events.PlayEventDao
-import tv.parentapproved.app.data.events.PlayEventEntity
+import tv.safetubeforkids.app.data.events.PlayEventDao
+import tv.safetubeforkids.app.data.events.PlayEventEntity
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Before

@@ -3,48 +3,48 @@
 
     <application>
         <receiver
-            android:name="tv.parentapproved.app.debug.DebugReceiver"
+            android:name="tv.safetubeforkids.app.debug.DebugReceiver"
             android:exported="true">
             <intent-filter>
                 <!-- Server/Playlists -->
-                <action android:name="tv.parentapproved.app.DEBUG_ADD_PLAYLIST" />
-                <action android:name="tv.parentapproved.app.DEBUG_REMOVE_PLAYLIST" />
-                <action android:name="tv.parentapproved.app.DEBUG_RESOLVE_PLAYLIST" />
-                <action android:name="tv.parentapproved.app.DEBUG_REFRESH_PLAYLISTS" />
-                <action android:name="tv.parentapproved.app.DEBUG_GET_PLAYLISTS" />
-                <action android:name="tv.parentapproved.app.DEBUG_GET_SERVER_STATUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_ADD_PLAYLIST" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_REMOVE_PLAYLIST" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_RESOLVE_PLAYLIST" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_REFRESH_PLAYLISTS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_PLAYLISTS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_SERVER_STATUS" />
                 <!-- PIN/Auth -->
-                <action android:name="tv.parentapproved.app.DEBUG_GET_PIN" />
-                <action android:name="tv.parentapproved.app.DEBUG_RESET_PIN" />
-                <action android:name="tv.parentapproved.app.DEBUG_SIMULATE_AUTH" />
-                <action android:name="tv.parentapproved.app.DEBUG_GET_AUTH_STATE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_PIN" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_RESET_PIN" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SIMULATE_AUTH" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_AUTH_STATE" />
                 <!-- Playback -->
-                <action android:name="tv.parentapproved.app.DEBUG_PLAY_VIDEO" />
-                <action android:name="tv.parentapproved.app.DEBUG_STOP_PLAYBACK" />
-                <action android:name="tv.parentapproved.app.DEBUG_GET_NOW_PLAYING" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_PLAY_VIDEO" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_STOP_PLAYBACK" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_NOW_PLAYING" />
                 <!-- Relay -->
-                <action android:name="tv.parentapproved.app.DEBUG_GET_RELAY_STATUS" />
-                <action android:name="tv.parentapproved.app.DEBUG_RESET_TV_SECRET" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_RELAY_STATUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_RESET_TV_SECRET" />
                 <!-- Time Limits -->
-                <action android:name="tv.parentapproved.app.DEBUG_SET_DAILY_LIMIT" />
-                <action android:name="tv.parentapproved.app.DEBUG_CLEAR_DAILY_LIMIT" />
-                <action android:name="tv.parentapproved.app.DEBUG_MANUAL_LOCK" />
-                <action android:name="tv.parentapproved.app.DEBUG_MANUAL_UNLOCK" />
-                <action android:name="tv.parentapproved.app.DEBUG_GRANT_BONUS" />
-                <action android:name="tv.parentapproved.app.DEBUG_SET_BEDTIME" />
-                <action android:name="tv.parentapproved.app.DEBUG_CLEAR_BEDTIME" />
-                <action android:name="tv.parentapproved.app.DEBUG_TIME_STATUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SET_DAILY_LIMIT" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_DAILY_LIMIT" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_MANUAL_LOCK" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_MANUAL_UNLOCK" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GRANT_BONUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SET_BEDTIME" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_BEDTIME" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_TIME_STATUS" />
                 <!-- Kiosk -->
-                <action android:name="tv.parentapproved.app.DEBUG_KIOSK_STATUS" />
-                <action android:name="tv.parentapproved.app.DEBUG_KIOSK_ENABLE" />
-                <action android:name="tv.parentapproved.app.DEBUG_KIOSK_DISABLE" />
-                <action android:name="tv.parentapproved.app.DEBUG_LIST_APPS" />
-                <action android:name="tv.parentapproved.app.DEBUG_WHITELIST_APP" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_KIOSK_STATUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_KIOSK_ENABLE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_KIOSK_DISABLE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_LIST_APPS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_WHITELIST_APP" />
                 <!-- Lifecycle -->
-                <action android:name="tv.parentapproved.app.DEBUG_FULL_RESET" />
-                <action android:name="tv.parentapproved.app.DEBUG_SIMULATE_OFFLINE" />
-                <action android:name="tv.parentapproved.app.DEBUG_GET_STATE_DUMP" />
-                <action android:name="tv.parentapproved.app.DEBUG_CLEAR_PLAY_EVENTS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_FULL_RESET" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SIMULATE_OFFLINE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_GET_STATE_DUMP" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_PLAY_EVENTS" />
             </intent-filter>
         </receiver>
     </application>

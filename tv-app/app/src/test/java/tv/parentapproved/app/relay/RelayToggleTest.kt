@@ -1,4 +1,4 @@
-package tv.parentapproved.app.relay
+package tv.safetubeforkids.app.relay
 
 import android.content.SharedPreferences
 import io.mockk.*

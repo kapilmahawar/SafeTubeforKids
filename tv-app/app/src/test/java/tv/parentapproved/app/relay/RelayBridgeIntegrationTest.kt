@@ -1,12 +1,12 @@
-package tv.parentapproved.app.relay
+package tv.safetubeforkids.app.relay
 
-import tv.parentapproved.app.ServiceLocator
-import tv.parentapproved.app.auth.PinManager
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.data.cache.CacheDatabase
-import tv.parentapproved.app.data.cache.ChannelDao
-import tv.parentapproved.app.data.events.PlayEventRecorder
-import tv.parentapproved.app.server.ParentApprovedServer
+import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.cache.ChannelDao
+import tv.safetubeforkids.app.data.events.PlayEventRecorder
+import tv.safetubeforkids.app.server.SafeTubeServer
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.mockk.coEvery
@@ -53,7 +53,7 @@ class RelayBridgeIntegrationTest {
             coEvery { mockChannelDao.getAll() } returns emptyList()
             every { mockDb.channelDao() } returns mockChannelDao
 
-            val mockPlayEventDao = mockk<tv.parentapproved.app.data.events.PlayEventDao>(relaxed = true)
+            val mockPlayEventDao = mockk<tv.safetubeforkids.app.data.events.PlayEventDao>(relaxed = true)
             every { mockDb.playEventDao() } returns mockPlayEventDao
 
             ServiceLocator.initForTest(
@@ -64,7 +64,7 @@ class RelayBridgeIntegrationTest {
             PlayEventRecorder.init(mockDb, clock = { System.currentTimeMillis() })
 
             server = embeddedServer(Netty, port = 0) {
-                ParentApprovedServer.configureServer(this)
+                SafeTubeServer.configureServer(this)
             }.start(wait = false)
 
             serverPort = runBlocking { server.engine.resolvedConnectors().first().port }

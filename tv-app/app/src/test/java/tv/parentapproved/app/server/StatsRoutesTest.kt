@@ -1,9 +1,9 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.data.FakePlayEventDao
-import tv.parentapproved.app.data.cache.CacheDatabase
-import tv.parentapproved.app.data.events.PlayEventEntity
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.FakePlayEventDao
+import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.events.PlayEventEntity
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*

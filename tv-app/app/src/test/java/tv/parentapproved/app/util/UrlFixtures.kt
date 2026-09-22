@@ -1,4 +1,4 @@
-package tv.parentapproved.app.util
+package tv.safetubeforkids.app.util
 
 /**
  * Test fixtures for ContentSourceParser — 73 URLs covering all supported and rejected patterns.

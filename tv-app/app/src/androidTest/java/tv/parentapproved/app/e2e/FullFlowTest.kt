@@ -1,13 +1,13 @@
-package tv.parentapproved.app.e2e
+package tv.safetubeforkids.app.e2e
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import tv.parentapproved.app.ServiceLocator
-import tv.parentapproved.app.auth.PinManager
-import tv.parentapproved.app.auth.PinResult
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.data.cache.CacheDatabase
-import tv.parentapproved.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.PinResult
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.cache.ChannelEntity
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
@@ -71,8 +71,8 @@ class FullFlowTest {
         // Add some data
         db.channelDao().insert(ChannelEntity(sourceType = "yt_playlist", sourceId = "PL1", sourceUrl = "url1", displayName = "P1"))
         db.channelDao().insert(ChannelEntity(sourceType = "yt_playlist", sourceId = "PL2", sourceUrl = "url2", displayName = "P2"))
-        tv.parentapproved.app.data.events.PlayEventRecorder.init(db)
-        db.playEventDao().insert(tv.parentapproved.app.data.events.PlayEventEntity(
+        tv.safetubeforkids.app.data.events.PlayEventRecorder.init(db)
+        db.playEventDao().insert(tv.safetubeforkids.app.data.events.PlayEventEntity(
             videoId = "v1", playlistId = "PL1", startedAt = System.currentTimeMillis()
         ))
 
@@ -89,10 +89,10 @@ class FullFlowTest {
 
     @Test
     fun e2e_offlineMode_togglesCorrectly() {
-        assertFalse(tv.parentapproved.app.util.OfflineSimulator.isOffline)
-        tv.parentapproved.app.util.OfflineSimulator.toggle()
-        assertTrue(tv.parentapproved.app.util.OfflineSimulator.isOffline)
-        tv.parentapproved.app.util.OfflineSimulator.toggle()
-        assertFalse(tv.parentapproved.app.util.OfflineSimulator.isOffline)
+        assertFalse(tv.safetubeforkids.app.util.OfflineSimulator.isOffline)
+        tv.safetubeforkids.app.util.OfflineSimulator.toggle()
+        assertTrue(tv.safetubeforkids.app.util.OfflineSimulator.isOffline)
+        tv.safetubeforkids.app.util.OfflineSimulator.toggle()
+        assertFalse(tv.safetubeforkids.app.util.OfflineSimulator.isOffline)
     }
 }

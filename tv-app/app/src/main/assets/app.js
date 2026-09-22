@@ -545,7 +545,7 @@
         if (footerVersion) footerVersion.textContent = 'v' + version;
         if (feedbackLink) {
             feedbackLink.href = 'mailto:hello@parentapproved.tv?subject='
-                + encodeURIComponent('[ParentApproved v' + version + '] Feedback')
+                + encodeURIComponent('[SafeTube v' + version + '] Feedback')
                 + '&body=' + encodeURIComponent('Device: \nIssue: \n\n');
         }
     }

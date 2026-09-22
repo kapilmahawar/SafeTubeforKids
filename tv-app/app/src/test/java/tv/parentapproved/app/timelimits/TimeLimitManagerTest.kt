@@ -1,4 +1,4 @@
-package tv.parentapproved.app.timelimits
+package tv.safetubeforkids.app.timelimits
 
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*

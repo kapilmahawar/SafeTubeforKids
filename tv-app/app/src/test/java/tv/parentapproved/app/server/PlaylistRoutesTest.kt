@@ -1,9 +1,9 @@
-package tv.parentapproved.app.server
+package tv.safetubeforkids.app.server
 
-import tv.parentapproved.app.auth.SessionManager
-import tv.parentapproved.app.data.FakeChannelDao
-import tv.parentapproved.app.data.cache.CacheDatabase
-import tv.parentapproved.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.FakeChannelDao
+import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.cache.ChannelEntity
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -36,7 +36,7 @@ class PlaylistRoutesTest {
 
         val mockDb = mockk<CacheDatabase>()
         every { mockDb.channelDao() } returns fakeDao
-        val mockVideoDao = mockk<tv.parentapproved.app.data.cache.PlaylistCacheDao>()
+        val mockVideoDao = mockk<tv.safetubeforkids.app.data.cache.PlaylistCacheDao>()
         every { mockDb.videoDao() } returns mockVideoDao
         coEvery { mockVideoDao.deleteByPlaylist(any()) } returns Unit
 
