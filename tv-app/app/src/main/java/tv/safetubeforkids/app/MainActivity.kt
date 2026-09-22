@@ -10,7 +10,6 @@ import kotlinx.coroutines.launch
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.HomeWatcherService
 import tv.safetubeforkids.app.server.ServerService
-import tv.safetubeforkids.app.server.SafeTubeServer
 import tv.safetubeforkids.app.ui.navigation.AppNavigation
 import tv.safetubeforkids.app.ui.theme.SafeTubeTheme
 
@@ -20,15 +19,11 @@ class MainActivity : ComponentActivity() {
         private const val TAG = "MainActivity"
     }
 
-    private var server: SafeTubeServer? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Start Ktor server on background thread to avoid ANR on slow devices
-        Thread {
-            server = SafeTubeServer(this).also { it.start() }
-        }.start()
+        // The dashboard server is owned by a foreground service so it survives the UI closing.
+        ServerService.start(this)
 
         setContent {
             SafeTubeTheme {
@@ -57,7 +52,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        server?.stop()
+        // Deliberately does NOT stop the server: the dashboard stays reachable while the app is
+        // closed. ServerService owns that lifetime.
     }
 
     fun exitLockTaskIfNeeded() {
