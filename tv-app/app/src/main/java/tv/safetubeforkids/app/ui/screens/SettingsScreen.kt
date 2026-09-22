@@ -115,9 +115,6 @@ fun SettingsScreen(
                 SettingsBtn("Reset PIN") {
                     val newPin = ServiceLocator.pinManager.resetPin()
                     ServiceLocator.sessionManager.invalidateAll()
-                    // A PIN nobody has used yet puts the TV back into pairing mode, so the family
-                    // can read the new code from the pairing screen.
-                    ServiceLocator.parentAccess.hasPaired = false
                     try {
                         ServiceLocator.relayConfig.rotateTvSecret()
                         if (ServiceLocator.isRelayEnabled()) {

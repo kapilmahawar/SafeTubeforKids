@@ -43,10 +43,27 @@ class SessionManagerTest {
     }
 
     @Test
-    fun maxConcurrentSessions_rejectsExcess() {
-        repeat(20) { sessionManager.createSession() }
+    fun maxConcurrentSessions_evictsTheOldestInsteadOfRefusing() {
+        // Refusing used to be the behaviour, and it locked the dashboard out for good: sessions last
+        // 90 days, so a family reaches the cap, and the auth route reported the refusal as success
+        // with an empty token - no error a parent could act on, just a dashboard that stopped
+        // working. The cap still holds; the oldest session gives way.
+        val oldest = sessionManager.createSession()
+        repeat(19) {
+            // Distinct creation times, so "the oldest" is unambiguous rather than whichever entry
+            // the map happens to iterate first.
+            currentTime += 1_000
+            sessionManager.createSession()
+        }
+        assertEquals(20, sessionManager.getActiveSessionCount())
+
+        currentTime += 1_000
         val excess = sessionManager.createSession()
-        assertNull("21st session should be rejected", excess)
+
+        assertNotNull("a full store must still issue a login token", excess)
+        assertTrue(sessionManager.validateSession(excess!!))
+        assertEquals("the cap still holds", 20, sessionManager.getActiveSessionCount())
+        assertFalse("the oldest session gives way", sessionManager.validateSession(oldest!!))
     }
 
     @Test

@@ -2,7 +2,6 @@ package tv.safetubeforkids.app
 
 import android.content.Context
 import android.content.SharedPreferences
-import tv.safetubeforkids.app.auth.ParentAccess
 import tv.safetubeforkids.app.auth.PinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.auth.SharedPrefsPinLockoutPersistence
@@ -18,7 +17,6 @@ import tv.safetubeforkids.app.timelimits.TimeLimitManager
 
 object ServiceLocator {
     lateinit var pinManager: PinManager
-    lateinit var parentAccess: ParentAccess
     lateinit var sessionManager: SessionManager
     lateinit var database: CacheDatabase
     lateinit var relayConfig: RelayConfig
@@ -53,14 +51,8 @@ object ServiceLocator {
         val pinLockoutPersistence = SharedPrefsPinLockoutPersistence(
             context.getSharedPreferences("parentapproved_pin_lockout", Context.MODE_PRIVATE)
         )
-        parentAccess = ParentAccess(context)
         pinManager = PinManager(
-            onPinValidated = {
-                // A PIN check that succeeded means a parent is present. From here on the pairing
-                // code and the parent settings stop being readable without the PIN.
-                parentAccess.hasPaired = true
-                sessionManager.createSession() ?: ""
-            },
+            onPinValidated = { sessionManager.createSession() ?: "" },
             lockoutPersistence = pinLockoutPersistence,
         )
         PlayEventRecorder.init(database)

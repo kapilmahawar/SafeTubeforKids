@@ -212,7 +212,11 @@ if (-not $launched) { Log 'ADB_TEST: BLOCKED - app process not running'; exit 3 
 Adb @('shell', "am broadcast -a $pkg.DEBUG_GET_PIN -p $pkg") | Out-Null
 Start-Sleep -Seconds 2
 $pinLine = (Adb @('logcat', '-d', '-s', 'SafeTube-Intent')) -join "`n"
-$pin = ([regex]::Match($pinLine, '"pin":"(\d{6})"')).Groups[1].Value
+# The NEWEST line, not the first. The buffer outlives the app process, and PinManager generates its
+# PIN in memory on every start, so an earlier line is a PIN this process rejects - which fails auth,
+# and with it api-reachable, library readiness and the whole navigation phase.
+$pinMatches = [regex]::Matches($pinLine, '"pin":"(\d{6})"')
+$pin = if ($pinMatches.Count -gt 0) { $pinMatches[$pinMatches.Count - 1].Groups[1].Value } else { '' }
 Log "dashboard pin acquired: $($pin -ne '')"
 $headers = @{}
 if ($pin) {
@@ -258,6 +262,18 @@ for ($attempt = 1; $attempt -le 20; $attempt++) {
 }
 Log "  library ready before navigating: $libraryReady"
 
+# The app can be restored onto Settings or Connect from the previous session's saved view state, and
+# a library card must own focus before DOWN+OK can open a video. Without this the first OK landed on
+# a toolbar button and every later sequence ran inside the wrong screen, which read as "the remote
+# cannot start a video" while nothing was actually wrong with playback.
+for ($i = 0; $i -lt 3; $i++) {
+    Adb @('shell', 'uiautomator dump /sdcard/ui.xml') | Out-Null
+    $screenDump = (Adb @('shell', 'cat /sdcard/ui.xml')) -join ' '
+    if ($screenDump -notmatch 'Current PIN|TV Info') { break }
+    Log '  a parent screen was restored - returning to the library before driving the remote'
+    Key 'KEYCODE_BACK'
+    Start-Sleep -Seconds 2
+}
 Log "=== navigate with D-pad only ==="
 function PlayingNow {
     $s = ApiState

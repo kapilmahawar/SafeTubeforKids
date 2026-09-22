@@ -21,7 +21,7 @@ class SessionManager(
 
     fun createSession(): String? {
         pruneExpired()
-        if (sessions.size >= maxSessions) return null
+        evictOldestIfFull()
 
         val bytes = ByteArray(32)
         random.nextBytes(bytes)
@@ -29,6 +29,18 @@ class SessionManager(
         sessions[token] = clock()
         persistence?.save(sessions)
         return token
+    }
+
+    /**
+     * The cap bounds what a device could accumulate, but it must never be the reason a parent cannot
+     * log in. Sessions live for 90 days, so ordinary use reaches the cap - and returning null there
+     * made the auth route answer "success" with an empty token, locking the dashboard out silently
+     * and permanently. The oldest session gives way instead, which is what a parent expects: the
+     * phone they signed in from months ago yields to the one in their hand.
+     */
+    private fun evictOldestIfFull() {
+        if (sessions.size < maxSessions) return
+        sessions.entries.minByOrNull { it.value }?.let { sessions.remove(it.key) }
     }
 
     fun validateSession(token: String): Boolean {
@@ -45,7 +57,7 @@ class SessionManager(
         sessions.remove(token)
 
         pruneExpired()
-        if (sessions.size >= maxSessions) return null
+        evictOldestIfFull()
 
         val bytes = ByteArray(32)
         random.nextBytes(bytes)

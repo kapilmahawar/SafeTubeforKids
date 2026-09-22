@@ -54,15 +54,15 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   Retry/Back; unauthenticated `GET`/`POST /playlists` return 401; a `VIEW` deep link is not
   handled by the app; a URL passed as an activity extra starts nothing; the child-facing library
   exposes no search, no URL entry and no source editing.
-- Parent access, verified on the TV: the Settings and Connect Phone entries in the child library now
-  demand the PIN before opening (`PIN gate shown: Parents only`, a wrong PIN logged as rejected with
-  its remaining attempts, the right one unlocking; `PIN gate shown: Pair this TV` once a parent has
-  paired). Before this, a single OK press on the child screen opened the parent tools, which printed
-  the PIN in plain text and offered Reset PIN, Clear Sessions and Clear Events - a child could read
-  the PIN, take over the dashboard, or erase the watch history. The pairing code remains readable
-  until a parent has paired, because that is how the first phone gets in. The release manifest
-  contains no `DebugReceiver` and is not debuggable, so the debug entry points cannot exist in a
-  build a family installs.
+- Parent screens: the Settings and Connect Phone buttons in the child library are deliberately NOT
+  gated, by product decision. A PIN gate was built and verified working (gate shown, attempts-limited
+  rejection, unlock), then removed: the dashboard asks for a PIN that the TV regenerates on every app
+  start, so gating the screen that displays it strands a parent who cannot recall the code. The
+  reasoning accepted instead is that small children are unlikely to open a web dashboard, and the
+  child-facing app has no URL entry, no search and no way to approve content, so the surface a child
+  can reach cannot add unapproved videos. **Do not re-add a gate here without asking first.**
+  Verified separately: the release manifest contains no `DebugReceiver` and is not debuggable, so the
+  debug entry points cannot exist in a build a family installs.
 - Dashboard: the TV serves its own dashboard at `/` and that response, plus `app.js` and
   `style.css`, are byte-identical to this repo's assets; every `getElementById` target resolves. The
   user confirmed **Export list** works in a browser.
@@ -105,15 +105,14 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 5. **Latent, unproven** — a duplicate `Dashboard server started` line appeared once after an
    install-then-launch; a clean force-stop + launch produced exactly one, so it is unconfirmed.
    Watch for a second `Ktor server started on port 8080`.
-6. **Parent access, residual tension** — the PIN gate closes the opportunistic bypass, but the
-   pairing code is still printed on the TV before a parent has paired, so a child who deliberately
-   opens Connect Phone on a never-paired TV can read it. Gating that surface completely would make
-   first pairing impossible. The proper fix is a phone-driven unlock: the dashboard, which already
-   holds a session, should be able to reveal the PIN or unlock the TV. Related observation:
-   `PinManager.currentPin` is generated in memory at construction, so the PIN changes on every app
-   start. Sessions are persisted, so an already-paired phone keeps working - but a parent who has
-   forgotten the PIN and needs the TV settings has to clear the app's data to start over. Decide
-   whether rotating the pairing code per start is intended before relying on it.
+6. **Parent access — decided, do not re-litigate.** The TV shows the current PIN and QR code on the
+   Connect Phone screen, and Settings stays one press away from the child library. That was chosen
+   over a PIN gate (which was built, verified and then removed) because `PinManager` generates its
+   PIN in memory at every app start: a parent who cannot recall the code has no other way to
+   retrieve it. Accepted residual: a curious child can reach Reset PIN, Clear Sessions and Clear
+   Events from that screen. The developer tools there (offline simulation, log panel, clear log) are
+   debug-build only. If a stronger boundary is ever wanted, the fix is a phone-driven unlock - the
+   dashboard already holds a session - rather than hiding the code on the TV.
 
 ## Pitfalls this codebase has already cost time on
 
@@ -149,3 +148,13 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - **A measurement is not a verdict.** The first bandwidth reading of a stream is often low simply
   because little has been downloaded, so Auto keeps a floor (`MIN_AUTO_HEIGHT`) for its first
   choice and relies on the 8s stall step-down to go lower once the connection has proven itself.
+- **A stale PIN reads as a broken app.** The harness took the *first* `"pin"` match from the
+  `SafeTube-Intent` log buffer. That buffer outlives the app process and the PIN is regenerated on
+  every start, so after any manual poking the run authenticated with a dead PIN: auth failed, and
+  with it `api-reachable`, library readiness and the whole navigation phase. It now takes the newest
+  match. Anything that reads a rotating value out of logcat needs the same care.
+- **A full session store used to wedge the dashboard.** `createSession` returned null once 20
+  sessions existed, and the auth route turned that into `success: true` with an empty token - no
+  error a parent could act on, just a dashboard that stopped working, permanently, because sessions
+  last 90 days. It now evicts the oldest session and still issues a token; `SessionEvictionTest`
+  pins that, and the old test that asserted the refusal was updated rather than deleted.
