@@ -26,6 +26,7 @@ param(
     [string]$Adb = '',
     [switch]$SkipBuild,
     [switch]$ClearState,
+    [switch]$QualityProbe,
     [int]$LaunchWaitSec = 25
 )
 
@@ -461,6 +462,31 @@ if ($opened) {
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 3
 
+    # --- autoplay: a finished video must advance to the next APPROVED queue item ---------
+    EnsureApp 'autoplay' | Out-Null
+    Adb @('logcat', '-c') | Out-Null
+    PlayVideo 'e_04ZrNroTo' 'PLT1rvk7Trkw5qNnjS-y7-0FZQOsdQOvHT'
+    Start-Sleep -Seconds 18
+    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 5
+    }
+    $beforeAuto = PlayingNow
+    if ($beforeAuto) {
+        $autoDuration = [int]$beforeAuto.durationSec
+        if ($autoDuration -gt 20 -and $autoDuration -le 900) {
+            $autoPresses = [Math]::Max(1, [int](($autoDuration - 12) / 10))
+            for ($i = 1; $i -le $autoPresses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+            Start-Sleep -Seconds 45
+            $afterAuto = PlayingNow
+            Record 'autoplay-advances-to-next-approved' (($null -ne $afterAuto) -and ($afterAuto.videoId -ne $beforeAuto.videoId)) "queue $($beforeAuto.videoId) -> $($afterAuto.videoId)"
+            Record 'autoplay-stays-in-same-source' (($null -ne $afterAuto) -and ($afterAuto.playlistId -eq $beforeAuto.playlistId))
+            Shot '21-autoplay'
+        } else {
+            Log "  AUTOPLAY_TEST: LIMITED - duration ${autoDuration}s cannot be reached by remote seeking"
+        }
+    }
+
     # --- natural end of video: playback must stop inside the approved queue -------------
     EnsureApp 'end-of-video' | Out-Null
     Adb @('logcat', '-c') | Out-Null
@@ -512,6 +538,64 @@ if ($opened) {
     if (Test-Path $aapt2) {
         & $aapt2 dump xmltree --file AndroidManifest.xml $apk 2>&1 | Set-Content (Join-Path $out 'manifest-tree.txt')
         Log '  exported component surface written to manifest-tree.txt'
+    }
+
+    # --- optional: quality/audio switching needs multi-rendition content -----------------
+    # Kids' videos expose a single progressive rendition (CoComelon resolved 1 quality, 0
+    # audio), so this check is opt-in: it temporarily approves a public multi-rendition video,
+    # exercises the menus, then removes it again so the child's library is left untouched.
+    if ($QualityProbe) {
+        $probeVideo = 'aqz-KE-bpKQ'
+        $probeSourceId = $null
+        try {
+            $added = Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Method Post `
+                -Headers $headers -Body (@{ url = "https://www.youtube.com/watch?v=$probeVideo" } | ConvertTo-Json -Compress) `
+                -ContentType 'application/json' -TimeoutSec 20
+            $probeSourceId = $added.id
+            Log "  temporarily approved $probeVideo for the quality/audio probe"
+        } catch {
+            Log "  QUALITY_TEST: BLOCKED - could not approve the probe video"
+        }
+
+        if ($probeSourceId) {
+            Start-Sleep -Seconds 12
+            Adb @('logcat', '-c') | Out-Null
+            PlayVideo $probeVideo $probeVideo
+            Start-Sleep -Seconds 20
+
+            Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 2
+            Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 12
+            $qualityLog = (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n"
+            $qualityOptions = 0
+            if ($qualityLog -match 'Menu opened: QUALITY \((\d+) options\)') { $qualityOptions = [int]$Matches[1] }
+            Record 'quality-menu-lists-real-renditions' ($qualityOptions -gt 1) "$qualityOptions options offered"
+            Record 'quality-switch-applied' ($qualityLog -match 'Player menu QUALITY -> h\d+')
+            Shot '19-quality'
+
+            Key 'KEYCODE_BACK'
+            Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 2
+            Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 12
+            $audioLog = (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n"
+            $audioOptions = 0
+            if ($audioLog -match 'Menu opened: AUDIO \((\d+) options\)') { $audioOptions = [int]$Matches[1] }
+            Record 'audio-menu-lists-real-tracks' ($audioOptions -gt 1) "$audioOptions options offered"
+            Record 'audio-switch-applied' ($audioLog -match 'Player menu AUDIO -> (ab|at):\d+')
+            Shot '20-audio'
+
+            try {
+                Invoke-WebRequest -Uri "http://$($Serial.Split(':')[0]):8080/playlists/$probeSourceId" -Method Delete `
+                    -Headers $headers -TimeoutSec 20 -UseBasicParsing | Out-Null
+                Log '  removed the probe video again'
+            } catch {
+                Log "  WARNING: could not remove the probe video (id $probeSourceId)"
+            }
+        }
+    } else {
+        Log '  QUALITY_TEST: skipped - run with -QualityProbe (needs a multi-rendition video)'
     }
 
     # --- approved-queue navigation ----------------------------------

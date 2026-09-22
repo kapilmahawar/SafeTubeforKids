@@ -550,7 +550,7 @@ private fun labelFor(menu: PlayerMenu, controller: PlaybackController): String =
     PlayerMenu.RESUME -> "Continue"
     PlayerMenu.CAPTIONS -> "Subtitles: ${controller.captionsLabel}"
     PlayerMenu.QUALITY -> "Quality"
-    PlayerMenu.AUDIO -> "Audio"
+    PlayerMenu.AUDIO -> "Audio: ${controller.audioLabel}"
     PlayerMenu.SPEED -> "Speed: ${controller.speed}x"
     PlayerMenu.ASPECT -> when (controller.aspectId) {
         AspectChoices.ZOOM -> "Fit: Crop"

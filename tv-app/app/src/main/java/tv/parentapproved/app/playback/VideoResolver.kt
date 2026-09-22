@@ -14,11 +14,20 @@ data class QualityOption(
     val isMerged: Boolean,
 )
 
-/** One selectable audio rendition (fallback path; DASH mode reads tracks from the manifest). */
+/**
+ * One selectable audio track.
+ *
+ * YouTube publishes multi-language audio as separate tracks (English, Hindi, ...), each with its
+ * own bitrate variants. A track - not a bitrate - is what a viewer chooses, so the bitrate
+ * variants of one language collapse into a single option here.
+ */
 data class AudioOption(
     val label: String,
     val url: String,
     val bitrateKbps: Int,
+    val trackId: String,
+    val languageTag: String,
+    val isAutoDubbed: Boolean = false,
 )
 
 /** One selectable subtitle track, already carrying YouTube's TTML URL. */
@@ -116,9 +125,26 @@ object VideoResolver {
                     val url = runCatching { stream.content }.getOrNull()
                         ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                     val bitrate = runCatching { stream.averageBitrate }.getOrDefault(0)
-                    AudioOption(label = "$bitrate kbps", url = url, bitrateKbps = bitrate)
+                    val trackId = runCatching { stream.audioTrackId }.getOrNull()
+                        ?.takeIf { it.isNotBlank() } ?: "und"
+                    val locale = runCatching { stream.audioLocale }.getOrNull()
+                    val languageTag = locale?.language
+                        ?: trackId.substringBefore('.').takeIf { it.length in 2..5 }
+                        ?: "und"
+                    val trackName = runCatching { stream.audioTrackName }.getOrNull()
+                        ?.takeIf { it.isNotBlank() }
+                    val typeName = runCatching { stream.audioTrackType.toString() }.getOrDefault("")
+                    AudioOption(
+                        label = trackName ?: locale?.displayLanguage ?: "Original",
+                        url = url,
+                        bitrateKbps = bitrate,
+                        trackId = trackId,
+                        languageTag = languageTag,
+                        isAutoDubbed = typeName.contains("DUBBED_AUTO"),
+                    )
                 }
-                .distinctBy { it.bitrateKbps }
+                .groupBy { it.trackId }                                   // one option per language
+                .mapNotNull { (_, variants) -> variants.maxByOrNull { it.bitrateKbps } }
                 .sortedByDescending { it.bitrateKbps }
 
             if (qualities.isEmpty()) {

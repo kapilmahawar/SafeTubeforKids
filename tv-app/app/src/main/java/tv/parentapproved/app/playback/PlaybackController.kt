@@ -106,6 +106,8 @@ class PlaybackController(
         private set
     var captionsLabel by mutableStateOf("Off")
         private set
+    var audioLabel by mutableStateOf("Audio")
+        private set
     var speed by mutableStateOf(1f)
         private set
     var aspectId by mutableStateOf(AspectChoices.FIT)
@@ -115,7 +117,7 @@ class PlaybackController(
 
     private var selectedCaptionTag: String? = null
     private var forcedQualityHeight: Int? = null
-    private var forcedAudioBitrate: Int? = null
+    private var forcedAudioTrackId: String? = null
     private var resumePositionMs: Long = 0L
     private var released = false
 
@@ -233,8 +235,8 @@ class PlaybackController(
         if (forcedQualityHeight != null && media.qualities.none { it.height == forcedQualityHeight }) {
             forcedQualityHeight = null
         }
-        if (forcedAudioBitrate != null && media.audioOptions.none { it.bitrateKbps == forcedAudioBitrate }) {
-            forcedAudioBitrate = null
+        if (forcedAudioTrackId != null && media.audioOptions.none { it.trackId == forcedAudioTrackId }) {
+            forcedAudioTrackId = null
         }
         if (selectedCaptionTag != null && media.captions.none { it.languageTag == selectedCaptionTag }) {
             selectedCaptionTag = null
@@ -277,9 +279,10 @@ class PlaybackController(
             val quality = forcedQualityHeight
                 ?.let { height -> media.qualities.firstOrNull { it.height == height } }
                 ?: media.defaultQuality
-            val audio = forcedAudioBitrate
-                ?.let { bitrate -> media.audioOptions.firstOrNull { it.bitrateKbps == bitrate } }
+            val audio = forcedAudioTrackId
+                ?.let { trackId -> media.audioOptions.firstOrNull { it.trackId == trackId } }
                 ?: media.defaultAudio
+            audioLabel = audio?.label ?: "Audio"
 
             val source = PlayerMedia.mediaSource(
                 media = media,
@@ -476,21 +479,17 @@ class PlaybackController(
         }
 
         PlayerMenu.AUDIO -> {
-            val group = adaptiveAudioGroup()
-            if (group != null) {
-                (0 until group.length).map { trackIndex ->
-                    val format = group.getFormat(trackIndex)
-                    val label = format.label ?: format.language ?: "Track ${trackIndex + 1}"
-                    PlayerOption("at:$trackIndex", label, isOverridden(group, trackIndex))
-                }
-            } else {
-                val media = resolved
-                val current = forcedAudioBitrate ?: media?.defaultAudio?.bitrateKbps
-                val options = media?.audioOptions.orEmpty().map { audio ->
-                    PlayerOption("ab:${audio.bitrateKbps}", audio.label, audio.bitrateKbps == current)
-                }
-                options.ifEmpty { listOf(PlayerOption("none", "One audio track", true)) }
+            val media = resolved
+            val current = forcedAudioTrackId ?: media?.defaultAudio?.trackId
+            val options = media?.audioOptions.orEmpty().map { audio ->
+                val suffix = if (audio.isAutoDubbed) " (auto-dubbed)" else ""
+                PlayerOption(
+                    id = "at:${audio.trackId}",
+                    label = "${audio.label}$suffix",
+                    selected = audio.trackId == current,
+                )
             }
+            options.ifEmpty { listOf(PlayerOption("none", "One audio track", true)) }
         }
 
         PlayerMenu.SPEED -> speedChoices.map { choice ->
@@ -597,17 +596,13 @@ class PlaybackController(
 
     private fun applyAudio(id: String) {
         val media = resolved ?: return
-        val group = adaptiveAudioGroup()
-        if (group != null && id.startsWith("at:")) {
-            val trackIndex = id.removePrefix("at:").toIntOrNull() ?: return
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setOverrideForType(TrackSelectionOverride(group, trackIndex))
-                .build()
-            return
-        }
-        val bitrate = id.removePrefix("ab:").toIntOrNull() ?: return
-        if (media.audioOptions.none { it.bitrateKbps == bitrate }) return
-        forcedAudioBitrate = bitrate
+        val trackId = id.removePrefix("at:")
+        val option = media.audioOptions.firstOrNull { it.trackId == trackId } ?: return
+        forcedAudioTrackId = trackId
+        audioLabel = option.label
+
+        // Multi-language audio arrives as separate YouTube tracks, so the played stream has to
+        // be reopened with the chosen language - keeping the playhead so nothing restarts.
         val position = player.currentPosition
         scope.launch { prepare(currentVideoId, position) }
     }
