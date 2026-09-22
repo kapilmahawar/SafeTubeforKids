@@ -298,7 +298,7 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
                     if (ServiceLocator.isInitialized() && ServiceLocator.updateChecker.isUpdateAvailable) {
                         val latest = ServiceLocator.updateChecker.latestVersion
                         Text(
-                            text = "Update available: v${latest?.latest} — visit parentapproved.tv",
+                            text = "Update available: v${latest?.latest}",
                             style = MaterialTheme.typography.bodySmall,
                             color = StatusWarning,
                             fontWeight = FontWeight.SemiBold,
