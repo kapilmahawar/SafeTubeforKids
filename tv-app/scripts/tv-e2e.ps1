@@ -329,6 +329,12 @@ if ($opened) {
     Record 'remote-resume' $resumeOk "expected playing=true"
 
     # --- seeking (asserted on the real playhead, not watch time) -----
+    # Start from a known position. A resumed video can be near its end, and +20s of seeking then
+    # overshoots it: playback finishes, the queue advances, and the new video's 0s playhead reads
+    # like a failed seek. Rewinding first gives the measurement room.
+    foreach ($i in 1..15) { Key 'KEYCODE_DPAD_LEFT' }
+    Start-Sleep -Seconds 2
+
     $p0 = [int](PlayingNow).positionSec
     Key 'KEYCODE_MEDIA_FAST_FORWARD'
     Key 'KEYCODE_DPAD_RIGHT'
