@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Autonomous end-to-end test of ParentApproved on a REAL Android TV over ADB.
+  Autonomous end-to-end test of SafeTube on a REAL Android TV over ADB.
 
 .DESCRIPTION
   Builds (optional), installs, launches and exercises the app on the connected TV using
@@ -11,7 +11,7 @@
   install.log, test.log, logcat.txt, screenshots and an API state dump per step.
 
   Assertions are made against real signals, never assumptions:
-    * the app's own log (ParentApproved tag)
+    * the app's own log (SafeTube tag)
     * the Ktor status API (currentlyPlaying / position / playing flag)
     * screenshots for visual checks
 
@@ -40,7 +40,7 @@ $adb = if ($Adb) {
 } else {
     'adb'
 }
-$pkg = 'tv.parentapproved.app'
+$pkg = 'tv.safetubeforkids.app'
 $stamp = Get-Date -Format 'yyyy-MM-dd-HHmmss'
 $out = Join-Path $repoRoot "test-results\tv\$stamp"
 New-Item -ItemType Directory -Force -Path $out | Out-Null
@@ -105,7 +105,7 @@ function Wait-PlayingFlag {
 
 # Direct evidence that remote keys were handled by the player, straight from the app's log.
 function Get-RemoteActions {
-    $lines = (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n"
+    $lines = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
     return @([regex]::Matches($lines, 'Remote key -> (\w+)') | ForEach-Object { $_.Groups[1].Value })
 }
 
@@ -195,7 +195,7 @@ if (-not $launched) { Log 'ADB_TEST: BLOCKED - app process not running'; exit 3 
 
 Adb @('shell', "am broadcast -a $pkg.DEBUG_GET_PIN -p $pkg") | Out-Null
 Start-Sleep -Seconds 2
-$pinLine = (Adb @('logcat', '-d', '-s', 'ParentApproved-Intent')) -join "`n"
+$pinLine = (Adb @('logcat', '-d', '-s', 'SafeTube-Intent')) -join "`n"
 $pin = ([regex]::Match($pinLine, '"pin":"(\d{6})"')).Groups[1].Value
 Log "dashboard pin acquired: $($pin -ne '')"
 $headers = @{}
@@ -280,7 +280,7 @@ if ($opened) {
             $running = $true
             break
         }
-        if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+        if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
             Log '  resume prompt is open - choosing Resume so the control tests have a live player'
             Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 5
@@ -326,7 +326,7 @@ if ($opened) {
     # --- player menus (subtitles / quality / audio / speed / screen fit) ---
     # Menus are driven entirely from the remote: DOWN enters the button row, LEFT/RIGHT pick a
     # button, OK opens it, UP/DOWN pick an option, OK applies, BACK closes it.
-    $menuLog = { (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n" }
+    $menuLog = { (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n" }
 
     $fgMenus = EnsureApp 'menus'
     Record 'app-foreground-at-menus' $fgMenus
@@ -340,7 +340,7 @@ if ($opened) {
         PlayVideo 'e_04ZrNroTo' 'PLT1rvk7Trkw5qNnjS-y7-0FZQOsdQOvHT'
         Start-Sleep -Seconds 18
         # A resume prompt may legitimately appear first; clear it so the menu tests are clean.
-        if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+        if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
             Log '  resume prompt opened first - continuing playback before the caption test'
             Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 5
@@ -420,7 +420,7 @@ if ($opened) {
     Start-Sleep -Seconds 16
     # Deterministic baseline: an earlier phase may have left a saved position, which would make
     # the measurement below compare against a stale value. "Start over" deletes that row.
-    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+    if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
         Log '  clearing a pre-existing saved position (Start over) for a deterministic baseline'
         Key 'KEYCODE_DPAD_DOWN'
         Key 'KEYCODE_DPAD_CENTER'
@@ -472,7 +472,7 @@ if ($opened) {
     Adb @('logcat', '-c') | Out-Null
     PlayVideo 'e_04ZrNroTo' 'PLT1rvk7Trkw5qNnjS-y7-0FZQOsdQOvHT'
     Start-Sleep -Seconds 18
-    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+    if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
         Key 'KEYCODE_DPAD_CENTER'
         Start-Sleep -Seconds 5
     }
@@ -497,7 +497,7 @@ if ($opened) {
     Adb @('logcat', '-c') | Out-Null
     PlayVideo $resumeVideo $resumeVideo
     Start-Sleep -Seconds 16
-    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+    if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
         Key 'KEYCODE_DPAD_CENTER'
         Start-Sleep -Seconds 5
     }
@@ -580,7 +580,7 @@ if ($opened) {
             Start-Sleep -Seconds 2
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 12
-            $qualityLog = (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n"
+            $qualityLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
             $qualityOptions = 0
             if ($qualityLog -match 'Menu opened: QUALITY \((\d+) options\)') { $qualityOptions = [int]$Matches[1] }
             Record 'quality-menu-lists-real-renditions' ($qualityOptions -gt 1) "$qualityOptions options offered"
@@ -592,7 +592,7 @@ if ($opened) {
             Start-Sleep -Seconds 2
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 12
-            $audioLog = (Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n"
+            $audioLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
             $audioOptions = 0
             if ($audioLog -match 'Menu opened: AUDIO \((\d+) options\)') { $audioOptions = [int]$Matches[1] }
             Record 'audio-menu-lists-real-tracks' ($audioOptions -gt 1) "$audioOptions options offered"
