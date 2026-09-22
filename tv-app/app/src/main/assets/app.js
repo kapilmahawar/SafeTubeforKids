@@ -287,6 +287,68 @@
         }
     }
 
+    // --- Export / import the approved library ---
+    // Export downloads what the TV currently has approved; import replays such a file onto this
+    // TV. The file is posted verbatim (not re-encoded) because the server parses the payload it
+    // is given and reports per-source outcomes.
+    var exportButton = document.getElementById('export-sources');
+    var importInput = document.getElementById('import-sources');
+    var transferStatus = document.getElementById('transfer-status');
+
+    function showTransfer(message, isError) {
+        transferStatus.textContent = message;
+        transferStatus.classList.remove('hidden');
+        transferStatus.style.color = isError ? '#c0392b' : '';
+    }
+
+    exportButton.addEventListener('click', async function() {
+        try {
+            var result = await apiCall('GET', '/sources/export');
+            if (result.status !== 200) {
+                showTransfer(result.data.error || 'Export failed', true);
+                return;
+            }
+            var blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
+            var url = URL.createObjectURL(blob);
+            var link = document.createElement('a');
+            link.href = url;
+            link.download = 'safetube-for-kids-sources.json';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+            showTransfer('Exported ' + result.data.sources.length + ' source(s).', false);
+        } catch (err) {
+            showTransfer('Export failed', true);
+        }
+    });
+
+    importInput.addEventListener('change', async function() {
+        var file = importInput.files && importInput.files[0];
+        if (!file) return;
+        try {
+            var text = await file.text();
+            var resp = await fetch(API_BASE + '/sources/import', {
+                method: 'POST',
+                headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
+                body: text
+            });
+            var summary = await resp.json();
+            if (resp.status !== 200) {
+                showTransfer(summary.error || 'Import failed', true);
+                return;
+            }
+            var failed = (summary.failed || []).length;
+            showTransfer('Imported ' + summary.added.length + ', skipped ' + summary.skipped.length +
+                (failed ? ', failed ' + failed : '') + '.', failed > 0);
+            loadPlaylists();
+        } catch (err) {
+            showTransfer('Import failed', true);
+        } finally {
+            importInput.value = '';
+        }
+    });
+
     // --- Stats ---
     async function loadStats() {
         try {
