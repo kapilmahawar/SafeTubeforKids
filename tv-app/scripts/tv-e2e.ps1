@@ -409,8 +409,17 @@ if ($opened) {
     Record 'app-foreground-at-resume' $fgResume
 
     $resumeVideo = '9Yq08C8UIHw'
+    Adb @('logcat', '-c') | Out-Null
     PlayVideo $resumeVideo $resumeVideo
     Start-Sleep -Seconds 16
+    # Deterministic baseline: an earlier phase may have left a saved position, which would make
+    # the measurement below compare against a stale value. "Start over" deletes that row.
+    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+        Log '  clearing a pre-existing saved position (Start over) for a deterministic baseline'
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 6
+    }
     foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }   # ~40s in
     Start-Sleep -Seconds 14                              # let the periodic save happen
     $posBefore = [int](PlayingNow).positionSec
@@ -451,6 +460,59 @@ if ($opened) {
     Shot '17-unapproved-blocked'
     Key 'KEYCODE_BACK'
     Start-Sleep -Seconds 3
+
+    # --- natural end of video: playback must stop inside the approved queue -------------
+    EnsureApp 'end-of-video' | Out-Null
+    Adb @('logcat', '-c') | Out-Null
+    PlayVideo $resumeVideo $resumeVideo
+    Start-Sleep -Seconds 16
+    if (((Adb @('logcat', '-d', '-s', 'ParentApproved')) -join "`n") -match 'Menu opened: RESUME') {
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 5
+    }
+    $durationSec = [int](PlayingNow).durationSec
+    if ($durationSec -gt 20 -and $durationSec -le 900) {
+        # Seek to just before the end and let it play out, so the end is reached naturally.
+        $presses = [Math]::Max(1, [int](($durationSec - 14) / 10))
+        for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+        Start-Sleep -Seconds 32
+        Record 'end-of-video-stops-at-queue-end' ($null -eq (PlayingNow)) "video ${durationSec}s, single approved item"
+    } else {
+        Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
+    }
+
+    # --- security: the API must refuse anything unauthenticated -------------------------
+    $unauthRead = 0
+    $unauthWrite = 0
+    try {
+        Invoke-RestMethod -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -TimeoutSec 10 | Out-Null
+    } catch { $unauthRead = $_.Exception.Response.StatusCode.value__ }
+    try {
+        Invoke-WebRequest -Uri "http://$($Serial.Split(':')[0]):8080/playlists" -Method Post `
+            -Body '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ"}' -ContentType 'application/json' `
+            -TimeoutSec 10 -UseBasicParsing | Out-Null
+    } catch { $unauthWrite = $_.Exception.Response.StatusCode.value__ }
+    Record 'api-refuses-unauth-read' ($unauthRead -eq 401) "GET /playlists -> $unauthRead"
+    Record 'api-refuses-unauth-write' ($unauthWrite -eq 401) "POST /playlists -> $unauthWrite"
+
+    # --- security: no deep link may carry a video into the player ----------------------
+    Adb @('shell', "am start -a android.intent.action.VIEW -d 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'") | Out-Null
+    Start-Sleep -Seconds 6
+    $foregroundAfterView = ForegroundPackage
+    Record 'no-view-deeplink-handler' ($foregroundAfterView -ne $pkg) "foreground=$foregroundAfterView"
+    Record 'deeplink-plays-nothing' ($null -eq (PlayingNow))
+
+    Adb @('shell', "am start -n $pkg/.MainActivity --es url 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'") | Out-Null
+    Start-Sleep -Seconds 6
+    Record 'extras-cannot-start-playback' ($null -eq (PlayingNow))
+    Shot '18-security'
+
+    # exported surface, recorded as an artifact for review
+    $aapt2 = Join-Path $env:ANDROID_HOME 'build-tools\36.0.0\aapt2.exe'
+    if (Test-Path $aapt2) {
+        & $aapt2 dump xmltree --file AndroidManifest.xml $apk 2>&1 | Set-Content (Join-Path $out 'manifest-tree.txt')
+        Log '  exported component surface written to manifest-tree.txt'
+    }
 
     # --- approved-queue navigation ----------------------------------
     # Recompute the queue size for whatever is playing now (the caption step may have switched
