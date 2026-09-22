@@ -766,7 +766,9 @@ if ($opened) {
             Record 'quality-switch-applied' ($qualityLog -match 'Player menu QUALITY -> h\d+')
             Shot '19-quality'
 
-            Key 'KEYCODE_BACK'
+            # No BACK here. The quality menu closes itself 5s after a choice and this phase waits 12s, so
+            # BACK was not closing a menu - it was popping the player, which sent the audio keys to the
+            # library and made this assert "0 options offered" while the audio menu was fine.
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_RIGHT'; Key 'KEYCODE_DPAD_CENTER'
             Start-Sleep -Seconds 2
             Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'
