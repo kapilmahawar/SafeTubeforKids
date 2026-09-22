@@ -97,11 +97,17 @@ fun SettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // --- Debug ---
+            // --- Parents ---
+            // Only reachable after the PIN, so these are parent tools rather than a way in.
+            Text("Parents", style = MaterialTheme.typography.titleMedium, color = KidText)
+            Spacer(Modifier.height(8.dp))
+            // Developer tools follow; they are kept out of a build a family installs.
             Text("Debug", style = MaterialTheme.typography.titleMedium, color = StatusWarning)
             Spacer(modifier = Modifier.height(8.dp))
 
-            Text("Offline sim: ${OfflineSimulator.isOffline}", style = MaterialTheme.typography.bodySmall, color = KidTextDim)
+            if (BuildConfig.IS_DEBUG) {
+                Text("Offline sim: ${OfflineSimulator.isOffline}", style = MaterialTheme.typography.bodySmall, color = KidTextDim)
+            }
 
             Spacer(modifier = Modifier.height(12.dp))
 
@@ -109,6 +115,9 @@ fun SettingsScreen(
                 SettingsBtn("Reset PIN") {
                     val newPin = ServiceLocator.pinManager.resetPin()
                     ServiceLocator.sessionManager.invalidateAll()
+                    // A PIN nobody has used yet puts the TV back into pairing mode, so the family
+                    // can read the new code from the pairing screen.
+                    ServiceLocator.parentAccess.hasPaired = false
                     try {
                         ServiceLocator.relayConfig.rotateTvSecret()
                         if (ServiceLocator.isRelayEnabled()) {
@@ -123,14 +132,16 @@ fun SettingsScreen(
                     sessionCount = 0
                 }
                 SettingsBtn("Clear Events") { PlayEventRecorder.clearAll() }
-                SettingsBtn(if (OfflineSimulator.isOffline) "Go Online" else "Simulate Offline") {
-                    OfflineSimulator.toggle()
+                if (BuildConfig.IS_DEBUG) {
+                    SettingsBtn(if (OfflineSimulator.isOffline) "Go Online" else "Simulate Offline") {
+                        OfflineSimulator.toggle()
+                    }
+                    SettingsBtn(if (showLog) "Hide Log" else "Show Log") { showLog = !showLog }
+                    SettingsBtn("Clear Log") { AppLogger.clear() }
                 }
-                SettingsBtn(if (showLog) "Hide Log" else "Show Log") { showLog = !showLog }
-                SettingsBtn("Clear Log") { AppLogger.clear() }
             }
 
-            if (showLog) {
+            if (BuildConfig.IS_DEBUG && showLog) {
                 Spacer(modifier = Modifier.height(12.dp))
                 LogPanel()
             }

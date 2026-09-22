@@ -54,6 +54,15 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   Retry/Back; unauthenticated `GET`/`POST /playlists` return 401; a `VIEW` deep link is not
   handled by the app; a URL passed as an activity extra starts nothing; the child-facing library
   exposes no search, no URL entry and no source editing.
+- Parent access, verified on the TV: the Settings and Connect Phone entries in the child library now
+  demand the PIN before opening (`PIN gate shown: Parents only`, a wrong PIN logged as rejected with
+  its remaining attempts, the right one unlocking; `PIN gate shown: Pair this TV` once a parent has
+  paired). Before this, a single OK press on the child screen opened the parent tools, which printed
+  the PIN in plain text and offered Reset PIN, Clear Sessions and Clear Events - a child could read
+  the PIN, take over the dashboard, or erase the watch history. The pairing code remains readable
+  until a parent has paired, because that is how the first phone gets in. The release manifest
+  contains no `DebugReceiver` and is not debuggable, so the debug entry points cannot exist in a
+  build a family installs.
 - Dashboard: the TV serves its own dashboard at `/` and that response, plus `app.js` and
   `style.css`, are byte-identical to this repo's assets; every `getElementById` target resolves. The
   user confirmed **Export list** works in a browser.
@@ -96,6 +105,15 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 5. **Latent, unproven** — a duplicate `Dashboard server started` line appeared once after an
    install-then-launch; a clean force-stop + launch produced exactly one, so it is unconfirmed.
    Watch for a second `Ktor server started on port 8080`.
+6. **Parent access, residual tension** — the PIN gate closes the opportunistic bypass, but the
+   pairing code is still printed on the TV before a parent has paired, so a child who deliberately
+   opens Connect Phone on a never-paired TV can read it. Gating that surface completely would make
+   first pairing impossible. The proper fix is a phone-driven unlock: the dashboard, which already
+   holds a session, should be able to reveal the PIN or unlock the TV. Related observation:
+   `PinManager.currentPin` is generated in memory at construction, so the PIN changes on every app
+   start. Sessions are persisted, so an already-paired phone keeps working - but a parent who has
+   forgotten the PIN and needs the TV settings has to clear the app's data to start over. Decide
+   whether rotating the pairing code per start is intended before relying on it.
 
 ## Pitfalls this codebase has already cost time on
 

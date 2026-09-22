@@ -2,15 +2,21 @@ package tv.safetubeforkids.app.ui.navigation
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.debug.DebugReceiver
 import tv.safetubeforkids.app.ui.screens.ConnectScreen
 import tv.safetubeforkids.app.ui.screens.HomeScreen
 import tv.safetubeforkids.app.ui.screens.LockScreen
+import tv.safetubeforkids.app.ui.screens.PinGateScreen
 import tv.safetubeforkids.app.ui.screens.PlaybackScreen
 import tv.safetubeforkids.app.ui.screens.SettingsScreen
 
@@ -23,6 +29,33 @@ object Routes {
 
     fun playback(videoId: String, playlistId: String, startIndex: Int) = "playback/$videoId/$playlistId/$startIndex"
     fun lock(reason: String) = "lock/${reason.lowercase()}"
+}
+
+/**
+ * Shows parent-only content once the PIN has been entered for this visit.
+ *
+ * The pairing screen opens without it until a parent has paired, because somebody has to read the
+ * code the first time; after that it needs the PIN like everything else.
+ */
+@Composable
+private fun ParentGated(
+    initiallyOpen: Boolean,
+    onCancel: () -> Unit,
+    title: String = "Parents only",
+    subtitle: String = "Enter the PIN from the SafeTube phone app",
+    content: @Composable () -> Unit,
+) {
+    var unlocked by rememberSaveable { mutableStateOf(initiallyOpen) }
+    if (unlocked) {
+        content()
+    } else {
+        PinGateScreen(
+            title = title,
+            subtitle = subtitle,
+            onCancel = onCancel,
+            onUnlocked = { unlocked = true },
+        )
+    }
 }
 
 @Composable
@@ -58,7 +91,14 @@ fun AppNavigation() {
 
     NavHost(navController = navController, startDestination = Routes.HOME) {
         composable(Routes.CONNECT) {
-            ConnectScreen(onBack = { navController.popBackStack() })
+            ParentGated(
+                initiallyOpen = !ServiceLocator.parentAccess.hasPaired,
+                onCancel = { navController.popBackStack() },
+                title = "Pair this TV",
+                subtitle = "Enter the PIN to see the pairing code again",
+            ) {
+                ConnectScreen(onBack = { navController.popBackStack() })
+            }
         }
 
         composable(Routes.HOME) {
@@ -100,12 +140,19 @@ fun AppNavigation() {
         }
 
         composable(Routes.SETTINGS) {
-            SettingsScreen(
-                onBack = { navController.popBackStack() },
-                onRefresh = {
-                    navController.popBackStack()
-                },
-            )
+            // Parent tools live behind the PIN: this screen can reset it, clear sessions and erase
+            // the watch history a parent relies on.
+            ParentGated(
+                initiallyOpen = false,
+                onCancel = { navController.popBackStack() },
+            ) {
+                SettingsScreen(
+                    onBack = { navController.popBackStack() },
+                    onRefresh = {
+                        navController.popBackStack()
+                    },
+                )
+            }
         }
 
         composable(
