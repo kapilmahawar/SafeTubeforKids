@@ -135,6 +135,11 @@ class CatalogRepository(private val db: CacheDatabase) {
      *
      * Phase 3 supplies the payload; this method does no downloading.
      *
+     * [metadata] becomes the **whole** catalog metadata row; it is not merged into the existing one,
+     * so any field the caller wants to survive the replacement must be carried on the value it
+     * passes. The singleton id and both sync timestamps are stamped here, inside the same transaction
+     * as the data, so a successful replacement and its "successfully synced at" can never disagree.
+     *
      * @param syncedAt when the synchronization that produced this payload completed, stamped into
      *   `last_successful_sync_at` in the same transaction as the data.
      */

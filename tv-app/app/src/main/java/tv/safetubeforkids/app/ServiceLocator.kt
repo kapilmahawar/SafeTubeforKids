@@ -8,10 +8,16 @@ import tv.safetubeforkids.app.auth.SharedPrefsPinLockoutPersistence
 import tv.safetubeforkids.app.auth.SharedPrefsSessionPersistence
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.catalog.CatalogRepository
+import tv.safetubeforkids.app.data.catalog.CatalogSyncService
+import tv.safetubeforkids.app.data.catalog.HttpCatalogApi
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.KioskManager
 import tv.safetubeforkids.app.relay.RelayConfig
 import tv.safetubeforkids.app.relay.RelayConnector
+import tv.safetubeforkids.app.server.CatalogStore
+import tv.safetubeforkids.app.server.FileCatalogStore
+import tv.safetubeforkids.app.server.InMemoryCatalogStore
+import tv.safetubeforkids.app.server.SAFE_TUBE_SERVER_PORT
 import tv.safetubeforkids.app.timelimits.RoomTimeLimitStore
 import tv.safetubeforkids.app.timelimits.RoomWatchTimeProvider
 import tv.safetubeforkids.app.timelimits.TimeLimitManager
@@ -26,8 +32,17 @@ object ServiceLocator {
     lateinit var updateChecker: UpdateChecker
     lateinit var kioskManager: KioskManager
 
+    /**
+     * The server's own authoritative catalog - the parent's configuration, not the TV's runtime
+     * copy. Backed by a file so it outlives the process (see [FileCatalogStore]).
+     */
+    lateinit var catalogStore: CatalogStore
+
     private var initialized = false
     private lateinit var relayPrefs: SharedPreferences
+
+    /** The TV's own session against its server, created once and reused. */
+    private var selfSyncToken: String? = null
 
     /**
      * Local catalog access for the future TV UI and the future sync layer. Lazy, so it always wraps
@@ -35,11 +50,35 @@ object ServiceLocator {
      */
     val catalogRepository: CatalogRepository by lazy { CatalogRepository(database) }
 
+    /**
+     * The TV's catalog sync against its own SafeTube server.
+     *
+     * It reads over HTTP rather than reaching into [catalogStore] directly, so the sync path is the
+     * same one a future remote parent server would use, and the JSON boundary is exercised in
+     * production rather than only in tests. The token is a single session this process creates for
+     * itself and reuses; it is never logged.
+     *
+     * Nothing calls this yet: Phase 4 owns when the TV syncs. Invoking [CatalogSyncService.syncCatalog]
+     * is the whole API, and it is deliberately not awaited from any UI path.
+     */
+    val catalogSyncService: CatalogSyncService by lazy {
+        CatalogSyncService(
+            api = HttpCatalogApi(
+                baseUrl = "http://127.0.0.1:$SAFE_TUBE_SERVER_PORT",
+                tokenProvider = {
+                    selfSyncToken ?: sessionManager.createSession()?.also { selfSyncToken = it }
+                },
+            ),
+            repository = catalogRepository,
+        )
+    }
+
     private const val KEY_RELAY_ENABLED = "relay_enabled"
 
     fun init(context: Context) {
         if (initialized) return
         database = CacheDatabase.getInstance(context)
+        catalogStore = FileCatalogStore.inFilesDir(context.filesDir)
         val persistence = SharedPrefsSessionPersistence(
             context.getSharedPreferences("parentapproved_sessions", Context.MODE_PRIVATE)
         )
@@ -103,10 +142,12 @@ object ServiceLocator {
         session: SessionManager,
         timeLimit: TimeLimitManager? = null,
         kiosk: KioskManager? = null,
+        catalog: CatalogStore? = null,
     ) {
         database = db
         pinManager = pin
         sessionManager = session
+        catalogStore = catalog ?: InMemoryCatalogStore()
         PlayEventRecorder.init(db)
         if (timeLimit != null) {
             timeLimitManager = timeLimit

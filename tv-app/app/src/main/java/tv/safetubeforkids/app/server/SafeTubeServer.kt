@@ -16,7 +16,10 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.serialization.json.Json
 
-class SafeTubeServer(private val context: Context, private val port: Int = 8080) {
+/** The one port the dashboard server binds and the sync client talks to. */
+const val SAFE_TUBE_SERVER_PORT = 8080
+
+class SafeTubeServer(private val context: Context, private val port: Int = SAFE_TUBE_SERVER_PORT) {
     private var server: EmbeddedServer<*, *>? = null
 
     var isRunning: Boolean = false
@@ -85,6 +88,7 @@ class SafeTubeServer(private val context: Context, private val port: Int = 8080)
                 routing {
                     authRoutes(ServiceLocator.pinManager, ServiceLocator.sessionManager)
                     playlistRoutes(ServiceLocator.sessionManager, ServiceLocator.database)
+                    catalogRoutes(ServiceLocator.sessionManager, ServiceLocator.catalogStore)
                     sourceTransferRoutes(ServiceLocator.sessionManager, ServiceLocator.database)
                     playbackRoutes(ServiceLocator.sessionManager)
                     statsRoutes(ServiceLocator.sessionManager, ServiceLocator.database)

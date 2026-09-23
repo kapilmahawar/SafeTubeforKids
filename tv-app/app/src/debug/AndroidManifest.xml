@@ -13,6 +13,7 @@
                 <action android:name="tv.safetubeforkids.app.DEBUG_REFRESH_PLAYLISTS" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_PLAYLISTS" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_SERVER_STATUS" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_SYNC_CATALOG" />
                 <!-- PIN/Auth -->
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_PIN" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_RESET_PIN" />

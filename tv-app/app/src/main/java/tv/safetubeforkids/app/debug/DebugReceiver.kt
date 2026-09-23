@@ -8,6 +8,7 @@ import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.auth.PinResult
 import tv.safetubeforkids.app.data.ContentSourceRepository
 import tv.safetubeforkids.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.data.catalog.CatalogSyncResult
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.util.AppLogger
 import tv.safetubeforkids.app.util.BandwidthOverride
@@ -50,6 +51,7 @@ class DebugReceiver : BroadcastReceiver() {
             "$PKG.DEBUG_REFRESH_PLAYLISTS" -> handleRefreshPlaylists()
             "$PKG.DEBUG_GET_PLAYLISTS" -> handleGetPlaylists()
             "$PKG.DEBUG_GET_SERVER_STATUS" -> handleGetServerStatus(context)
+            "$PKG.DEBUG_SYNC_CATALOG" -> handleSyncCatalog()
 
             // --- PIN/Auth ---
             "$PKG.DEBUG_GET_PIN" -> handleGetPin()
@@ -206,6 +208,49 @@ class DebugReceiver : BroadcastReceiver() {
                 val sourceCount = ServiceLocator.database.channelDao().count()
                 val sessions = ServiceLocator.sessionManager.getActiveSessionCount()
                 logResult("""{"running":true,"port":8080,"ip":"$ip","sources":$sourceCount,"sessions":$sessions}""")
+            } catch (e: Exception) {
+                logResult("""{"error":"${e.message}"}""")
+            }
+        }
+    }
+
+    /**
+     * Runs the catalog synchronization on demand, so the whole server -> HTTP -> validator -> Room
+     * path can be exercised on a real TV without wiring sync into any screen. Debug builds only.
+     *
+     * The result is reported as one log line; no token is included.
+     */
+    private fun handleSyncCatalog() {
+        scope.launch {
+            try {
+                val result = ServiceLocator.catalogSyncService.syncCatalog()
+                val metadata = ServiceLocator.catalogRepository.getMetadata()
+                val json = buildJsonObject {
+                    put("result", result::class.java.simpleName)
+                    when (result) {
+                        is CatalogSyncResult.Updated -> put("updatedTo", result.catalogVersion)
+                        is CatalogSyncResult.AlreadyCurrent -> put("alreadyAt", result.catalogVersion)
+                        is CatalogSyncResult.VersionRegression -> {
+                            put("serverVersion", result.serverVersion)
+                            put("localVersion", result.localVersion)
+                        }
+                        is CatalogSyncResult.UnsupportedSchema -> {
+                            put("serverSchemaVersion", result.serverSchemaVersion)
+                            put("supportedSchemaVersion", result.supportedSchemaVersion)
+                        }
+                        is CatalogSyncResult.InvalidCatalog -> put("problems", result.problems.size)
+                        is CatalogSyncResult.ServerUnavailable -> put("reason", result.reason)
+                        is CatalogSyncResult.InvalidResponse -> put("reason", result.reason)
+                        is CatalogSyncResult.LocalWriteFailed -> put("reason", result.reason)
+                        else -> put("detail", result.toString())
+                    }
+                    put("catalogVersion", metadata?.catalogVersion ?: 0)
+                    put("serverVersion", metadata?.serverVersion ?: 0)
+                    put("lastSuccessfulSyncAt", metadata?.lastSuccessfulSyncAt ?: 0)
+                    put("categories", ServiceLocator.database.categoryDao().count())
+                    put("items", ServiceLocator.database.contentItemDao().count())
+                }
+                logResult(json.toString())
             } catch (e: Exception) {
                 logResult("""{"error":"${e.message}"}""")
             }
@@ -448,7 +493,16 @@ class DebugReceiver : BroadcastReceiver() {
                 val offline = OfflineSimulator.isOffline
                 val nowPlaying = PlayEventRecorder.currentVideoId
 
-                logResult("""{"sources":$sources,"events":$events,"videos":$videos,"sessions":$sessions,"pin":"$pin","ip":"$ip","offline":$offline,"nowPlaying":${if (nowPlaying != null) "\"$nowPlaying\"" else "null"}}""")
+                // The local catalog as the TV's own Room rows hold it: the shelves in the order the
+                // parent configured them, plus the version the TV believes it is showing.
+                val catalog = ServiceLocator.catalogRepository.getCategories()
+                val catalogItems = ServiceLocator.database.contentItemDao().count()
+                val catalogMetadata = ServiceLocator.catalogRepository.getMetadata()
+                val catalogNames = catalog.joinToString("|") { it.displayName }
+                val catalogVersion = catalogMetadata?.catalogVersion ?: 0
+                val catalogServerVersion = catalogMetadata?.serverVersion ?: 0
+
+                logResult("""{"sources":$sources,"events":$events,"videos":$videos,"sessions":$sessions,"pin":"$pin","ip":"$ip","offline":$offline,"nowPlaying":${if (nowPlaying != null) "\"$nowPlaying\"" else "null"},"catalog":"$catalogNames","catalogVersion":$catalogVersion,"catalogServerVersion":$catalogServerVersion,"catalogItems":$catalogItems}""")
             } catch (e: Exception) {
                 logResult("""{"error":"${e.message}"}""")
             }
