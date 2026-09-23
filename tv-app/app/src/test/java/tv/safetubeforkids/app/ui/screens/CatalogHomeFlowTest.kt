@@ -290,6 +290,9 @@ class CatalogHomeFlowTest {
     fun continueWatchingListsHalfWatchedApprovedVideosMostRecentFirst() {
         approveSource("PLapproved")
         cacheVideos("PLapproved", listOf("vid1" to 0, "vid2" to 1))
+        // Continue Watching is curated by the catalog, so the source has to be published for the
+        // cards to appear at all; this test is about their order.
+        installCatalog(1L, listOf(category("cat-approved", "Approved", 0, listOf(playlistItem("i-approved", "Approved", 0, "PLapproved")))))
         runBlocking {
             db.playbackPositionDao().upsert(PlaybackPositionEntity("vid1", 60_000, 600_000, 200))
             db.playbackPositionDao().upsert(PlaybackPositionEntity("vid2", 90_000, 600_000, 300))
@@ -305,13 +308,21 @@ class CatalogHomeFlowTest {
     fun aVideoWhoseApprovalIsWithdrawnDropsOutOfContinueWatching() {
         approveSource("PLapproved")
         cacheVideos("PLapproved", listOf("vid1" to 0))
+        // Still published by the catalog, so the removal below can only be attributed to the
+        // approval being withdrawn - not to the video being unpublished.
+        installCatalog(1L, listOf(category("cat-approved", "Approved", 0, listOf(playlistItem("i-approved", "Approved", 0, "PLapproved")))))
         runBlocking { db.playbackPositionDao().upsert(PlaybackPositionEntity("vid1", 60_000, 600_000, 200)) }
         assertEquals(1, uiState().shelves.first().cards.size)
 
         // The parent removes the source. The playback position stays; the shelf must not.
         runBlocking { db.channelDao().deleteAll() }
 
-        assertTrue("history must not keep an unapproved video on the shelf", uiState().isEmpty)
+        // The catalog still publishes the source, so the catalog shelf stays; what must disappear
+        // is the Continue Watching card, because the video is no longer approved.
+        assertTrue(
+            "history must not keep an unapproved video on the shelf",
+            uiState().shelves.none { it.title == "Continue Watching" },
+        )
         assertNotNull(
             "the position row itself is preserved",
             runBlocking { db.playbackPositionDao().get("vid1") },
@@ -322,6 +333,7 @@ class CatalogHomeFlowTest {
     fun aBarelyStartedOrNearlyFinishedVideoIsNotOfferedForResuming() {
         approveSource("PLapproved")
         cacheVideos("PLapproved", listOf("vid-early" to 0, "vid-late" to 1, "vid-good" to 2))
+        installCatalog(1L, listOf(category("cat-approved", "Approved", 0, listOf(playlistItem("i-approved", "Approved", 0, "PLapproved")))))
         runBlocking {
             db.playbackPositionDao().upsert(PlaybackPositionEntity("vid-early", 5_000, 600_000, 100))
             db.playbackPositionDao().upsert(PlaybackPositionEntity("vid-late", 594_000, 600_000, 200))

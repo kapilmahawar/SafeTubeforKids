@@ -77,14 +77,30 @@ abstract class BaseCatalogStore : CatalogStore {
             return@synchronized CatalogStoreResult.VersionConflict(current.catalogVersion)
         }
 
+        // The next version comes from a high-water mark, not from the document alone. If the
+        // server's catalog document is lost or reset, a document-only counter would restart at 0 and
+        // hand the parent's next publish a version *below* the one a TV already holds - the TV would
+        // then refuse it as a regression and stay stranded until the counter climbed back past it.
+        // Taking the larger of the document version and the store's own floor keeps the sequence
+        // monotonic across a reset, so a genuine recovery is accepted instead of refused.
+        val base = maxOf(current.catalogVersion, versionFloor())
+
         val snapshot = CatalogSnapshot(
             schemaVersion = CATALOG_SCHEMA_VERSION,
-            catalogVersion = current.catalogVersion + 1,
+            catalogVersion = base + 1,
             categories = categories,
         )
         save(snapshot)
         CatalogStoreResult.Stored(snapshot)
     }
+
+    /**
+     * A floor the next assigned version must stay above, independent of the stored document.
+     *
+     * Defaults to 0 for a store whose state cannot be lost separately from its catalog. A persistent
+     * store overrides this with its own durable high-water mark.
+     */
+    protected open fun versionFloor(): Long = 0L
 
     protected abstract fun load(): CatalogSnapshot
 
@@ -92,12 +108,21 @@ abstract class BaseCatalogStore : CatalogStore {
 }
 
 /**
- * Persists the catalog as one JSON document.
+ * Persists the catalog as one JSON document, plus the version counter as a second, tiny file.
  *
- * The version lives inside the document, so it cannot be reset by a restart: a new process loads the
- * same number it wrote.
+ * The version lives *inside* the document for the TV's benefit, but the counter used to assign the
+ * next one is also mirrored into its own file. That separation is the fix for the reset trap: losing
+ * or reinitialising `catalog.json` no longer rewinds the version sequence, because the counter
+ * outlives it and the next publish is still assigned a number above every one already issued.
+ *
+ * Deleting both files still resets the counter, which is why the recovery path is documented rather
+ * than assumed: with both gone the server is indistinguishable from a brand-new install, and the TV
+ * correctly keeps its own copy until the parent publishes again.
  */
-class FileCatalogStore(private val file: File) : BaseCatalogStore() {
+class FileCatalogStore(
+    private val file: File,
+    private val versionFile: File = File(file.parentFile, VERSION_FILE_NAME),
+) : BaseCatalogStore() {
 
     override fun load(): CatalogSnapshot {
         if (!file.exists()) return emptyCatalogSnapshot()
@@ -117,6 +142,17 @@ class FileCatalogStore(private val file: File) : BaseCatalogStore() {
         }
     }
 
+    /**
+     * The durable high-water mark. Unreadable or absent counts as 0, which degrades to the old
+     * document-only behaviour rather than inventing a version.
+     */
+    override fun versionFloor(): Long = try {
+        if (versionFile.exists()) versionFile.readText().trim().toLongOrNull() ?: 0L else 0L
+    } catch (e: Exception) {
+        AppLogger.warn("Catalog version counter unreadable: ${e.message}")
+        0L
+    }
+
     /** Writes through a temporary file so a process death mid-write cannot truncate the catalog. */
     override fun save(snapshot: CatalogSnapshot) {
         file.parentFile?.mkdirs()
@@ -131,11 +167,22 @@ class FileCatalogStore(private val file: File) : BaseCatalogStore() {
             file.writeText(text)
             temp.delete()
         }
+        // Mirror the counter out of the document so a later loss of the document cannot rewind it.
+        // A failure here costs only the extra protection, never correctness.
+        try {
+            versionFile.parentFile?.mkdirs()
+            versionFile.writeText(snapshot.catalogVersion.toString())
+        } catch (e: Exception) {
+            AppLogger.warn("Catalog version counter could not be persisted: ${e.message}")
+        }
         AppLogger.log("Catalog stored: version ${snapshot.catalogVersion}, ${snapshot.categories.size} categories")
     }
 
     companion object {
         const val FILE_NAME = "catalog.json"
+
+        /** The version high-water mark, kept beside the document so the two can be lost separately. */
+        const val VERSION_FILE_NAME = "catalog.version"
 
         fun inFilesDir(filesDir: File): FileCatalogStore = FileCatalogStore(File(filesDir, FILE_NAME))
     }

@@ -175,13 +175,35 @@ There are 50+ recorded runs in `test-results/tv/` (gitignored). Summarised hones
 | full | `2026-09-23-021013`, `-015838` | 4–5 FAIL (quality + audio + back) | pre-Phase-2 |
 | full | `2026-09-23-014058` | **38/38 PASS** (last fully green full run) | `3a89e88` |
 | full | `2026-09-23-005502`, `-010835` | 38/38 PASS | `cf4075e`, `acc07db` |
+| **smoke** | `2026-09-24-011529`, `-005836` | **12/12 PASS** | Phase 4 source (`fd73ff8` tree) |
+| **player** | `2026-09-24-033155` | **32/32 PASS** | Phase 4 source + repaired harness |
+| **full** | `2026-09-24-044035`, `-045016`, `-045950` | **43/43 PASS** ×3 consecutive | Phase 4 source + repaired harness |
 
-**The most important line in this document:** the `full` and `player` tiers have **not** been run
-against any Phase 2, 3 or 4 build. Their newest recorded runs are from the early hours of
-2026-09-23, and the Phase 2 commit is at 10:23 the same day. Phase 4 rewrote `HomeScreen`, so the
-player-tier assumptions (which navigate the library by D-pad before touching the player) deserve a
-fresh run before anyone treats that tier as green. `docs/PHASES/PHASE-4.md` records what *was*
-verified on the device in Phase 4 instead.
+**Resolved.** The gap this document used to flag is closed: `player` and `full` have now been run
+against Phase 4 builds. `player` is 32/32 and `full` is 43/43 on three consecutive runs.
+
+Reaching that required repairing defects the Phase 4 harness commit (`b8d4110`) introduced, which the
+first Phase 4 tier runs exposed:
+
+1. **The resume precondition was destroyed by the test itself.** The "ignore the offer" phase added in
+   `b8d4110` left the video playing from the beginning, saving a position below `RESUME_MIN_MS` (20 s).
+   A position that low is not resumable at all, so the four *choice* tests that followed found no offer
+   on screen and failed. The choice tests now run **first**, while a ≥20 s position is known saved, and
+   the destructive no-input phase runs **last**.
+2. **A stale baseline.** `resume-continues-position` compared against a position measured several
+   phases earlier. It now establishes the precondition itself and compares against the value the app
+   *reports as resumable*, read back from its own log (`Resumable position for <id>: <n>s`).
+3. **A stray key press.** The harness used to send `DPAD_CENTER` even when no offer was on screen;
+   that landed on the player and toggled pause, poisoning later steps. Keys are now sent only after the
+   offer is confirmed on screen, and a missing offer is recorded as a failure instead.
+4. **Fixed sleeps raced the state they were waiting for** (`captions-enable`,
+   `autoplay-advances-to-next-approved`, `end-of-video-handling`). The captions menu has an ~8 s idle
+   timeout, so a fixed sleep could spend the very window the key press needed; and remote seeking to
+   the end of a video consumes most of a fixed wait, which is why one run measured "228s of 229s" —
+   one second short. These now synchronise on the event: `Wait-LogMatch` for the menu, and
+   `Wait-QueueAdvance` for the queue actually moving on. `end-of-video-handling` also refuses to
+   compare against an unreadable baseline, which had been turning an occasionally dropped status
+   request into a silent false pass.
 
 ### Phase 4 device verification (manual ADB, not the harness)
 
@@ -252,12 +274,19 @@ the exact signal observed:
 ## 6. Gaps an agent should close before claiming more than "unit tests pass"
 
 ```text
-NOT_RUN   the harness 'player' and 'full' tiers against any Phase 2/3/4 build
-NOT_RUN   the 3 instrumented androidTest files in the catalog era
-NOT_RUN   tv-app/scripts/tv-emulator.ps1 in the catalog era
+DONE      the harness 'player' and 'full' tiers against a Phase 4 build — player 32/32,
+          full 43/43 on three consecutive runs (2026-09-24), after repairing the harness
+DONE      the instrumented androidTest files in the catalog era — 19/19 PASS on the Mi Box 4
+BLOCKED   tv-app/scripts/tv-emulator.ps1 — `emulator -accel-check` exits 3 ("Virtualization
+          extension is not supported") on this host; the AVD and TV system image are present, so
+          this is an environment limitation, not an application failure
 NOT_RUN   a run on a second Android TV device or a different Android version
 NOT_RUN   a release build (no keystore on the development machine)
-UNKNOWN   whether the two full-tier audio failures are a harness defect or a real player defect
+OPEN      the two full-tier audio failures — reproduced unchanged since before Phase 2; the resolver
+          reports "0 audio" for the videos tested, so the audio menu offers no real tracks. Kept
+          separate from the catalog work: no evidence links them to Phase 4.
+NOT_RUN   visual review of any screenshot — the agent has no image input. Geometry and pixels are
+          measured programmatically instead, which is not a visual pass.
 UNKNOWN   behaviour on a TV with a very large catalog (hundreds of items) beyond the projection
           test, which exercises 20 shelves x 30 items in the JVM only
 ```

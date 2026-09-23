@@ -332,7 +332,14 @@ class CatalogUiProjectionTest {
     @Test
     fun continueWatchingComesFirstAndKeepsItsMostRecentFirstOrder() {
         val state = build(
-            catalog = listOf(withOneItem(category("cat-cartoon", "Cartoon", 0))),
+            // The cards also have to be published by the catalog now, so this asserts the order of
+            // the videos the parent still offers rather than of everything ever half-watched.
+            catalog = listOf(
+                category(
+                    "cat-cartoon", "Cartoon", 0,
+                    items = listOf(playlist("i-approved", "Approved", 0, "PLapproved")),
+                ),
+            ),
             resumable = listOf(
                 resumable("vid-new", "Newest", updatedAt = 300),
                 resumable("vid-mid", "Middle", updatedAt = 200),
@@ -350,9 +357,13 @@ class CatalogUiProjectionTest {
 
     @Test
     fun aContinueWatchingCardCarriesTheVideoAndItsSource() {
-        val state = build(resumable = listOf(resumable("vid1", "Twinkle", playlistId = "PLapproved")))
+        val state = build(
+            catalog = catalogPublishingApproved(),
+            resumable = listOf(resumable("vid1", "Twinkle", playlistId = "PLapproved")),
+        )
 
-        val card = state.shelves.single().cards.single()
+        // Continue Watching is first; the category that publishes the video adds a shelf behind it.
+        val card = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }.cards.single()
         assertEquals(CatalogCardKind.CONTINUE_WATCHING, card.kind)
         assertEquals("vid1", card.videoId)
         assertEquals("PLapproved", card.playlistId)
@@ -362,19 +373,25 @@ class CatalogUiProjectionTest {
     @Test
     fun aContinueWatchingCardShowsHowMuchIsLeft() {
         val state = build(
+            catalog = catalogPublishingApproved(),
             resumable = listOf(
                 resumable("vid1", "Twinkle", positionMs = 60_000, durationMs = 660_000),
-            )
+            ),
         )
 
-        assertEquals("10 min left", state.shelves.single().cards.single().badgeText)
+        val shelf = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals("10 min left", shelf.cards.single().badgeText)
     }
 
     @Test
     fun aContinueWatchingCardFallsBackToWatchedWhenTheDurationIsUnknown() {
-        val state = build(resumable = listOf(resumable("vid1", "Twinkle", positionMs = 30_000, durationMs = 0)))
+        val state = build(
+            catalog = catalogPublishingApproved(),
+            resumable = listOf(resumable("vid1", "Twinkle", positionMs = 30_000, durationMs = 0)),
+        )
 
-        assertEquals("Watched", state.shelves.single().cards.single().badgeText)
+        val shelf = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals("Watched", shelf.cards.single().badgeText)
     }
 
     @Test
@@ -430,6 +447,21 @@ class CatalogUiProjectionTest {
         ),
     )
 
+    /**
+     * A catalog that publishes the playlist the resumable fixtures below belong to.
+     *
+     * Continue Watching is curated by the catalog, so a card only appears when the parent still
+     * publishes the video - either by naming it or by naming the playlist it sits in. Tests about a
+     * card's own properties (badge, order, source) therefore have to publish it first; that is a
+     * deliberate precondition of the rule, not a workaround.
+     */
+    private fun catalogPublishingApproved(playlistId: String = "PLapproved") = listOf(
+        category(
+            "cat-approved", "Approved", 0,
+            items = listOf(playlist("i-approved", "Approved", 0, playlistId)),
+        ),
+    )
+
     private fun resumable(
         videoId: String,
         title: String,
@@ -447,4 +479,142 @@ class CatalogUiProjectionTest {
         durationMs = durationMs,
         updatedAt = updatedAt,
     )
+
+    // ---------------------------------------------- Continue Watching is curated by the catalog
+    // F6. The catalog is what a parent curates, so a video that is no longer published must not
+    // stay reachable from Continue Watching. These are visibility rules only: no approval record
+    // and no saved position is touched, and `PlaybackAuthorization` is unchanged.
+
+    @Test
+    fun aPublishedResumableVideoIsStillOfferedInContinueWatching() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-1", "Twinkle", 0, "vidA"))),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle")),
+        )
+
+        val shelf = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals(listOf("vidA"), shelf.cards.map { it.videoId })
+        assertEquals(1, shelf.cards.size)
+    }
+
+    @Test
+    fun aVideoRemovedFromTheCatalogDisappearsFromContinueWatching() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-1", "Something Else", 0, "vidOTHER"))),
+            ),
+            resumable = listOf(resumable("vidA", "Removed")),
+        )
+
+        assertTrue(state.shelves.none { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID })
+    }
+
+    @Test
+    fun anEmptyCatalogShowsTheEmptyStateEvenWithAHalfWatchedVideo() {
+        // The reported symptom: an empty catalog still rendered a Continue Watching shelf, which
+        // suppressed the empty state entirely.
+        val state = build(
+            catalog = emptyList(),
+            resumable = listOf(resumable("vidA", "Half watched")),
+        )
+
+        assertTrue(state.isEmpty)
+        assertTrue(state.shelves.isEmpty())
+    }
+
+    @Test
+    fun aVideoInADisabledCategoryIsNotOfferedInContinueWatching() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-off", "Hidden", 0, enabled = false,
+                    items = listOf(video("i-1", "Twinkle", 0, "vidA")),
+                ),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle")),
+        )
+
+        assertTrue(state.shelves.none { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID })
+    }
+
+    @Test
+    fun aDisabledCatalogItemIsNotOfferedInContinueWatching() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-music", "Music", 0,
+                    items = listOf(video("i-1", "Twinkle", 0, "vidA", enabled = false)),
+                ),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle")),
+        )
+
+        assertTrue(state.shelves.none { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID })
+    }
+
+    @Test
+    fun aVideoInsideAPublishedPlaylistIsOfferedWithoutItsOwnItem() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLapproved"))),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle", playlistId = "PLapproved")),
+        )
+
+        val shelf = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals(listOf("vidA"), shelf.cards.map { it.videoId })
+    }
+
+    @Test
+    fun aDisabledPlaylistItemHidesItsVideosFromContinueWatching() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-music", "Music", 0,
+                    items = listOf(playlist("i-p", "Nursery", 0, "PLapproved", enabled = false)),
+                ),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle", playlistId = "PLapproved")),
+        )
+
+        assertTrue(state.shelves.none { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID })
+    }
+
+    @Test
+    fun rePublishingTheVideoBringsItBackToContinueWatching() {
+        // Nothing is deleted for being unpublished, so switching it back on restores the card.
+        val hidden = build(
+            catalog = emptyList(),
+            resumable = listOf(resumable("vidA", "Twinkle")),
+        )
+        assertTrue(hidden.shelves.none { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID })
+
+        val shown = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-1", "Twinkle", 0, "vidA"))),
+            ),
+            resumable = listOf(resumable("vidA", "Twinkle")),
+        )
+
+        val shelf = shown.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals(listOf("vidA"), shelf.cards.map { it.videoId })
+    }
+
+    @Test
+    fun onlyUnpublishedVideosAreDroppedWhilePublishedOnesKeepTheirOrder() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-1", "Kept", 0, "vidKEEP"))),
+            ),
+            resumable = listOf(
+                resumable("vidKEEP", "Kept", updatedAt = 2),
+                resumable("vidGONE", "Removed", updatedAt = 1),
+            ),
+        )
+
+        val shelf = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertEquals(listOf("vidKEEP"), shelf.cards.map { it.videoId })
+    }
 }

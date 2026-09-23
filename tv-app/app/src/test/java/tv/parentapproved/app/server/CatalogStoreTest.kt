@@ -3,6 +3,7 @@ package tv.safetubeforkids.app.server
 import tv.safetubeforkids.app.data.catalog.CATALOG_SCHEMA_VERSION
 import tv.safetubeforkids.app.data.catalog.CatalogCategoryDto
 import tv.safetubeforkids.app.data.catalog.CatalogItemDto
+import tv.safetubeforkids.app.data.catalog.CatalogSnapshot
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -252,5 +253,80 @@ class CatalogStoreTest {
         assertTrue(store.write(listOf(category("c1", "Stale")), expectedVersion = 0) is CatalogStoreResult.VersionConflict)
         assertEquals(2L, (store.write(listOf(category("c1", "Two")), expectedVersion = 1) as CatalogStoreResult.Stored).snapshot.catalogVersion)
         assertEquals("Two", store.read().categories[0].displayName)
+    }
+
+    // ------------------------------------------------- version reset / recovery (F7)
+    // A TV refuses any catalog numbered below the version it already holds. When the counter lived
+    // only inside the document, losing or resetting that document restarted the counter at 0, so the
+    // parent's next publish was numbered below the TV's version and was refused as a regression -
+    // stranding the TV until the counter climbed back past it. The counter is therefore mirrored
+    // into its own file, which is what makes a reset recoverable without weakening the check.
+
+    @Test
+    fun theVersionCounterSurvivesDeletionOfTheCatalogDocument() {
+        val store = store()
+        repeat(3) { store.write(listOf(category("cat-$it", "Shelf $it"))) }
+        assertEquals(3L, store.read().catalogVersion)
+
+        // The document is lost or reinitialised - the exact situation that used to rewind the count.
+        assertTrue(File(dir, FileCatalogStore.FILE_NAME).delete())
+        assertEquals("a lost document reads as nothing configured", 0L, store.read().catalogVersion)
+
+        val stored = assertIsStored(store.write(listOf(category("cat-new", "New Shelf"))))
+
+        // Numbered above every version already issued, so a TV holding 3 accepts it.
+        assertEquals(4L, stored.catalogVersion)
+    }
+
+    @Test
+    fun theCounterKeepsClimbingAcrossRepeatedDocumentLoss() {
+        val store = store()
+        repeat(2) { store.write(listOf(category("cat-a", "A"))) }
+        val document = File(dir, FileCatalogStore.FILE_NAME)
+
+        var expected = 2L
+        repeat(3) {
+            assertTrue(document.delete())
+            expected += 1
+            assertEquals(expected, assertIsStored(store.write(listOf(category("cat-b", "B")))).catalogVersion)
+        }
+    }
+
+    @Test
+    fun anUnusableCounterFileFallsBackToTheDocumentRatherThanInventingAVersion() {
+        val store = store()
+        store.write(listOf(category("cat-a", "A")))
+        assertEquals(2L, assertIsStored(store.write(listOf(category("cat-b", "B")))).catalogVersion)
+
+        // A hand-mangled counter must not become a version: the floor is unusable, so the document
+        // alone decides and the sequence still moves forward.
+        File(dir, FileCatalogStore.VERSION_FILE_NAME).writeText("not-a-number")
+
+        assertEquals(3L, assertIsStored(store.write(listOf(category("cat-c", "C")))).catalogVersion)
+    }
+
+    @Test
+    fun theCounterFileIsWrittenBesideTheDocument() {
+        store().write(listOf(category("cat-a", "A")))
+
+        val counter = File(dir, FileCatalogStore.VERSION_FILE_NAME)
+        assertTrue("the high-water mark is persisted separately", counter.exists())
+        assertEquals("1", counter.readText().trim())
+    }
+
+    @Test
+    fun aCompletelyFreshInstallStillStartsAtVersionOne() {
+        // With BOTH files gone the server cannot be distinguished from a new install, so the counter
+        // legitimately restarts. This is the documented residual case: the TV keeps its own catalog
+        // and the parent must publish again - the counter is not recoverable by design here.
+        assertFalse(File(dir, FileCatalogStore.FILE_NAME).exists())
+        assertFalse(File(dir, FileCatalogStore.VERSION_FILE_NAME).exists())
+
+        assertEquals(1L, assertIsStored(store().write(listOf(category("cat-a", "A")))).catalogVersion)
+    }
+
+    private fun assertIsStored(result: CatalogStoreResult): CatalogSnapshot {
+        assertTrue("expected a stored catalog but got $result", result is CatalogStoreResult.Stored)
+        return (result as CatalogStoreResult.Stored).snapshot
     }
 }

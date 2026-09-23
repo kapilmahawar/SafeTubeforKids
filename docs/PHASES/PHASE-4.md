@@ -210,17 +210,20 @@ pixel sampling for the focus ring) rather than by eye.
 
 ## Known Issues
 
-1. **The `full` and `player` harness tiers were not run against this build.** Smoke was (12/12). Since
-   Phase 4 rewrote `HomeScreen`, the player-tier assumptions deserve a fresh run before that tier is
-   treated as green. `docs/TESTING.md` §4 records the last runs of each tier.
+1. **RESOLVED — the `full` and `player` harness tiers have now been run against this build.**
+   `player` is 32/32 and `full` is 43/43 on three consecutive runs (2026-09-24). Both tiers initially
+   failed, and the cause turned out to be a defect in the harness changes this phase made (not in the
+   application); see "Post-Phase-4 verification" below and `docs/TESTING.md` §4.
 2. **The player cannot be screenshotted on this TV.** With a video surface active, `adb screencap`
    returns a 100 %-black frame with one distinct colour (measured three times: player, settings row,
    open menu). This is also why the committed screenshots contain no player image.
-3. **An empty catalog does not always show the empty state.** Continue Watching is built from the
-   child's own progress, not from the catalog, so a TV with an empty catalog but a half-watched video
-   shows that shelf rather than "No videos yet". This is arguably better behaviour, but it is a
-   deviation from a literal reading of the specification, so it is recorded here. The pure empty state
-   was verified by clearing resume positions first.
+3. **RESOLVED — Continue Watching is now curated by the catalog.** It used to be built from the
+   child's own progress alone, so a TV with an empty catalog but a half-watched video showed that
+   shelf instead of "No videos yet", and - more seriously - a video the parent had *removed* from the
+   catalog stayed reachable from this shelf. A card now appears only when the video is still published:
+   named by an enabled item, or belonging to an enabled playlist item inside an enabled category. This
+   changes **visibility only**; `PlaybackAuthorization` is untouched and nothing is deleted for being
+   unpublished, so the saved position comes back if the parent republishes the video.
 4. **The example screenshots carry a `v0.10.0-debug` label** in the corner, because they were taken
    from a debug build (a release build needs a signing keystore the development machine does not have).
 5. **A Connect Phone screenshot was captured but deliberately not committed**, because it displays the
@@ -229,6 +232,69 @@ pixel sampling for the focus ring) rather than by eye.
 6. Two pre-existing `full`-tier audio checks remain unresolved (see `TESTING.md`).
 7. The debug outage switch and the `initForTest(catalog = ...)` seam are test-only surface that a
    future cleanup could remove once the catalog has a parent UI.
+
+## Post-Phase-4 verification and findings resolution
+
+An independent verification pass ran the tiers this phase left unrun, and resolved the two product
+findings it recorded. Results, kept deliberately separate by kind:
+
+| Kind | Item | State |
+|---|---|---|
+| Build | Clean build from the Phase 4 source tree | PASS — reproducible APK |
+| Unit tests | `:app:testDebugUnitTest` | **556/556 PASS** (542 baseline + 9 F6 + 5 F7), 46 classes |
+| Instrumented | `:app:connectedDebugAndroidTest` on the Mi Box 4 | **19/19 PASS** |
+| Harness `player` | Full player tier | **32/32 PASS** |
+| Harness `full` | Three consecutive runs | **43/43 PASS** ×3 |
+| Harness `smoke` | Device smoke on the final APK | **12/12 PASS** |
+
+### Product findings (both resolved)
+
+- **F6 — Continue Watching was not curated by the catalog.** It is now filtered to videos the parent
+  still publishes (see Known Issue 3). Visibility only; `PlaybackAuthorization` is untouched, and
+  unpublishing never deletes a position or an approval.
+- **F7 — the catalog version counter could be reset by losing the catalog document.** The counter
+  lived only inside `catalog.json`, so deleting or reinitialising that file restarted the sequence at
+  0; the parent's next publish was then numbered *below* the version a TV already held, the TV refused
+  it as a regression, and it stayed stranded until the counter climbed back past it — measured on the
+  device as server 1 vs TV 3. The counter is now mirrored into a separate `catalog.version` file as a
+  durable high-water mark, and the next version is `max(document, high-water) + 1`. Regression
+  protection is unchanged; what changed is that a document reset can no longer rewind the sequence.
+  If *both* files are lost the server is indistinguishable from a fresh install and the counter does
+  legitimately restart — that residual case is documented and covered by a test rather than hidden.
+
+### Harness defects (introduced by this phase's own harness edit, all repaired)
+
+1. The "ignore the offer" phase added here saved a position below `RESUME_MIN_MS` (20 s), which is not
+   resumable, so the four *choice* tests after it found no offer and failed. The choice tests now run
+   first and the destructive phase last.
+2. `resume-continues-position` compared against a stale baseline; it now reads back the value the app
+   reports as resumable.
+3. Keys were sent even with no offer on screen, landing on the player and toggling pause.
+4. Fixed sleeps raced the state they awaited (`captions-enable`, `autoplay-advances-to-next-approved`,
+   `end-of-video-handling`), now event-synchronised (`Wait-LogMatch`, `Wait-QueueAdvance`), with a
+   deadline derived from the video's remaining duration.
+5. `end-of-video-handling` could report a **silent false pass** when the embedded server dropped a
+   status request: the null baseline made "did it move on?" trivially true. It now retries and, failing
+   that, records a failure. Fixing this immediately exposed a real second defect (a fixed 150 s
+   deadline that a video playing from 0 s could not meet), which is why the tiers were re-run after it.
+
+### Pre-existing failures (unchanged, not Phase 4)
+
+`audio-menu-lists-real-tracks` and `audio-switch-applied`. They fail identically before and after this
+phase; the resolver reports "0 audio" for the videos tested, so the menu offers no real tracks.
+Recorded, not fixed here, and not attributed to Phase 4.
+
+### Environment limitation
+
+The Android TV emulator cannot run on this host: `emulator -accel-check` exits 3 with "Virtualization
+extension is not supported". The AVD and TV system image are present, so this is environmental. The
+physical TV remains authoritative.
+
+### Unexecuted review
+
+`VISUAL_REVIEW=NOT_RUN`. The agent has no image input, and `adb screencap` returns a 100 %-black frame
+while a video surface is active. Geometry and pixels are measured programmatically, which is **not** a
+visual pass and is not reported as one.
 
 ## Final Commit
 

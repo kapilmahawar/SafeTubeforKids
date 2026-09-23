@@ -70,8 +70,15 @@ data class CatalogUiState(
  * - **Artwork comes from the approved cache.** The catalog has no thumbnails; the video the parent
  *   already approved for that identifier supplies one. A missing thumbnail is null, and the card
  *   shows a placeholder of exactly the same size.
- * - **Continue Watching is first** and contains only videos that are still approved (the query
- *   guarantees it), ordered by when the child last watched them.
+ * - **Continue Watching is first** and contains only videos the child can still reach: the video
+ *   must be half-watched *and* still approved (the query guarantees the latter) *and* still part of
+ *   the currently published child-visible catalog. The catalog is what a parent curates, so removing
+ *   an item - or disabling it, or the category holding it, or emptying the catalog entirely - takes
+ *   it off this shelf too. Otherwise a parent could remove a video from the catalog and still watch
+ *   the child reach it from Continue Watching. Order is when the child last watched them.
+ *   This is visibility only and does not touch authorization: `PlaybackAuthorization` remains the
+ *   single playback gate, and hiding a card here neither grants nor revokes permission, nor deletes
+ *   the saved position.
  */
 object CatalogUiProjection {
 
@@ -93,9 +100,12 @@ object CatalogUiProjection {
         resumable: List<ResumableVideoRow>,
     ): CatalogUiState {
         val artwork = ArtworkIndex(thumbnails)
+        // Continue Watching is curated by the catalog like every other shelf, so it is filtered
+        // against what the parent currently publishes before it is built.
+        val visible = VisibleCatalog(catalog)
 
         val shelves = buildList {
-            continueWatchingShelf(resumable)?.let { add(it) }
+            continueWatchingShelf(resumable, visible)?.let { add(it) }
             catalog
                 .sortedWith(compareBy({ it.category.sortOrder }, { it.category.id }))
                 .forEach { row -> categoryShelf(row, artwork)?.let { add(it) } }
@@ -124,9 +134,22 @@ object CatalogUiProjection {
         )
     }
 
-    private fun continueWatchingShelf(resumable: List<ResumableVideoRow>): CatalogShelfUi? {
-        if (resumable.isEmpty()) return null
-        val cards = resumable.map { it.toCard() }
+    /**
+     * Half-watched videos that the parent still publishes to the child.
+     *
+     * A card is shown only when the video is reachable through the current catalog: either an
+     * enabled VIDEO item names it directly, or an enabled PLAYLIST item names the source it belongs
+     * to. Anything else is dropped, so an empty or fully-disabled catalog yields no shelf at all and
+     * the empty state shows instead.
+     */
+    private fun continueWatchingShelf(
+        resumable: List<ResumableVideoRow>,
+        visible: VisibleCatalog,
+    ): CatalogShelfUi? {
+        val cards = resumable
+            .filter { visible.contains(it.videoId, it.playlistId) }
+            .map { it.toCard() }
+        if (cards.isEmpty()) return null
         return CatalogShelfUi(
             id = CONTINUE_WATCHING_ID,
             title = CONTINUE_WATCHING_TITLE,
@@ -173,6 +196,38 @@ object CatalogUiProjection {
         if (totalSeconds <= 0) return "Watched"
         val remainingMinutes = ((totalSeconds - positionMs / 1000).coerceAtLeast(0) + 59) / 60
         return if (remainingMinutes <= 0) "Watched" else "$remainingMinutes min left"
+    }
+
+    /**
+     * What the current catalog actually publishes to the child: the video ids named directly by an
+     * enabled item, and the playlist ids named by an enabled playlist item.
+     *
+     * This decides only whether a card is drawn. It confers no permission - a video that is visible
+     * here still has to pass `PlaybackAuthorization` to play - and a video hidden here keeps its
+     * approval record and its saved position, because nothing is deleted for being unpublished.
+     */
+    private class VisibleCatalog(catalog: List<CategoryWithItems>) {
+        private val videoIds = mutableSetOf<String>()
+        private val playlistIds = mutableSetOf<String>()
+
+        init {
+            catalog.asSequence()
+                .filter { it.category.enabled }
+                .flatMap { rows -> rows.items.asSequence() }
+                .filter { item -> item.enabled }
+                .forEach { item ->
+                    when (item.type) {
+                        ContentItemType.VIDEO ->
+                            item.youtubeVideoId?.takeIf { it.isNotBlank() }?.let { videoIds.add(it) }
+                        ContentItemType.PLAYLIST ->
+                            item.youtubePlaylistId?.takeIf { it.isNotBlank() }?.let { playlistIds.add(it) }
+                    }
+                }
+        }
+
+        /** Published when the video is named directly, or belongs to a published playlist. */
+        fun contains(videoId: String, playlistId: String): Boolean =
+            videoId in videoIds || (playlistId.isNotBlank() && playlistId in playlistIds)
     }
 
     /**

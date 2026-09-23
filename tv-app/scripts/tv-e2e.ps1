@@ -110,6 +110,48 @@ function Wait-PlayingFlag {
     return $false
 }
 
+# Waits until playback has moved off $Before - a different video, or playback stopped - instead of
+# sleeping a fixed amount and hoping. This is the fix for the autoplay/end-of-video flakiness: the
+# test remote-seeks to the end of the video, and those key presses consume most of any fixed window,
+# so a fixed sleep measured while the video was still a second short of its end (observed as
+# "still on e_04ZrNroTo at 228s of 229s"). A position that briefly stops changing must NOT be read
+# as "the queue ended", so this never breaks early on a stall; it only gives up at the deadline.
+# Returns the last snapshot read, or $null when playback stopped (itself a valid queue outcome).
+function Wait-QueueAdvance {
+    param($Before, [int]$TimeoutSec = 150)
+    # An unreadable baseline must not be compared: "different from nothing" is trivially true and
+    # would report a pass for a queue that never moved. Returning the baseline unchanged fails the
+    # caller's comparison instead, which is the safe direction.
+    if ($null -eq $Before -or -not $Before.videoId) {
+        Log '    queue-advance: refusing to compare against an unreadable baseline'
+        return $Before
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $last = $Before
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 5
+        $snap = PlayingNow
+        if ($null -eq $snap) { return $null }
+        if ($snap.videoId -ne $Before.videoId) { return $snap }
+        $last = $snap
+    }
+    return $last
+}
+
+# Waits for a pattern to appear in the app's own log (optionally only in lines after $Since), so a
+# test synchronises on the event it asserts rather than on a fixed sleep. This is the fix for the
+# captions flakiness: the menu has an ~8s idle timeout, so a fixed sleep could spend the window
+# before the key press landed.
+function Wait-LogMatch {
+    param([string]$Pattern, [int]$Since = 0, [int]$Attempts = 24, [int]$DelayMs = 500)
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $Since) -join "`n"
+        if ($fresh -match $Pattern) { return $true }
+        Start-Sleep -Milliseconds $DelayMs
+    }
+    return $false
+}
+
 # Direct evidence that remote keys were handled by the player, straight from the app's log.
 function Get-RemoteActions {
     $lines = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
@@ -434,20 +476,28 @@ if ($opened) {
         $captionsVideo = $true
     }
 
+    $capBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     Key 'KEYCODE_DPAD_DOWN'          # enter the settings row (Subtitles is first)
     Start-Sleep -Milliseconds 600
     Key 'KEYCODE_DPAD_CENTER'        # open the Subtitles menu
-    Start-Sleep -Seconds 2
+    # Synchronise on the menu actually opening rather than sleeping and hoping: the menu has an
+    # ~8s idle timeout, so a fixed sleep can spend the very window the next key press needs. This
+    # is why captions-enable passed twice and failed once on the same APK.
+    $menuOpened = Wait-LogMatch 'Menu opened: CAPTIONS' $capBase
     Shot '10-subtitles-menu'
-    $menuOpened = ((& $menuLog) -match 'Menu opened: CAPTIONS')
     Record 'menu-subtitles-opens' $menuOpened
 
     # choose the first subtitle track after "Off"
-    Key 'KEYCODE_DPAD_DOWN'
-    Key 'KEYCODE_DPAD_CENTER'
-    Start-Sleep -Seconds 3
+    $captionsOn = $false
+    if ($menuOpened) {
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_CENTER'
+        # Wait for the selection to be applied instead of sleeping a fixed amount.
+        $captionsOn = Wait-LogMatch 'Captions selection: (?!off)' $capBase
+    } else {
+        Log '  captions: the Subtitles menu never opened - sending no key rather than a stray one'
+    }
     Shot '11-subtitles-on'
-    $captionsOn = ((& $menuLog) -match 'Captions selection: (?!off)')
     if ($captionsVideo) {
         Record 'captions-enable' $captionsOn
     } else {
@@ -540,72 +590,147 @@ if ($opened) {
     Start-Sleep -Seconds 5
     Record 'resume-remembers-position' ($posBefore -gt 20) "left at ${posBefore}s"
 
-    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
-    PlayVideo $resumeVideo $resumeVideo
-    # The resume offer no longer holds playback up: the video plays from the beginning immediately
-    # and the offer sits over it, so it must NOT be answered instantly and must NOT pause anything.
-    # Pressing nothing for longer than its idle window is what proves the new rule - it withdraws
-    # itself and playback carries on from the beginning.
-    $promptSeen = $false
-    for ($i = 0; $i -lt 24; $i++) {
-        Start-Sleep -Milliseconds 500
-        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
-        if ($fresh -match 'Menu opened: RESUME') { $promptSeen = $true; break }
-    }
-    Record 'resume-prompt-appears' $promptSeen
-    Shot '15-resume-prompt'
+    # ------------------------------------------------------------------ resume, stage 2
+    # ORDER MATTERS HERE, and it is the fix for a real regression: the "no input" phase at the end
+    # leaves the video playing from the beginning, which saves a position well below
+    # RESUME_MIN_MS (20s). A position that low is not "resumable" at all, so running that phase
+    # *before* the choice tests destroyed the precondition they depend on and they failed with no
+    # offer on screen. The choice tests therefore run FIRST, while a >=20s position is known to be
+    # saved, and the destructive no-input phase runs LAST.
+    #
+    # The choice tests also no longer trust a baseline measured several phases earlier: each one
+    # establishes the saved position itself and reads back the value the app reports as resumable,
+    # which is the only authoritative source for what the offer will use.
+    $ResumeThresholdSec = 20   # mirrors PlaybackController.RESUME_MIN_MS (20_000L)
 
+    # The position the app itself reports as resumable for $videoId, or -1 when it offered nothing.
+    function GetSavedResumeSeconds([string]$videoId, [int]$since) {
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $since) -join "`n"
+        $m = [regex]::Match($fresh, 'Resumable position for ' + [regex]::Escape($videoId) + ': (\d+)s')
+        if ($m.Success) { return [int]$m.Groups[1].Value }
+        return -1
+    }
+
+    # Drives playback past the resume threshold, lets the periodic save persist it, then reopens the
+    # video and leaves its resume offer on screen. Returns the saved seconds, or -1 if a >=20s saved
+    # position could not be established (in which case the choice tests must not be asserted).
+    function EstablishResumeBaseline([string]$videoId) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            # A settings menu left open by an earlier step would swallow the seek keys.
+            if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: (CAPTIONS|QUALITY|AUDIO|SPEED|ASPECT)') {
+                Key 'KEYCODE_BACK'; Start-Sleep -Seconds 2
+            }
+            PlayVideo $videoId $videoId
+            Start-Sleep -Seconds 16
+            # A stale offer from a previous attempt would swallow the seek keys too.
+            if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'Menu opened: RESUME') {
+                Key 'KEYCODE_DPAD_DOWN'; Key 'KEYCODE_DPAD_CENTER'; Start-Sleep -Seconds 6
+            }
+            foreach ($i in 1..4) { Key 'KEYCODE_DPAD_RIGHT' }   # ~40s in
+            Start-Sleep -Seconds 14                              # let the periodic save happen
+            $leftAt = [int](PlayingNow).positionSec
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 5
+            # Reopen and read back what the app actually considers resumable.
+            $since = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+            PlayVideo $videoId $videoId
+            $saved = -1
+            for ($i = 0; $i -lt 30; $i++) {
+                Start-Sleep -Milliseconds 500
+                $saved = GetSavedResumeSeconds $videoId $since
+                if ($saved -ge 0) { break }
+            }
+            Log "  resume baseline attempt ${attempt}: playhead was at ${leftAt}s; app reports resumable ${saved}s (threshold ${ResumeThresholdSec}s)"
+            if ($saved -ge $ResumeThresholdSec) { return $saved }
+            Key 'KEYCODE_BACK'; Start-Sleep -Seconds 4
+        }
+        Log "  resume baseline: could NOT establish a saved position >= ${ResumeThresholdSec}s"
+        return -1
+    }
+
+    # --- choice 1: "Resume" must move the playhead to the saved position ---
+    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $savedForResume = EstablishResumeBaseline $resumeVideo
+    # Only send the key once the offer is actually on screen: a stray CENTER would land on the
+    # player and toggle pause, which previously poisoned every later step as well.
+    $promptForResume = $false
+    for ($i = 0; $i -lt 24; $i++) {
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') { $promptForResume = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    Record 'resume-prompt-appears' $promptForResume
+    Log "  resume choice: saved=${savedForResume}s threshold=${ResumeThresholdSec}s promptOnScreen=$promptForResume"
+    # Only the window of the press itself is judged. Establishing the baseline deliberately plays
+    # the video without answering its offer, so an ignored-offer withdrawal necessarily appears
+    # earlier in the log; sliding the window forward is what keeps the assertion about this press.
+    $resumeActionBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $posAfter = -1
+    if ($promptForResume) {
+        Key 'KEYCODE_DPAD_CENTER'                        # the offer opens on "Resume from ..."
+        Start-Sleep -Seconds 4
+        $posAfter = [int](PlayingNow).positionSec
+    } else {
+        Log '  resume choice: the offer was NOT presented - sending no key rather than a stray one'
+    }
+    $resumeSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeActionBase) -join "`n"
+    # The baseline is the position the app reported for THIS open, not a value from an earlier phase.
+    Record 'resume-continues-position' (($savedForResume -ge $ResumeThresholdSec) -and $promptForResume -and ([Math]::Abs($posAfter - $savedForResume) -lt 30)) "resumed at ${posAfter}s, app reported resumable ${savedForResume}s"
+    Record 'resume-choice-applied' ($promptForResume -and ($resumeSlice -match 'Resume chosen'))
+    Shot '15-resume-prompt'
+    Shot '16b-resumed'
+
+    # --- choice 2: "Start over" must delete the saved position ---
+    # (no BACK here: if the player is already gone, BACK would leave the app entirely and poison
+    # every later phase)
+    $restartLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $savedForRestart = EstablishResumeBaseline $resumeVideo
+    $promptAgain = $false
+    for ($i = 0; $i -lt 24; $i++) {
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') { $promptAgain = $true; break }
+        Start-Sleep -Milliseconds 500
+    }
+    Log "  start over: saved=${savedForRestart}s threshold=${ResumeThresholdSec}s promptOnScreen=$promptAgain"
+    # Judged over the press window only, for the same reason as the Resume choice above: the
+    # baseline step plays unanswered, so it logs its own withdrawal before this press happens.
+    $restartActionBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $posRestart = -1
+    if ($promptAgain) {
+        Key 'KEYCODE_DPAD_DOWN'                          # second option is "Start over"
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 4
+        $posRestart = [int](PlayingNow).positionSec
+    } else {
+        Log '  start over: the offer was NOT presented - sending no key rather than a stray one'
+    }
+    $restartSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartActionBase) -join "`n"
+    # "Start over" must still be a deliberate press: require the offer to have been live and this
+    # press to be the reason it went away.
+    $startOverOk = ($promptAgain -and ($restartSlice -match 'Start over chosen') -and ($restartSlice -notmatch 'Resume offer withdrawn'))
+    Record 'resume-start-over' $startOverOk
+    Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and $startOverOk) "restarted at ${posRestart}s"
+
+    # --- the no-input phase runs LAST: it deliberately saves a sub-threshold position ---
+    # The resume offer no longer holds playback up: the video plays from the beginning immediately
+    # and the offer sits over it, so it must NOT be answered and must NOT pause anything. Pressing
+    # nothing for longer than its idle window is what proves the new rule - it withdraws itself and
+    # playback carries on from the beginning.
+    $noChoiceLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $savedForNoChoice = EstablishResumeBaseline $resumeVideo
+    $promptSeen = $savedForNoChoice -ge $ResumeThresholdSec
+    Log "  no-input phase: saved=${savedForNoChoice}s offerOnScreen=$promptSeen"
     # No input at all: the video must already be playing (nothing was chosen), and the offer must
     # remove itself rather than wait for a decision that is never coming.
     $posWhileOffered = [int](PlayingNow).positionSec
     $playingWhileOffered = [bool](PlayingNow).playing
     Start-Sleep -Seconds 12
-    $afterIdle = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+    $afterIdle = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $noChoiceLogBase) -join "`n"
     Record 'resume-offer-does-not-block-playback' ($promptSeen -and $playingWhileOffered) "playing=$playingWhileOffered at ${posWhileOffered}s while the offer was up"
     Record 'resume-offer-removes-itself-when-ignored' ($afterIdle -match 'Resume offer withdrawn with no choice')
     $posUnanswered = [int](PlayingNow).positionSec
-    Record 'no-choice-starts-from-beginning' ($posUnanswered -lt ($posBefore + 30)) "at ${posUnanswered}s with no choice made (was left at ${posBefore}s)"
+    Record 'no-choice-starts-from-beginning' ($promptSeen -and ($posUnanswered -lt ($posWhileOffered + 30))) "at ${posUnanswered}s with no choice made (offer was at ${posWhileOffered}s)"
     Shot '16-resume-offer-ignored'
-
-    # Now the choice itself: ask for the start of the video, then pick "Resume" and confirm the
-    # playhead actually jumps back to where the child left off.
-    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
-    PlayVideo $resumeVideo $resumeVideo
-    $promptAgainForResume = $false
-    for ($i = 0; $i -lt 24; $i++) {
-        Start-Sleep -Milliseconds 500
-        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
-        if ($fresh -match 'Menu opened: RESUME') { $promptAgainForResume = $true; break }
-    }
-    Key 'KEYCODE_DPAD_CENTER'                            # the offer opens on "Resume from ..."
-    Start-Sleep -Seconds 4
-    $posAfter = [int](PlayingNow).positionSec
-    $resumeSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
-    Record 'resume-continues-position' (($posBefore -gt 20) -and ([Math]::Abs($posAfter - $posBefore) -lt 30)) "resumed at ${posAfter}s (left at ${posBefore}s)"
-    Record 'resume-choice-applied' ($promptAgainForResume -and ($resumeSlice -match 'Resume chosen'))
-    Shot '16b-resumed'
-
-    # start over on the same video (no BACK here: if the player is already gone, BACK would
-    # leave the app entirely and poison every later phase)
-    $restartLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
-    PlayVideo $resumeVideo $resumeVideo
-    $promptAgain = $false
-    for ($i = 0; $i -lt 24; $i++) {
-        Start-Sleep -Milliseconds 500
-        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
-        if ($fresh -match 'Menu opened: RESUME') { $promptAgain = $true; break }
-    }
-    Key 'KEYCODE_DPAD_DOWN'                              # second option is "Start over"
-    Key 'KEYCODE_DPAD_CENTER'
-    Start-Sleep -Seconds 4
-    $posRestart = [int](PlayingNow).positionSec
-        $restartSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
-        # There is no longer an auto-restart rule that logs this same line, but "Start over" must
-        # still be a deliberate press: require the offer to have been live and this press to be the
-        # reason it went away.
-        $startOverOk = ($promptAgain -and ($restartSlice -match 'Start over chosen') -and ($restartSlice -notmatch 'Resume offer withdrawn'))
-        Record 'resume-start-over' $startOverOk
-        Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and $startOverOk) "restarted at ${posRestart}s"
 
     # --- security: an unapproved video id must never reach the player ---
     $fgSecurity = EnsureApp 'security'
@@ -635,9 +760,16 @@ if ($opened) {
         if ($autoDuration -gt 20 -and $autoDuration -le 900) {
             $autoPresses = [Math]::Max(1, [int](($autoDuration - 12) / 10))
             for ($i = 1; $i -le $autoPresses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
-            Start-Sleep -Seconds 45
-            $afterAuto = PlayingNow
-            Record 'autoplay-advances-to-next-approved' (($null -ne $afterAuto) -and ($afterAuto.videoId -ne $beforeAuto.videoId)) "queue $($beforeAuto.videoId) -> $($afterAuto.videoId) (reached $($afterAuto.positionSec)s of $($beforeAuto.durationSec)s)"
+            # Wait for the queue to actually advance rather than sleeping a fixed window: the seeks
+            # above consume most of any fixed window, so a 45s sleep once measured this video at
+            # "228s of 229s" - one second short of the end it was waiting for. The deadline is
+            # derived from the time still to play, so it also covers the case where the seek presses
+            # did not land and the video plays out from wherever it actually is.
+            $autoRemaining = [Math]::Max(30, $autoDuration - [int]$beforeAuto.positionSec)
+            $afterAuto = Wait-QueueAdvance $beforeAuto ($autoRemaining + 90)
+            $autoReached = if ($null -eq $afterAuto) { 'playback stopped' } else { "$($afterAuto.videoId) (reached $($afterAuto.positionSec)s of $($beforeAuto.durationSec)s)" }
+            Log "  autoplay: queue $($beforeAuto.videoId) -> $autoReached"
+            Record 'autoplay-advances-to-next-approved' (($null -ne $afterAuto) -and ($afterAuto.videoId -ne $beforeAuto.videoId)) "queue $($beforeAuto.videoId) -> $autoReached"
             Record 'autoplay-stays-in-same-source' (($null -ne $afterAuto) -and ($afterAuto.playlistId -eq $beforeAuto.playlistId))
             Shot '21-autoplay'
         } else {
@@ -662,25 +794,39 @@ if ($opened) {
         # Watch the playhead instead of sleeping a fixed amount: reaching the end by remote
         # seeking consumes most of any fixed window, which is why this check once reported a
         # video "still playing" at 164s of 165s.
-        $endBefore = PlayingNow
-        $lastPos = -1
-        $stalled = 0
-        for ($i = 0; $i -lt 30; $i++) {
-            Start-Sleep -Seconds 5
+        # Capture the pre-end state robustly. The embedded server occasionally drops a single
+        # request, and a null/empty baseline would make the "did it move on?" comparison below
+        # trivially true - reporting a PASS for a video that never actually ended. That is a silent
+        # false pass, so an unreadable baseline is retried and then reported as a failure with its
+        # own reason rather than being converted into a pass.
+        $endBefore = $null
+        for ($i = 0; $i -lt 6; $i++) {
             $snap = PlayingNow
-            if ($null -eq $snap) { break }
-            if ($snap.videoId -ne $endBefore.videoId) { break }
-            $pos = [int]$snap.positionSec
-            if ($pos -eq $lastPos) { $stalled++; if ($stalled -ge 3) { break } } else { $stalled = 0 }
-            $lastPos = $pos
+            if ($snap -and $snap.videoId) { $endBefore = $snap; break }
+            Log "    end-of-video: player state unreadable (attempt $($i + 1)) - retrying"
+            Start-Sleep -Seconds 2
         }
-        $endAfter = PlayingNow
-        if ($null -eq $endAfter) {
-            Record 'end-of-video-handling' $true "queue ended: playback stopped"
-        } elseif ($endAfter.videoId -ne $endBefore.videoId) {
-            Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
+        if ($null -eq $endBefore) {
+            Record 'end-of-video-handling' $false 'could not read the player state before waiting for the end'
         } else {
-            Record 'end-of-video-handling' $false "still on $($endAfter.videoId) at $($endAfter.positionSec)s of $($endAfter.durationSec)s after waiting"
+            # Watch for the actual advance instead of breaking on a position stall: at the end of a
+            # video the playhead legitimately stops changing for a moment while the queue moves on,
+            # and treating that as "finished waiting" is what produced
+            # "still on e_04ZrNroTo at 228s of 229s after waiting" - one second short of the end.
+            # The deadline has to cover the video actually playing to its end. When the seek presses
+            # land, only the last few seconds remain; when they do not (observed as a baseline of
+            # "0s of 165s"), the video has to play from the beginning and a fixed 150s deadline is
+            # simply too short - which is what failed as "still on MR5XSOdjKMA at 152s of 165s".
+            $remaining = [Math]::Max(30, $durationSec - [int]$endBefore.positionSec)
+            $endAfter = Wait-QueueAdvance $endBefore ($remaining + 90)
+            Log "  end-of-video: was $($endBefore.videoId) at $($endBefore.positionSec)s of $($endBefore.durationSec)s; now $(if ($null -eq $endAfter) { 'playback stopped' } else { "$($endAfter.videoId) at $($endAfter.positionSec)s" })"
+            if ($null -eq $endAfter) {
+                Record 'end-of-video-handling' $true "queue ended: playback stopped"
+            } elseif ($endAfter.videoId -ne $endBefore.videoId) {
+                Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
+            } else {
+                Record 'end-of-video-handling' $false "still on $($endAfter.videoId) at $($endAfter.positionSec)s of $($endAfter.durationSec)s after waiting"
+            }
         }
     } else {
         Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
