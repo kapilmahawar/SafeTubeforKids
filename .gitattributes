@@ -1,0 +1,8 @@
+# Screenshots and other binaries must never be touched by a line-ending conversion.
+# The repo is edited on Windows with core.autocrlf=true, and a PNG that gets "normalised"
+# is a corrupt PNG.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.apk binary

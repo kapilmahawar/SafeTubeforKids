@@ -27,13 +27,43 @@ in a proper TV player built for a remote control.
   a settings row (D-pad down). Subtitles are YouTube's own tracks; quality and audio list only
   what a video actually offers — including multiple audio *languages* (English, Hindi, Bangla, …)
   rather than bitrate variants.
-- **Resume.** Progress is remembered per video, so reopening offers "Resume from 4:12" or "Start
-  over". A video watched to the end is not offered for resume.
+- **Resume, without the wait.** Progress is remembered per video. Reopening a video starts playing it
+  from the beginning *straight away* and offers to carry on from where the child left off: choosing
+  Resume jumps to the saved position, and leaving the offer alone withdraws it and keeps playing from
+  the start. A video watched to the end is not offered for resume.
+- **Organised the way the parent wants.** The parent's configuration defines named shelves
+  ("Cartoon", "Music", …) and what goes on each one — a whole YouTube playlist or a single video, in
+  whatever order the parent chose — and the TV renders exactly that and nothing else. The shelves come
+  from a catalog the TV keeps locally, so it still works with the server switched off. (The parent
+  dashboard for editing the catalog is not built yet; today it is configured through the
+  `PUT /catalog` API.)
 - **Approved queue.** Next/previous and end-of-video autoplay only ever walk the parent-approved
   list, in the parent's order. When the list ends, playback stops.
 - **Screen time.** Daily limits, bedtime, bonus minutes and a manual lock, managed from the
   phone. Pausing stops the clock.
 - **Kiosk mode.** Optionally lock the TV to a whitelist of apps.
+
+## Screenshots
+
+Captured from the app running on a Xiaomi Mi Box 4 (1920×1080, Android TV 12).
+
+![The catalog home screen on Android TV](docs/screenshots/catalog-home.png)
+
+*The TV home screen **is** the parent's catalog: one shelf per category the parent configured, in the
+parent's order, using the parent's names (plus a Continue Watching shelf from the child's own
+progress). It is drawn from the database on the TV, so the server can be switched off and the shelves
+are still there.*
+
+![A shelf holding playlists and single videos together](docs/screenshots/catalog-mixed-shelf.png)
+
+*A "Music" shelf holding two playlists ("Nursery Songs", "ABC Songs") and two single videos
+("Twinkle Twinkle", "Wheels on Bus") in one row, in exactly the order the parent set. The app does
+not sort them, group them or separate playlists from videos.*
+
+![The child-facing empty state](docs/screenshots/empty-state.png)
+
+*With nothing configured the child gets a plain, deliberate empty state — never a search box, a feed,
+"related videos" or a YouTube suggestion.*
 
 ## Architecture
 
@@ -47,6 +77,12 @@ Phone (browser) ──HTTP/8080──▶ TV app: Ktor server + Room + Compose UI
 - **`PlaybackAuthorization`** is the single gate: a video plays only while it is in the approved
   cache and its parent source still exists. That cache is also the only queue the player may
   walk, so "next video" can never become a YouTube recommendation.
+- **The catalog** is what the home screen draws. A parent's configuration is published to the TV's
+  server as versioned JSON (`PUT /catalog`), the TV syncs it into Room, and the screen then reads
+  *only* Room — so it never waits on the network. An unreachable, malformed or older server changes
+  nothing, and a catalog replacement is one transaction, so the UI can never show half of one. Being
+  in the catalog is not permission: it says what the parent *configured*, and
+  `PlaybackAuthorization` still decides what may play.
 - **`PlaybackController`** owns playback: authorization, queue position, play/pause, seeking,
   watch-time accounting, resume persistence and time-limit reactions. The UI holds no media state
   and never touches the player directly.

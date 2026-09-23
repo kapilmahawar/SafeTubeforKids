@@ -40,9 +40,12 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
 - Player: play/pause, pause→resume, timeline, D-pad and media seek (±10s), auto-hide controls,
   buffering indicator, subtitle menu and captions on/off, quality, audio **language** tracks,
   speed, screen fit, resume (position *and* choice), start-over.
-- Resume prompt semantics: it waits for a decision, any remote interaction hands it a full window
-  again, and thirty seconds with no choice starts the video from the beginning
-  (`No resume choice after 30s - starting over`).
+- Resume offer semantics (changed on the user's request): the video **starts playing from the
+  beginning immediately** and the offer sits over it, so nothing waits on a decision. Choosing
+  "Resume" seeks to the saved position (`Resume chosen: 65s into …`); leaving the offer alone
+  withdraws it after the menu idle window and playback carries on from the beginning
+  (`Resume offer withdrawn with no choice`). Dismissing it never seeks - the child asked for the
+  beginning by not asking for anything. "Start over" still deletes the saved position.
 - Held-key seek: the escalation curve is unit-tested and the user confirmed on the real remote that
   its key-repeat drives it.
 - Error and retry: with the offline simulator on, playing an approved video shows *"Couldn't play
