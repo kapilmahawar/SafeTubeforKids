@@ -159,6 +159,9 @@ dependencies {
     testImplementation("io.ktor:ktor-server-test-host:$ktorVersion")
     testImplementation("io.ktor:ktor-client-content-negotiation:$ktorVersion")
     testImplementation("androidx.room:room-testing:$roomVersion")
+    // Real Room/SQLite in the JVM suite: the catalog tests assert SQL-level behaviour
+    // (ORDER BY, foreign keys, migrations), which hand-written fakes cannot prove.
+    testImplementation("org.robolectric:robolectric:4.16.1")
 
     // Instrumented test dependencies
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

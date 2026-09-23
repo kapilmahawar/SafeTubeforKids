@@ -6,12 +6,27 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import tv.safetubeforkids.app.data.catalog.CatalogMetadataDao
+import tv.safetubeforkids.app.data.catalog.CatalogMetadataEntity
+import tv.safetubeforkids.app.data.catalog.CategoryDao
+import tv.safetubeforkids.app.data.catalog.CategoryEntity
+import tv.safetubeforkids.app.data.catalog.ContentItemDao
+import tv.safetubeforkids.app.data.catalog.ContentItemEntity
 import tv.safetubeforkids.app.data.events.PlayEventDao
 import tv.safetubeforkids.app.data.events.PlayEventEntity
 
 @Database(
-    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class],
-    version = 6,
+    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class, CategoryEntity::class, ContentItemEntity::class, CatalogMetadataEntity::class],
+    version = 7,
+    // Schema export stays off. Turning it on makes Room's processor serialise the schema bundle,
+    // and on this project that crashes a clean `kspDebugKotlin`:
+    //   java.lang.AbstractMethodError: Receiver class
+    //   androidx.room.migration.bundle.FieldBundle$$serializer ... does not define or inherit
+    //   'abstract kotlinx.serialization.KSerializer[] typeParametersSerializers()'
+    // because KSP puts the module's compile classpath (kotlinx-serialization 1.8.0, via Ktor) and
+    // Room's processor classpath (room-migration 2.8.4 wants 1.8.1) on one classloader. Fixing it
+    // means moving the app's serialization version, which is not Phase 2's business. The migration
+    // is instead verified by CatalogMigrationTest against Room's own generated DDL.
     exportSchema = false,
 )
 abstract class CacheDatabase : RoomDatabase() {
@@ -22,6 +37,11 @@ abstract class CacheDatabase : RoomDatabase() {
     abstract fun kioskDao(): KioskDao
     abstract fun whitelistDao(): WhitelistDao
     abstract fun playbackPositionDao(): PlaybackPositionDao
+
+    /** Local catalog (Phase 2): configuration only - see [CategoryEntity]. */
+    abstract fun categoryDao(): CategoryDao
+    abstract fun contentItemDao(): ContentItemDao
+    abstract fun catalogMetadataDao(): CatalogMetadataDao
 
     companion object {
         @Volatile
@@ -167,6 +187,60 @@ abstract class CacheDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Local catalog (Phase 2). Purely additive: no existing table is touched, so every
+                // approved source, cached video, playback position, play event and setting survives.
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `categories` (
+                        `id` TEXT NOT NULL,
+                        `display_name` TEXT NOT NULL,
+                        `sort_order` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL,
+                        `created_at` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_categories_sort_order` ON `categories` (`sort_order`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `content_items` (
+                        `id` TEXT NOT NULL,
+                        `category_id` TEXT NOT NULL,
+                        `type` TEXT NOT NULL,
+                        `display_name` TEXT NOT NULL,
+                        `sort_order` INTEGER NOT NULL,
+                        `youtube_playlist_id` TEXT,
+                        `youtube_video_id` TEXT,
+                        `enabled` INTEGER NOT NULL,
+                        `created_at` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`category_id`) REFERENCES `categories`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_content_items_category_id_sort_order` ON `content_items` (`category_id`, `sort_order`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `catalog_metadata` (
+                        `id` INTEGER NOT NULL,
+                        `catalog_version` INTEGER NOT NULL,
+                        `server_version` INTEGER,
+                        `last_successful_sync_at` INTEGER,
+                        `last_attempt_at` INTEGER,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
         fun getInstance(context: Context): CacheDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -174,7 +248,7 @@ abstract class CacheDatabase : RoomDatabase() {
                     CacheDatabase::class.java,
                     "parentapproved_cache"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .build()
                 INSTANCE = instance
                 instance

@@ -7,6 +7,7 @@ import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.auth.SharedPrefsPinLockoutPersistence
 import tv.safetubeforkids.app.auth.SharedPrefsSessionPersistence
 import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.catalog.CatalogRepository
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.KioskManager
 import tv.safetubeforkids.app.relay.RelayConfig
@@ -27,6 +28,12 @@ object ServiceLocator {
 
     private var initialized = false
     private lateinit var relayPrefs: SharedPreferences
+
+    /**
+     * Local catalog access for the future TV UI and the future sync layer. Lazy, so it always wraps
+     * whichever database `init` or `initForTest` installed.
+     */
+    val catalogRepository: CatalogRepository by lazy { CatalogRepository(database) }
 
     private const val KEY_RELAY_ENABLED = "relay_enabled"
 
