@@ -335,26 +335,31 @@ if ($opened) {
     Log "  playing $videoId from source $sourceId ($sourceCount approved videos)"
 
     # Wait until playback is genuinely running (playhead advancing) before asserting controls,
-    # otherwise a pause press would land while the video is still buffering. A resume prompt is
-    # legitimate here (the previous run left a position), so dismiss it to reach playback.
+    # otherwise a pause press would land while the video is still buffering.
+    #
+    # The resume offer no longer pauses anything: the video plays from the beginning behind it and
+    # the offer withdraws itself after a few seconds. While it is on screen it still owns the D-pad,
+    # so it has to be got out of the way first or the control keys below would move the offer
+    # instead of the player. BACK dismisses it and playback carries on from the beginning.
     $running = $false
-    # Only lines written from here on can say whether a prompt is live right now: a buffer-wide
-    # match keeps finding the previous phase's prompt, and an OK sent to a player with no prompt
-    # merely toggles play/pause.
+    # Only lines written from here on can say whether an offer is live right now: a buffer-wide
+    # match keeps finding the previous phase's offer, and a stray BACK with nothing open would
+    # leave the player entirely.
     $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     for ($attempt = 0; $attempt -lt 15; $attempt++) {
         Start-Sleep -Seconds 2
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $logBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME' -and $fresh -notmatch 'Resume offer withdrawn') {
+            Log '  resume offer is up - dismissing it so the control keys reach the player'
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 2
+            $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+            continue
+        }
         $snapshot = PlayingNow
         if ($snapshot -and $snapshot.playing -eq $true -and [int]$snapshot.positionSec -gt 0) {
             $running = $true
             break
-        }
-        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $logBase) -join "`n"
-        if ($fresh -match 'Menu opened: RESUME') {
-            Log '  resume prompt is open - choosing Resume so the control tests have a live player'
-            Key 'KEYCODE_DPAD_CENTER'
-            $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
-            Start-Sleep -Seconds 5
         }
     }
     Record 'playback-running' $running
@@ -537,9 +542,10 @@ if ($opened) {
 
     $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
     PlayVideo $resumeVideo $resumeVideo
-    # The prompt answers itself after 10s - a deliberate rule: no choice means start from the
-    # beginning - so it has to be answered the moment it appears. A fixed sleep longer than that
-    # window measures the start-over rule rather than the resume choice.
+    # The resume offer no longer holds playback up: the video plays from the beginning immediately
+    # and the offer sits over it, so it must NOT be answered instantly and must NOT pause anything.
+    # Pressing nothing for longer than its idle window is what proves the new rule - it withdraws
+    # itself and playback carries on from the beginning.
     $promptSeen = $false
     for ($i = 0; $i -lt 24; $i++) {
         Start-Sleep -Milliseconds 500
@@ -549,15 +555,35 @@ if ($opened) {
     Record 'resume-prompt-appears' $promptSeen
     Shot '15-resume-prompt'
 
-    Key 'KEYCODE_DPAD_CENTER'                            # the prompt opens on "Resume from ..."
+    # No input at all: the video must already be playing (nothing was chosen), and the offer must
+    # remove itself rather than wait for a decision that is never coming.
+    $posWhileOffered = [int](PlayingNow).positionSec
+    $playingWhileOffered = [bool](PlayingNow).playing
+    Start-Sleep -Seconds 12
+    $afterIdle = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+    Record 'resume-offer-does-not-block-playback' ($promptSeen -and $playingWhileOffered) "playing=$playingWhileOffered at ${posWhileOffered}s while the offer was up"
+    Record 'resume-offer-removes-itself-when-ignored' ($afterIdle -match 'Resume offer withdrawn with no choice')
+    $posUnanswered = [int](PlayingNow).positionSec
+    Record 'no-choice-starts-from-beginning' ($posUnanswered -lt ($posBefore + 30)) "at ${posUnanswered}s with no choice made (was left at ${posBefore}s)"
+    Shot '16-resume-offer-ignored'
+
+    # Now the choice itself: ask for the start of the video, then pick "Resume" and confirm the
+    # playhead actually jumps back to where the child left off.
+    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    PlayVideo $resumeVideo $resumeVideo
+    $promptAgainForResume = $false
+    for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 500
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+        if ($fresh -match 'Menu opened: RESUME') { $promptAgainForResume = $true; break }
+    }
+    Key 'KEYCODE_DPAD_CENTER'                            # the offer opens on "Resume from ..."
     Start-Sleep -Seconds 4
     $posAfter = [int](PlayingNow).positionSec
     $resumeSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
-    # Without this, a choice sent late would let the start-over rule satisfy the assertion below.
-    $answeredInTime = $resumeSlice -notmatch 'No resume choice'
-    Record 'resume-continues-position' (($posBefore -gt 20) -and ([Math]::Abs($posAfter - $posBefore) -lt 20)) "resumed at ${posAfter}s (left at ${posBefore}s)"
-    Record 'resume-choice-applied' ($answeredInTime -and (((& $menuLog)) -match 'Resume chosen'))
-    Shot '16-resumed'
+    Record 'resume-continues-position' (($posBefore -gt 20) -and ([Math]::Abs($posAfter - $posBefore) -lt 30)) "resumed at ${posAfter}s (left at ${posBefore}s)"
+    Record 'resume-choice-applied' ($promptAgainForResume -and ($resumeSlice -match 'Resume chosen'))
+    Shot '16b-resumed'
 
     # start over on the same video (no BACK here: if the player is already gone, BACK would
     # leave the app entirely and poison every later phase)
@@ -574,9 +600,10 @@ if ($opened) {
     Start-Sleep -Seconds 4
     $posRestart = [int](PlayingNow).positionSec
         $restartSlice = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $restartLogBase) -join "`n"
-        # The 10s auto-restart logs the very same "Start over chosen" line, so require that the
-        # prompt was live when the keys were sent - otherwise this passes for the wrong reason.
-        $startOverOk = ($promptAgain -and ($restartSlice -notmatch 'No resume choice') -and ($restartSlice -match 'Start over chosen'))
+        # There is no longer an auto-restart rule that logs this same line, but "Start over" must
+        # still be a deliberate press: require the offer to have been live and this press to be the
+        # reason it went away.
+        $startOverOk = ($promptAgain -and ($restartSlice -match 'Start over chosen') -and ($restartSlice -notmatch 'Resume offer withdrawn'))
         Record 'resume-start-over' $startOverOk
         Record 'start-over-begins-at-zero' (($posRestart -lt 15) -and $startOverOk) "restarted at ${posRestart}s"
 

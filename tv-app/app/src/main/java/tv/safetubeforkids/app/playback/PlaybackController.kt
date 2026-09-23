@@ -159,13 +159,6 @@ class PlaybackController(
         const val MENU_IDLE_MS = 8_000L
         const val MENU_AFTER_CHOICE_MS = 5_000L
 
-        /**
-         * How long the resume prompt waits for a decision before starting the video from the
-         * beginning. Long enough to read and choose, short enough that nobody is left staring at
-         * a prompt they do not understand.
-         */
-        const val RESUME_CHOICE_TIMEOUT_MS = 30_000L
-
         /** How long buffering must last before Auto quality treats it as a stall. */
         const val STALL_STEP_DOWN_MS = 8_000L
 
@@ -430,8 +423,10 @@ class PlaybackController(
             }
 
             if (resumePositionMs > 0L) {
-                // Ask instead of guessing, and stay paused so nothing plays under the prompt.
-                player.pause()
+                // The video is already playing from the beginning - the child is watching within a
+                // second instead of waiting on a decision - and the offer to carry on from where
+                // they left off is shown alongside it. It gates nothing, so it uses the same
+                // auto-close as every other menu: leave it alone and it takes itself away.
                 openMenu(PlayerMenu.RESUME)
             }
         } catch (e: Exception) {
@@ -548,39 +543,17 @@ class PlaybackController(
         }
         menuOptions = buildOptions(menu)
         AppLogger.log("Menu opened: ${menu.name} (${menuOptions.size} options)")
-        // Settings menus are transient and must not linger. The resume prompt is a decision, not
-        // a menu: auto-closing it after 8s silently made the choice for the viewer, and a press
-        // arriving later landed on the player as play/pause instead of answering the prompt.
-        if (menu == PlayerMenu.RESUME) scheduleResumeTimeout() else scheduleMenuAutoClose()
+        // Every menu here is transient, including the resume offer: it no longer holds up playback
+        // (the video is already playing from the beginning behind it), so leaving it untouched means
+        // "start from the beginning after all" and it removes itself like any other menu.
+        scheduleMenuAutoClose()
     }
 
     /** Menus must not linger as a distraction: they close themselves when left alone. */
     fun noteMenuInteraction() {
-        // Browsing a settings menu is not choosing, so it only restarts that menu's idle timer.
-        // The resume prompt is the opposite case: a child fumbling for the remote is about to
-        // answer it, so any interaction hands the decision a full window again rather than
-        // letting the countdown expire while they are still deciding.
-        if (activeMenu == PlayerMenu.RESUME) {
-            scheduleResumeTimeout()
-        } else if (activeMenu != null) {
-            scheduleMenuAutoClose()
-        }
-    }
-
-    /**
-     * The resume prompt is a decision, not a menu: it waits as long as it takes, but if nothing is
-     * chosen within [RESUME_CHOICE_TIMEOUT_MS] the video starts from the beginning - what a child
-     * who has not asked to continue would expect.
-     */
-    private fun scheduleResumeTimeout() {
-        menuAutoCloseJob?.cancel()
-        menuAutoCloseJob = scope.launch {
-            delay(RESUME_CHOICE_TIMEOUT_MS)
-            if (activeMenu == PlayerMenu.RESUME) {
-                AppLogger.log("No resume choice after ${RESUME_CHOICE_TIMEOUT_MS / 1000}s - starting over")
-                selectMenuOption("restart")
-            }
-        }
+        // Any interaction restarts the idle window, so a child reaching for the remote is not
+        // racing a timer that is about to expire under them.
+        if (activeMenu != null) scheduleMenuAutoClose()
     }
 
     private fun scheduleMenuAutoClose(delayMs: Long = MENU_IDLE_MS) {
@@ -596,11 +569,14 @@ class PlaybackController(
 
     fun closeMenu() {
         menuAutoCloseJob?.cancel()
+        // `resumePositionMs` is still set only while the offer is unanswered: choosing either
+        // option clears it first, so this branch is reached exactly when the child let the offer
+        // lapse. Playback keeps running from the beginning of the video, and jumping forward now
+        // would undo the choice they made by not making one.
         if (activeMenu == PlayerMenu.RESUME && resumePositionMs > 0L) {
-            // Dismissing the prompt means "carry on watching", not "sit there paused".
-            player.seekTo(resumePositionMs)
-            player.play()
-            AppLogger.log("Resume prompt dismissed - continuing at ${resumePositionMs / 1000}s")
+            AppLogger.log(
+                "Resume offer withdrawn with no choice - carrying on from the beginning"
+            )
             resumePositionMs = 0L
         }
         activeMenu = null
@@ -684,6 +660,8 @@ class PlaybackController(
                 scope.launch(Dispatchers.IO) { db.playbackPositionDao().delete(currentVideoId) }
                 AppLogger.log("Start over chosen for $currentVideoId")
             } else {
+                // The one case that moves the playhead: the child explicitly asked to carry on from
+                // where they left off, instead of the beginning it is already playing from.
                 player.seekTo(resumePositionMs)
                 AppLogger.log("Resume chosen: ${resumePositionMs / 1000}s into $currentVideoId")
             }

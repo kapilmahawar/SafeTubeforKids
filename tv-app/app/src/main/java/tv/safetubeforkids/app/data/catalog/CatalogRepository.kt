@@ -3,6 +3,8 @@ package tv.safetubeforkids.app.data.catalog
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import tv.safetubeforkids.app.data.cache.CacheDatabase
+import tv.safetubeforkids.app.data.cache.ResumableVideoRow
+import tv.safetubeforkids.app.data.cache.VideoThumbnailRow
 
 /** Outcome of a catalog mutation that can be refused. */
 sealed class CatalogWriteResult {
@@ -47,6 +49,42 @@ class CatalogRepository(private val db: CacheDatabase) {
     suspend fun getItem(id: String): ContentItemEntity? = contentItemDao.getById(id)
 
     fun observeMetadata(): Flow<CatalogMetadataEntity?> = metadataDao.observe()
+
+    /**
+     * The whole catalog for the TV home screen: every shelf with its items, parent order, read
+     * atomically so a replacement is never seen half-applied.
+     *
+     * This is the UI's entry point into the catalog. The UI does not query DAOs itself and does not
+     * know the catalog came from a server.
+     */
+    fun observeCatalogWithItems(): Flow<List<CategoryWithItems>> = categoryDao.observeCatalog()
+
+    /**
+     * Artwork for the cached videos, so catalog cards can show a picture even though the catalog
+     * itself carries only a name and a YouTube identifier. Local Room data; no network.
+     */
+    fun observeVideoThumbnails(): Flow<List<VideoThumbnailRow>> =
+        db.videoDao().observeThumbnailIndex()
+
+    /**
+     * Videos that are half-watched *and* still approved, most recent first, for Continue Watching.
+     * See [ResumableVideoRow] for why the join keeps that shelf from becoming a permission.
+     */
+    fun observeResumableVideos(minPositionMs: Long, maxPercent: Int): Flow<List<ResumableVideoRow>> =
+        db.playbackPositionDao().observeResumable(minPositionMs, maxPercent)
+
+    /**
+     * The first video of [playlistId]'s approved queue, or null when that playlist has nothing
+     * authorized behind it.
+     *
+     * This chooses where a playlist card *starts*; it grants nothing. The queue only exists for a
+     * source that is still approved, and the player re-checks authorization itself before preparing
+     * any media.
+     */
+    suspend fun firstApprovedVideoOf(playlistId: String): String? =
+        tv.safetubeforkids.app.playback.PlaybackAuthorization.approvedQueue(db, playlistId)
+            .firstOrNull()
+            ?.videoId
 
     suspend fun getMetadata(): CatalogMetadataEntity? = metadataDao.get()
 

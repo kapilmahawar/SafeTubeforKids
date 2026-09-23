@@ -12,6 +12,9 @@ import tv.safetubeforkids.app.data.catalog.CatalogSyncResult
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.util.AppLogger
 import tv.safetubeforkids.app.util.BandwidthOverride
+import tv.safetubeforkids.app.util.CatalogSyncDebug
+import tv.safetubeforkids.app.ui.screens.CatalogUiProjection
+import kotlinx.coroutines.flow.first
 import tv.safetubeforkids.app.util.ContentSourceParser
 import tv.safetubeforkids.app.util.NetworkUtils
 import tv.safetubeforkids.app.timelimits.TimeLimitConfig
@@ -52,6 +55,9 @@ class DebugReceiver : BroadcastReceiver() {
             "$PKG.DEBUG_GET_PLAYLISTS" -> handleGetPlaylists()
             "$PKG.DEBUG_GET_SERVER_STATUS" -> handleGetServerStatus(context)
             "$PKG.DEBUG_SYNC_CATALOG" -> handleSyncCatalog()
+            "$PKG.DEBUG_CATALOG_SYNC_UNAVAILABLE" -> handleCatalogSyncUnavailable(intent)
+            "$PKG.DEBUG_DUMP_CATALOG_UI" -> handleDumpCatalogUi()
+            "$PKG.DEBUG_CLEAR_RESUME_POSITIONS" -> handleClearResumePositions()
 
             // --- PIN/Auth ---
             "$PKG.DEBUG_GET_PIN" -> handleGetPin()
@@ -257,10 +263,96 @@ class DebugReceiver : BroadcastReceiver() {
         }
     }
 
+    /**
+     * Forgets every saved playhead, which is what empties Continue Watching.
+     *
+     * The companion to `DEBUG_CLEAR_PLAY_EVENTS`: that one clears watch history, this one clears
+     * resume points. It exists so a device test can reach the state a fresh installation starts in -
+     * an empty catalog with nothing resumable - without a parent's approved library having to be
+     * destroyed to get there.
+     */
+    private fun handleClearResumePositions() {
+        scope.launch {
+            try {
+                ServiceLocator.database.playbackPositionDao().deleteAll()
+                logResult("""{"clearedResumePositions":true}""")
+            } catch (e: Exception) {
+                logResult("""{"error":"${e.message}"}""")
+            }
+        }
+    }
+
+    /**
+     * Turns the debug-only "server unavailable" switch on or off (extra `unavailable`,
+     * 0 or 1; toggles when absent).
+     *
+     * The SafeTube server runs inside this app, so a real outage cannot be staged from outside
+     * without stopping the app as well. This makes the catalog sync's HTTP call fail and nothing
+     * else, which is what lets a real TV prove that an outage leaves the local catalog alone -
+     * including across a force-stop, because the switch is persisted. Release builds ignore it.
+     */
+    private fun handleCatalogSyncUnavailable(intent: Intent) {
+        val requested = if (intent.hasExtra("unavailable")) {
+            intent.getIntExtra("unavailable", 0) == 1
+        } else {
+            !CatalogSyncDebug.forceServerUnavailable
+        }
+        CatalogSyncDebug.setForceServerUnavailable(requested)
+        logResult("""{"forceServerUnavailable":$requested}""")
+    }
+
+    /**
+     * Dumps exactly what the catalog home screen would render, computed by the same projection the
+     * UI uses. This is the evidence that a device test can assert on: `uiautomator` shows only what
+     * happens to be on screen, while this reports every shelf and card in the parent's order.
+     */
+    private fun handleDumpCatalogUi() {
+        scope.launch {
+            try {
+                val repository = ServiceLocator.catalogRepository
+                val state = CatalogUiProjection.build(
+                    catalog = repository.observeCatalogWithItems().first(),
+                    thumbnails = repository.observeVideoThumbnails().first(),
+                    resumable = repository.observeResumableVideos(
+                        CatalogUiProjection.RESUME_MIN_POSITION_MS,
+                        CatalogUiProjection.RESUME_MAX_PERCENT,
+                    ).first(),
+                )
+                val metadata = repository.getMetadata()
+                val json = buildJsonObject {
+                    put("isEmpty", state.isEmpty)
+                    put("catalogVersion", metadata?.catalogVersion ?: 0)
+                    put("shelfCount", state.shelves.size)
+                    put("shelves", buildJsonArray {
+                        state.shelves.forEach { shelf ->
+                            add(buildJsonObject {
+                                put("id", shelf.id)
+                                put("title", shelf.title)
+                                put("cards", buildJsonArray {
+                                    shelf.cards.forEach { card ->
+                                        add(buildJsonObject {
+                                            put("id", card.id)
+                                            put("title", card.title)
+                                            put("kind", card.kind.name)
+                                            put("hasArtwork", card.thumbnailUrl != null)
+                                            card.badgeText?.let { put("badge", it) }
+                                        })
+                                    }
+                                })
+                            })
+                        }
+                    })
+                }
+                logResult(json.toString())
+            } catch (e: Exception) {
+                logResult("""{"error":"${e.message}"}""")
+            }
+        }
+    }
+
     // --- PIN/Auth ---
 
-    private fun handleGetPin() {
-        val pin = ServiceLocator.pinManager.getCurrentPin()
+    private fun handleGetPin() {        val pin = ServiceLocator.pinManager.getCurrentPin()
         logResult("""{"pin":"$pin"}""")
     }
 

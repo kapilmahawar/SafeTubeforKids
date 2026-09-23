@@ -4,6 +4,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import tv.safetubeforkids.app.util.CatalogSyncDebug
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 
@@ -56,6 +57,13 @@ class HttpCatalogApi(
 ) : CatalogApi {
 
     override suspend fun fetch(): CatalogFetch = withContext(Dispatchers.IO) {
+        // Debug-build switch used to verify on a real TV that a server outage leaves the local
+        // catalog - and therefore the screen - untouched. Inert in release builds (see
+        // CatalogSyncDebug), and it cannot affect authorization, which never consults it.
+        if (CatalogSyncDebug.forceServerUnavailable) {
+            return@withContext CatalogFetch.Unavailable("server unavailable (debug switch)")
+        }
+
         val token = try {
             tokenProvider()
         } catch (e: Exception) {

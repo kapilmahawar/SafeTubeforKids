@@ -12,6 +12,7 @@ import tv.safetubeforkids.app.data.catalog.CatalogSyncService
 import tv.safetubeforkids.app.data.catalog.HttpCatalogApi
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.kiosk.KioskManager
+import tv.safetubeforkids.app.util.CatalogSyncDebug
 import tv.safetubeforkids.app.relay.RelayConfig
 import tv.safetubeforkids.app.relay.RelayConnector
 import tv.safetubeforkids.app.server.CatalogStore
@@ -79,6 +80,7 @@ object ServiceLocator {
         if (initialized) return
         database = CacheDatabase.getInstance(context)
         catalogStore = FileCatalogStore.inFilesDir(context.filesDir)
+        CatalogSyncDebug.init(context)
         val persistence = SharedPrefsSessionPersistence(
             context.getSharedPreferences("parentapproved_sessions", Context.MODE_PRIVATE)
         )

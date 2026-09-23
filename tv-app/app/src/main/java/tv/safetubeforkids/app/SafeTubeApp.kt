@@ -15,6 +15,25 @@ import org.schabi.newpipe.extractor.NewPipe
 class SafeTubeApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    private companion object {
+        /**
+         * How often the TV asks its SafeTube server for a newer catalog.
+         *
+         * Fifteen minutes is a compromise: a parent's edit reaches the TV without anyone touching
+         * it, and the TV still only makes four tiny loopback requests an hour. The request is a few
+         * kilobytes over the loopback interface, the sync serializes itself, and nothing about it is
+         * on the path that renders the screen.
+         */
+        const val CATALOG_SYNC_INTERVAL_MS = 15L * 60 * 1000
+
+        /**
+         * A short grace period before the first attempt, so the dashboard server (started by
+         * MainActivity and ServerService) is already listening and the first sync is not a
+         * connection-refused that has to wait a quarter of an hour to be retried.
+         */
+        const val CATALOG_SYNC_START_DELAY_MS = 3_000L
+    }
+
     override fun onCreate() {
         super.onCreate()
         CrashHandler.install(this)
@@ -61,6 +80,27 @@ class SafeTubeApp : Application() {
                 }
             } catch (e: Exception) {
                 AppLogger.error("Startup auto-refresh failed: ${e.message}")
+            }
+        }
+        // Catalog synchronization, in the background and never awaited.
+        //
+        // Local-first means the opposite of the obvious order: the screen is drawn from Room
+        // immediately, and this runs alongside it. A sync that succeeds replaces the catalog in one
+        // transaction and the UI follows through Room; a sync that fails - no server, a malformed
+        // answer, an older version - changes nothing, and the TV keeps working from what it has.
+        // CatalogSyncService serializes overlapping runs itself, so the startup attempt and the
+        // periodic one cannot race.
+        appScope.launch {
+            try {
+                kotlinx.coroutines.delay(CATALOG_SYNC_START_DELAY_MS)
+                while (true) {
+                    val result = ServiceLocator.catalogSyncService.syncCatalog()
+                    AppLogger.log("Catalog sync on startup: ${result::class.java.simpleName}")
+                    kotlinx.coroutines.delay(CATALOG_SYNC_INTERVAL_MS)
+                }
+            } catch (e: Exception) {
+                // Nothing here is worth interrupting the child's television for.
+                AppLogger.warn("Catalog sync loop stopped: ${e.message}")
             }
         }
     }

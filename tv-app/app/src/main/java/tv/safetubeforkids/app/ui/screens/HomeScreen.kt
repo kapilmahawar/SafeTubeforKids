@@ -17,7 +17,17 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBack
@@ -25,38 +35,35 @@ import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Sync
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import tv.safetubeforkids.app.BuildConfig
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.timelimits.TimeLimitStatus
 import tv.safetubeforkids.app.ui.components.AppCard
-import tv.safetubeforkids.app.ui.components.VideoCard
-import tv.safetubeforkids.app.ui.theme.KidAccent
+import tv.safetubeforkids.app.ui.components.CatalogCard
 import tv.safetubeforkids.app.ui.theme.KidBackground
 import tv.safetubeforkids.app.ui.theme.KidSurface
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
 import tv.safetubeforkids.app.ui.theme.OverscanPadding
-import tv.safetubeforkids.app.ui.theme.StatusError
-import tv.safetubeforkids.app.ui.theme.StatusWarning
 
+/**
+ * The child-facing home screen: the parent's catalog, rendered as shelves.
+ *
+ * Every shelf, every card and every title comes from the local Room catalog. Nothing on this screen
+ * performs a network request, and nothing here decides what may play - a card press hands a video id
+ * to the existing player, which authorizes it as it always has.
+ */
 @Composable
 fun HomeScreen(
     onPlayVideo: (videoId: String, playlistId: String, videoIndex: Int) -> Unit,
@@ -65,7 +72,8 @@ fun HomeScreen(
     onLocked: (String) -> Unit = {},
     viewModel: HomeViewModel = viewModel(),
 ) {
-    val uiState by viewModel.uiState.collectAsState()
+    val catalogState by viewModel.catalogState.collectAsState()
+    val kioskState by viewModel.kioskState.collectAsState()
     var showingVideos by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -106,7 +114,7 @@ fun HomeScreen(
         }
     }
 
-    val isKioskHome = uiState.kioskEnabled && uiState.whitelistedApps.isNotEmpty() && !showingVideos
+    val isKioskHome = kioskState.enabled && kioskState.whitelistedApps.isNotEmpty() && !showingVideos
 
     Box(
         modifier = Modifier
@@ -123,7 +131,7 @@ fun HomeScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                if (showingVideos && uiState.kioskEnabled) {
+                if (showingVideos && kioskState.enabled) {
                     // Back button when in videos view within kiosk mode
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Button(
@@ -191,14 +199,15 @@ fun HomeScreen(
             if (isKioskHome) {
                 // Kiosk home: apps grid with a "Videos" card
                 KioskAppsContent(
-                    apps = uiState.whitelistedApps,
+                    apps = kioskState.whitelistedApps,
                     onLaunchApp = { packageName ->
                         val context = viewModel.getApplication<android.app.Application>()
                         val intent = ServiceLocator.kioskManager.getLeanbackLaunchIntent(packageName)
                         if (intent != null) {
                             intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
-                                && ServiceLocator.kioskManager.isDeviceOwner()) {
+                                && ServiceLocator.kioskManager.isDeviceOwner()
+                            ) {
                                 val options = ActivityOptions.makeBasic()
                                 options.setLockTaskEnabled(true)
                                 context.startActivity(intent, options.toBundle())
@@ -210,10 +219,13 @@ fun HomeScreen(
                     onShowVideos = { showingVideos = true },
                 )
             } else {
-                // Normal video content (original HomeScreen behavior)
-                VideoContent(
-                    uiState = uiState,
-                    onPlayVideo = onPlayVideo,
+                CatalogContent(
+                    state = catalogState,
+                    onCardSelected = { card ->
+                        viewModel.onCardSelected(card) { target ->
+                            onPlayVideo(target.videoId, target.playlistId, target.startIndex)
+                        }
+                    },
                 )
             }
         }
@@ -253,7 +265,7 @@ private fun KioskAppsContent(
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            // "Videos" card — opens PA's video content
+            // "Videos" card — opens the catalog
             item {
                 AppCard(
                     appName = "Videos",
@@ -274,126 +286,132 @@ private fun KioskAppsContent(
     }
 }
 
+/**
+ * The shelves themselves.
+ *
+ * Focus is remembered across a trip to the player: the card that was pressed is written down before
+ * navigating, and when the screen comes back that card is focused again. If the catalog changed
+ * underneath and the card is gone, nothing is forced - the shelf simply takes focus normally.
+ */
 @Composable
-private fun VideoContent(
-    uiState: HomeUiState,
-    onPlayVideo: (videoId: String, playlistId: String, videoIndex: Int) -> Unit,
+private fun CatalogContent(
+    state: CatalogUiState,
+    onCardSelected: (CatalogCardUi) -> Unit,
 ) {
-    when {
-        uiState.isEmpty -> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "No videos yet!",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = KidText,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = "Connect your phone to add YouTube videos, playlists, or channels",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = KidTextDim,
-                    )
-                }
-            }
+    if (state.isEmpty) {
+        EmptyCatalogState()
+        return
+    }
+
+    val shelvesState = rememberLazyListState()
+    var restoreCardId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingFocusId by remember { mutableStateOf<String?>(null) }
+    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
+
+    // Coming back from the player: bring the pressed card back into view and give it focus.
+    LaunchedEffect(restoreCardId, state.shelves) {
+        val wanted = restoreCardId ?: return@LaunchedEffect
+        val shelfIndex = state.shelves.indexOfFirst { shelf -> shelf.cards.any { it.id == wanted } }
+        if (shelfIndex < 0) {
+            // The item is no longer in the catalog; leave focus to the normal first-press behaviour.
+            restoreCardId = null
+            return@LaunchedEffect
         }
-        uiState.isLoading && uiState.rows.all { it.videos.isEmpty() } -> {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator(color = KidAccent)
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Loading playlists...", color = KidTextDim)
-                }
-            }
+        if (shelvesState.firstVisibleItemIndex != shelfIndex) {
+            runCatching { shelvesState.scrollToItem(shelfIndex) }
         }
-        else -> {
-            LazyColumn(
-                contentPadding = PaddingValues(bottom = 32.dp),
-            ) {
-                items(uiState.rows) { row ->
-                    PlaylistRowSection(
-                        row = row,
-                        onPlayVideo = { video ->
-                            onPlayVideo(video.videoId, row.youtubePlaylistId, video.position)
-                        },
-                    )
-                }
-            }
+        pendingFocusId = wanted
+    }
+
+    LazyColumn(
+        state = shelvesState,
+        contentPadding = PaddingValues(bottom = 32.dp),
+    ) {
+        items(state.shelves, key = { it.id }) { shelf ->
+            CatalogShelfSection(
+                shelf = shelf,
+                focusRequesterFor = { cardId -> focusRequesters.getOrPut(cardId) { FocusRequester() } },
+                pendingFocusId = pendingFocusId,
+                onFocusRequestHandled = { handled -> if (pendingFocusId == handled) pendingFocusId = null },
+                onCardClick = { card ->
+                    restoreCardId = card.id
+                    onCardSelected(card)
+                },
+            )
         }
     }
 }
 
 @Composable
-private fun PlaylistRowSection(
-    row: PlaylistRow,
-    onPlayVideo: (tv.safetubeforkids.app.data.models.VideoItem) -> Unit,
+private fun CatalogShelfSection(
+    shelf: CatalogShelfUi,
+    focusRequesterFor: (String) -> FocusRequester,
+    pendingFocusId: String?,
+    onFocusRequestHandled: (String) -> Unit,
+    onCardClick: (CatalogCardUi) -> Unit,
 ) {
+    val rowState: LazyListState = rememberLazyListState()
+
     Column(modifier = Modifier.padding(vertical = 8.dp)) {
         Row(
             modifier = Modifier.padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = if (row.videoCount > 0) "${row.displayName} \u2014 ${row.videoCount} videos" else row.displayName,
+                text = shelf.title,
                 style = MaterialTheme.typography.titleMedium,
                 color = KidText,
             )
-            if (row.isOffline) {
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "Offline",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = StatusWarning,
-                )
-            }
-            if (row.isLoading) {
-                Spacer(modifier = Modifier.width(8.dp))
-                CircularProgressIndicator(
-                    modifier = Modifier.height(14.dp).width(14.dp),
-                    strokeWidth = 2.dp,
-                    color = KidAccent,
-                )
-            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        when {
-            row.error != null -> {
-                Text(
-                    text = "Playlist no longer available",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = StatusError,
-                    modifier = Modifier.padding(horizontal = 16.dp),
+        LazyRow(
+            state = rowState,
+            contentPadding = PaddingValues(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(shelf.cards, key = { it.id }) { card ->
+                CatalogCard(
+                    card = card,
+                    onClick = { onCardClick(card) },
+                    focusRequester = focusRequesterFor(card.id),
+                    requestFocusNow = pendingFocusId == card.id,
+                    onFocusRequestHandled = { onFocusRequestHandled(card.id) },
                 )
             }
-            row.videos.isEmpty() && !row.isLoading -> {
-                Text(
-                    text = "No videos found",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = KidTextDim,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-            else -> {
-                LazyRow(
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(row.videos) { video ->
-                        VideoCard(
-                            video = video,
-                            onClick = { onPlayVideo(video) },
-                        )
-                    }
-                }
-            }
+        }
+    }
+}
+
+/**
+ * Shown when the parent has configured nothing - either a fresh installation, or a catalog that
+ * deliberately contains no shelves. No stale content, no YouTube browsing, no spinner: just a calm
+ * message a child can read and a parent can act on.
+ */
+@Composable
+private fun EmptyCatalogState() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(horizontal = 48.dp),
+        ) {
+            Text(
+                text = "No videos yet",
+                style = MaterialTheme.typography.headlineSmall,
+                color = KidText,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "Ask a parent to add videos to SafeTube",
+                style = MaterialTheme.typography.bodyLarge,
+                color = KidTextDim,
+                textAlign = TextAlign.Center,
+            )
         }
     }
 }

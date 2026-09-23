@@ -14,6 +14,9 @@
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_PLAYLISTS" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_SERVER_STATUS" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_SYNC_CATALOG" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_CATALOG_SYNC_UNAVAILABLE" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_DUMP_CATALOG_UI" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_RESUME_POSITIONS" />
                 <!-- PIN/Auth -->
                 <action android:name="tv.safetubeforkids.app.DEBUG_GET_PIN" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_RESET_PIN" />
