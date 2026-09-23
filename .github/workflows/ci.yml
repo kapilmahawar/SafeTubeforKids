@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The device-free checks this project depends on: the unit tests, which pin the quality
+      # policy, the seek escalation, export/import and session handling, plus a parse of the
+      # dashboard JavaScript, which is hand-written and has no build step of its own.
+      - name: Unit tests and debug build
+        working-directory: tv-app
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest
+
+      - name: Check the dashboard JavaScript parses
+        run: node --check tv-app/app/src/main/assets/app.js
+
+      - name: Upload the debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SafeTubeforKids-debug
+          path: tv-app/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

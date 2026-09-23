@@ -169,6 +169,9 @@ fun TvPlayerScreen(
             .onKeyEvent { event ->
                 if (event.type != KeyEventType.KeyDown) return@onKeyEvent false
                 lastInteraction = System.currentTimeMillis()
+                // Remembered so that a second UP can reach the settings row: the first press reveals
+                // the controls, the next focuses the buttons.
+                val controlsWereVisible = controlsVisible
                 controlsVisible = true
 
                 val keyCode = event.nativeKeyEvent.keyCode
@@ -273,8 +276,13 @@ fun TvPlayerScreen(
                         true
                     }
                     PlaybackKeys.Action.RevealControls -> {
-                        // DOWN hands the remote to the menu buttons; UP keeps the controls up.
-                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
+                        // DOWN always hands the remote to the settings row. UP does too, but only when
+                        // the controls were already on screen, so the first press reveals them and the
+                        // second focuses the buttons - a child should not have to press DOWN to reach a
+                        // button they can already see.
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+                            (keyCode == KeyEvent.KEYCODE_DPAD_UP && controlsWereVisible)
+                        ) {
                             buttonRowActive = true
                             buttonIndex = 0
                         }
