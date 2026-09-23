@@ -121,6 +121,28 @@ crash/ANR detection. Each run writes `device.txt`, `commit.txt`, logs, screensho
 to `test-results/tv/<timestamp>/`. Pass `-QualityProbe` to temporarily approve a multi-rendition
 video and exercise quality/audio switching (removed again afterwards).
 
+## Development / AI context
+
+This project is developed across long-running conversations with AI coding agents, so its state —
+architecture, security boundaries, phase history and what is actually verified — is written down in
+the repository rather than kept in a chat window. Start here:
+
+- [`AI_CONTEXT.md`](AI_CONTEXT.md) — short handoff: current state, critical rules, fast facts
+- [`docs/PROJECT_CONTEXT.md`](docs/PROJECT_CONTEXT.md) — the canonical handoff: status, database,
+  catalog, synchronization, API, known limitations
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — the real architecture, with class names
+- [`docs/SECURITY_MODEL.md`](docs/SECURITY_MODEL.md) — the authorization boundary and what must not be
+  weakened
+- [`docs/TESTING.md`](docs/TESTING.md) — how to run everything, and what is actually green
+- [`docs/PHASES/`](docs/PHASES/) — what each phase implemented, and what it did not
+- [`HANDOVER.md`](HANDOVER.md) — the older prose handover, still the best source for device pitfalls
+
+Suggested opening prompt for a new agent:
+
+> Read `AI_CONTEXT.md` and `docs/PROJECT_CONTEXT.md` first. Then inspect the current git commit and the
+> architecture, security and testing documents. Summarize the current implementation, the completed
+> phases, known limitations and the next planned phase before changing any code.
+
 ## Known limitations
 
 - YouTube changes its internals regularly; extraction is only as current as the
