@@ -1,5 +1,6 @@
 package tv.safetubeforkids.app.data
 
+import androidx.room.withTransaction
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
@@ -212,19 +213,33 @@ object ContentSourceRepository {
         return results
     }
 
+    /**
+     * Replaces one source's cached videos with a freshly resolved list, as one transaction.
+     *
+     * The delete and the insert are a single replacement, so an interrupted refresh - the resolver
+     * throwing, the process being killed between the two statements - leaves the previous rows exactly
+     * as they were. Without the transaction the source was left with no cached videos at all, and
+     * because `PlaybackAuthorization` approves a video only while it is in this cache, a failed refresh
+     * silently turned into "nothing from this source can play any more" until the next good resolve.
+     *
+     * A refresh that legitimately resolves nothing still clears the cache: this makes the replacement
+     * atomic, not conditional.
+     */
     suspend fun cacheVideos(db: CacheDatabase, sourceId: String, videos: List<VideoItem>) {
         withContext(Dispatchers.IO) {
-            db.videoDao().deleteByPlaylist(sourceId)
-            db.videoDao().insertAll(videos.map { v ->
-                VideoEntity(
-                    videoId = v.videoId,
-                    playlistId = v.playlistId,
-                    title = v.title,
-                    thumbnailUrl = v.thumbnailUrl,
-                    durationSeconds = v.durationSeconds,
-                    position = v.position,
-                )
-            })
+            db.withTransaction {
+                db.videoDao().deleteByPlaylist(sourceId)
+                db.videoDao().insertAll(videos.map { v ->
+                    VideoEntity(
+                        videoId = v.videoId,
+                        playlistId = v.playlistId,
+                        title = v.title,
+                        thumbnailUrl = v.thumbnailUrl,
+                        durationSeconds = v.durationSeconds,
+                        position = v.position,
+                    )
+                })
+            }
         }
     }
 
