@@ -341,6 +341,48 @@ function PlayingNow {
     return $null
 }
 
+# Observation only: records exactly what the status API returned at the instant a playing-state
+# assertion is evaluated, so a failure can be explained from evidence instead of guessed at.
+#
+# Why this is needed: `ApiState` swallows every error and returns $null, and `PlayingNow` returns
+# $null when the state is unreadable, so `$null -eq (PlayingNow)` cannot distinguish "nothing is
+# playing" from "the status call failed". This records the raw HTTP status, the raw body and the
+# parsed fields, and never changes an assertion's outcome.
+function Capture-PlayingState([string]$testName) {
+    $stamp = (Get-Date).ToString('HH:mm:ss.fff')
+    $url = "http://${apiHost}:8080/status"
+    $httpStatus = $null; $raw = $null; $parseError = $null; $exception = $null; $np = $null
+    try {
+        $resp = Invoke-WebRequest -Uri $url -Headers $headers -TimeoutSec 10 -UseBasicParsing
+        $httpStatus = [int]$resp.StatusCode
+        $raw = $resp.Content
+        try { $np = ($raw | ConvertFrom-Json).currentlyPlaying }
+        catch { $parseError = $_.Exception.Message }
+    } catch {
+        $exception = $_.Exception.Message
+        if ($_.Exception.Response) { $httpStatus = [int]$_.Exception.Response.StatusCode }
+    }
+    $entry = [ordered]@{
+        timestamp        = $stamp
+        test             = $testName
+        url              = $url
+        httpStatus       = $httpStatus
+        parseError       = $parseError
+        exception        = $exception
+        appForeground    = (ForegroundPackage)
+        currentlyPlaying = $np
+        videoId          = $np.videoId
+        playing          = $np.playing
+        positionSec      = $np.positionSec
+        durationSec      = $np.durationSec
+        title            = $np.title
+        raw              = $raw
+    }
+    ($entry | ConvertTo-Json -Depth 6 -Compress) | Add-Content -Path (Join-Path $out 'playing-state-diagnostics.jsonl') -Encoding utf8
+    $desc = if ($null -eq $np) { 'null' } else { "vid=$($np.videoId) pos=$($np.positionSec)/$($np.durationSec) playing=$($np.playing)" }
+    Log "  [diag:$testName] http=$httpStatus currentlyPlaying=$desc fg=$(ForegroundPackage)"
+}
+
 $sequences = @(
     @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER'),
     @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_RIGHT', 'KEYCODE_DPAD_CENTER'),
@@ -838,6 +880,7 @@ if ($opened) {
     Start-Sleep -Seconds 5
     Adb @('shell', "am broadcast -a $pkg.DEBUG_STOP_PLAYBACK -p $pkg") | Out-Null
     Start-Sleep -Seconds 4
+    Capture-PlayingState 'stopped-before-security'
     Record 'stopped-before-security' ($null -eq (PlayingNow))
 
     # --- security: the API must refuse anything unauthenticated -------------------------
@@ -859,10 +902,12 @@ if ($opened) {
     Start-Sleep -Seconds 6
     $foregroundAfterView = ForegroundPackage
     Record 'no-view-deeplink-handler' ($foregroundAfterView -ne $pkg) "foreground=$foregroundAfterView"
+    Capture-PlayingState 'deeplink-plays-nothing'
     Record 'deeplink-plays-nothing' ($null -eq (PlayingNow))
 
     Adb @('shell', "am start -n $pkg/.MainActivity --es url 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'") | Out-Null
     Start-Sleep -Seconds 6
+    Capture-PlayingState 'extras-cannot-start-playback'
     Record 'extras-cannot-start-playback' ($null -eq (PlayingNow))
     Shot '18-security'
 
@@ -980,9 +1025,13 @@ if ($opened) {
     Log "  queue under test: source=$($current.playlistId) videos=$queueCount"
 
     if ($queueCount -gt 1) {
+        # Capture before/after so a failure can distinguish: NEXT never executed / executed but the
+        # state did not change / the queue held only this item / the status API was stale.
+        Capture-PlayingState 'next-is-approved-queue:before'
         Key 'KEYCODE_MEDIA_NEXT'
         Start-Sleep -Seconds 12
         $nextId = (PlayingNow).videoId
+        Capture-PlayingState 'next-is-approved-queue:after'
         Record 'next-is-approved-queue' (($null -ne $nextId) -and ($nextId -ne $current.videoId)) "queue $($current.videoId) -> $nextId"
         Shot '04-next'
 
@@ -1003,6 +1052,7 @@ if ($opened) {
     if (PlayingNow) {
         Key 'KEYCODE_BACK'
         Start-Sleep -Seconds 4
+        Capture-PlayingState 'back-returns-to-library'
         Record 'back-returns-to-library' ($null -eq (PlayingNow))
         Shot '07-library-again'
     } else {
