@@ -24,15 +24,19 @@ the player, the security boundary, the catalog and the test tooling were rebuilt
 
 ## Current state
 
-**Current phase: Phase 4 complete.** No phase 5 has been specified.
+**Current phase: Phase 5 complete.** Phase 4 is the frozen, independently verified baseline.
+Phase 5 was a Media3 playback **verification** phase: the audit found the player was already an
+AndroidX Media3/ExoPlayer Android TV player, so instead of rewriting verified code the phase added
+tests pinning the authorization invariants. See `docs/PHASES/PHASE-5.md`.
 
 ```text
-HEAD                 3962d312c27edbcd0e075e9840ff88fe8464b118
-Phase 1 baseline     b130c12  release: 0.10.0        (the pre-existing app)
-Phase 2             436e06a  local catalog schema + Room 6 -> 7
-Phase 3             017d68f  catalog REST API + TV sync client
+HEAD                 1b35c5c  Phase 4 findings resolution (Phase 5 baseline)
+Phase 5              tests + docs only; no application source changed
+Phase 4 verified     1b35c5c  F6 catalog-curated Continue Watching, F7 version high-water mark
 Phase 4             b8d4110  catalog UI + local-first runtime
-docs follow-up      3962d31  example screenshots
+Phase 3             017d68f  catalog REST API + TV sync client
+Phase 2             436e06a  local catalog schema + Room 6 -> 7
+Phase 1 baseline     b130c12  release: 0.10.0        (the pre-existing app)
 ```
 
 **Implemented and verified** (details and evidence in `docs/PROJECT_CONTEXT.md`):
