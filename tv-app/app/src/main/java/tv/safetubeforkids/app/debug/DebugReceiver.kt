@@ -379,6 +379,8 @@ class DebugReceiver : BroadcastReceiver() {
             is PinResult.Success -> logResult("""{"valid":true,"token":"${result.token}"}""")
             is PinResult.Invalid -> logResult("""{"valid":false,"attemptsRemaining":${result.attemptsRemaining}}""")
             is PinResult.RateLimited -> logResult("""{"valid":false,"rateLimited":true,"retryAfterMs":${result.retryAfterMs}}""")
+            // Correct PIN, but no session could be issued for it: never reported as valid.
+            is PinResult.NotConfigured -> logResult("""{"valid":false,"notConfigured":true}""")
         }
     }
 

@@ -11,6 +11,7 @@ import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.routing.*
 import io.ktor.server.testing.*
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.*
@@ -139,6 +140,36 @@ class AuthRoutesTest {
             }
             // Should be 401 (Invalid) not 429 (RateLimited)
             assertEquals(HttpStatusCode.Unauthorized, response.status)
+        }
+    }
+
+    @Test
+    fun postAuth_whenNoSessionCanBeIssued_failsClosedWithoutAToken() {
+        // A device that cannot issue sessions (no onPinValidated wired) must not authenticate anyone,
+        // and the response must not carry a token of any kind - not even an empty one.
+        val timeRef = TimeRef()
+        val sessionManager = SessionManager(clock = { timeRef.value })
+        val pinManager = PinManager(clock = { timeRef.value })
+        val pin = pinManager.getCurrentPin()
+
+        testApplication {
+            application {
+                install(ContentNegotiation) { json() }
+                routing {
+                    authRoutes(pinManager, sessionManager)
+                }
+            }
+
+            val response = client.post("/auth") {
+                contentType(ContentType.Application.Json)
+                setBody("""{"pin":"$pin"}""")
+            }
+
+            assertEquals(HttpStatusCode.ServiceUnavailable, response.status)
+            val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+            assertEquals("false", body["success"]?.jsonPrimitive?.content)
+            assertNull("no token may be returned", body["token"]?.jsonPrimitive?.contentOrNull)
+            assertEquals("and no session was created", 0, sessionManager.getActiveSessionCount())
         }
     }
 }

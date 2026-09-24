@@ -71,6 +71,14 @@ fun Route.authRoutes(pinManager: PinManager, sessionManager: SessionManager) {
                     error = "Too many attempts"
                 ))
             }
+            // The PIN was right but no session could be issued for it (no callback wired, or a blank
+            // token). Fail closed and say so: this must never be an OK response and never carry a token.
+            is PinResult.NotConfigured -> {
+                call.respond(HttpStatusCode.ServiceUnavailable, AuthResponse(
+                    success = false,
+                    error = "Authentication is unavailable"
+                ))
+            }
         }
     }
 }

@@ -1,11 +1,25 @@
 package tv.safetubeforkids.app.auth
 
 import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Random
 
 sealed class PinResult {
     data class Success(val token: String) : PinResult()
     data class Invalid(val attemptsRemaining: Int) : PinResult()
     data class RateLimited(val retryAfterMs: Long) : PinResult()
+
+    /**
+     * The PIN was correct, but this device cannot issue a session for it, so the caller must not treat
+     * it as an authentication: either no session-issuing callback is wired, or the wired one returned a
+     * blank token.
+     *
+     * This exists because `onPinValidated?.invoke(pin) ?: ""` turned a missing callback into a nominal
+     * [Success] carrying an empty token - an authentication-shaped result for a request that
+     * authenticated nobody. It is deliberately not [Invalid]: the PIN was not wrong, so it must not be
+     * counted as a failed attempt either.
+     */
+    object NotConfigured : PinResult()
 }
 
 interface PinLockoutPersistence {
@@ -19,6 +33,13 @@ class PinManager(
     private val clock: () -> Long = System::currentTimeMillis,
     private val onPinValidated: ((String) -> String)? = null,
     private val lockoutPersistence: PinLockoutPersistence? = null,
+    /**
+     * Where PIN digits come from. The default is a cryptographically secure source: this PIN is the only
+     * credential for the parent dashboard, which can add and remove approved content, so a predictable
+     * generator would let anyone who saw one PIN work out the next. The parameter exists as a seam for
+     * deterministic tests; production never passes one.
+     */
+    internal val randomSource: Random = SecureRandom(),
 ) {
     private var currentPin: String = generatePin()
     private var failedAttempts: Int = lockoutPersistence?.loadFailedAttempts() ?: 0
@@ -28,10 +49,17 @@ class PinManager(
     companion object {
         private const val MAX_ATTEMPTS = 5
         private const val BASE_LOCKOUT_MS = 5 * 60 * 1000L // 5 minutes
+        /** A PIN is always this many digits long. */
+        private const val PIN_LENGTH = 6
+        /** Each digit is drawn from 0..9. */
+        private const val DIGITS = 10
     }
 
     fun generatePin(): String {
-        val pin = (1..6).map { (0..9).random() }.joinToString("")
+        // One digit per position, each drawn in 0..9, assembled as a string: a PIN is a sequence of
+        // digits, never an integer, so a leading zero is a digit like any other and the result is always
+        // six characters long.
+        val pin = (1..PIN_LENGTH).map { randomSource.nextInt(DIGITS) }.joinToString("")
         currentPin = pin
         return pin
     }
@@ -53,10 +81,15 @@ class PinManager(
         }
 
         if (MessageDigest.isEqual(pin.toByteArray(), currentPin.toByteArray())) {
+            // Fail closed. A correct PIN is an authentication only if a session can actually be issued
+            // for it, and the counter reset belongs to that success rather than to merely matching.
+            val issueSession = onPinValidated ?: return PinResult.NotConfigured
+            val token = issueSession(pin)
+            if (token.isBlank()) return PinResult.NotConfigured
+
             failedAttempts = 0
             lockoutCount = 0
             persistLockout()
-            val token = onPinValidated?.invoke(pin) ?: ""
             return PinResult.Success(token)
         }
 
