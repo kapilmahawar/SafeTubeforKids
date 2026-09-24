@@ -19,6 +19,12 @@
   ./tv-e2e.ps1                       # build, install (keeps app data), test
   ./tv-e2e.ps1 -SkipBuild            # reuse the existing APK
   ./tv-e2e.ps1 -ClearState           # DESTRUCTIVE: wipes approved sources first
+
+.NOTES
+  Exit codes: 0 every assertion passed, 1 an assertion failed, 2 blocked (device or APK missing),
+  3 blocked (the app could not be driven), 4 RESULT=HARNESS_PRECONDITION_FAILURE - the run could not be
+  performed at all (no usable approved library, or no resolvable multi-item queue), so the app was
+  never measured and the result is neither a product pass nor a product failure.
 #>
 [CmdletBinding()]
 param(
@@ -284,6 +290,236 @@ if ($pin) {
 function ApiState {
     if (-not $headers.ContainsKey('Authorization')) { return $null }
     try { return Invoke-RestMethod -Uri "http://${apiHost}:8080/status" -Headers $headers -TimeoutSec 10 } catch { return $null }
+}
+
+# ---------------------------------------------------------------- preconditions and approved library
+# A precondition failure is not a product failure: the run could not be performed at all, so it must
+# not be summarised as a PASS or a FAIL of the app. Exit code 4 keeps it distinct from an assertion
+# failure (1) and from "blocked" (2, 3).
+function Stop-HarnessPrecondition([string]$reason) {
+    Log 'RESULT=HARNESS_PRECONDITION_FAILURE'
+    Log "REASON=$reason"
+    Log '  the app was not measured - this is a harness precondition, not a product result'
+    $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
+    Log "artifacts: $out"
+    exit 4
+}
+
+# "true"/"false" exactly as the closure evidence prints them.
+function Format-Bool([bool]$value) { if ($value) { 'true' } else { 'false' } }
+
+# The approved library exactly as the app reports it, keyed by sourceId, with the number of videos
+# approved inside each source. GET /playlists is the authority for what may play.
+#
+# A hashtable, deliberately, and the response is assigned to a variable before anything is done with it:
+# PowerShell 5.1's Invoke-RestMethod hands a JSON array back as ONE object that is not enumerated into
+# the pipeline, so `@(Invoke-RestMethod ...)` produces a list *containing* a list. That nesting is silent
+# - `$sources.Count` reads 1, `$sources[0]` is the whole list and `$sources[0].videoCount` is an array -
+# and it is what made the queue probe's count a failed cast the first time this was rehearsed against the
+# TV. A hashtable cannot be unrolled at all, so every caller gets the same, predictable object.
+function Get-ApprovedSourceMap {
+    $map = @{}
+    if (-not $headers.ContainsKey('Authorization')) { return $map }
+    try {
+        $response = Invoke-RestMethod -Uri "http://${apiHost}:8080/playlists" -Headers $headers -TimeoutSec 10
+    } catch {
+        Log "  could not read the approved sources from GET /playlists: $($_.Exception.Message)"
+        return $map
+    }
+    foreach ($source in $response) {
+        if ($source -and $source.sourceId) { $map["$($source.sourceId)"] = $source }
+    }
+    return $map
+}
+
+# One approved source by its YouTube id, or $null: an id that GET /playlists does not list is not an
+# approved source, whatever else the app may be playing.
+function Get-ApprovedSource([string]$sourceId) {
+    if ([string]::IsNullOrWhiteSpace($sourceId)) { return $null }
+    $map = Get-ApprovedSourceMap
+    if ($map.ContainsKey($sourceId)) { return $map[$sourceId] }
+    return $null
+}
+
+# The app's actual current playback state. ApiState swallows every failure and returns $null, and the
+# embedded server drops the occasional request, so "the status call failed" must not be read as "nothing
+# is playing": the read is retried and the reason for an unreadable state is reported.
+function Get-PlaybackState([string]$why, [int]$Attempts = 5) {
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        $state = ApiState
+        if ($state) {
+            if ($state.currentlyPlaying) { return $state.currentlyPlaying }
+            Log "  [$why] GET /status reports nothing playing (currentlyPlaying=null)"
+            return $null
+        }
+        Log "  [$why] GET /status unreadable (attempt $($i + 1) of $Attempts)"
+        Start-Sleep -Seconds 2
+    }
+    Log "  [$why] GET /status stayed unreadable for $Attempts attempts"
+    return $null
+}
+
+# Starts an APPROVED video and returns the state the app then reports for it, or $null when none could be
+# started. The video/playlist pairs are discovered from the app's own recent play events
+# (GET /stats/recent) and filtered to sources that are approved right now, so no id is ever hard-coded
+# here and a source a parent has since removed is skipped rather than used.
+#
+# A source holding several approved videos is tried first, because that is the queue the next/previous
+# witness needs. Inside it the OLDEST recorded item is tried first: GET /stats/recent is newest-first,
+# and its newest item is where the previous phase's own queue advance stopped, which makes it the item
+# most likely to BE the end of the queue - and NEXT from the end of a queue legitimately ends playback
+# instead of moving on.
+function Start-ApprovedPlayback([string]$why, [string[]]$Skip = @()) {
+    $approvedBySource = Get-ApprovedSourceMap
+    if ($approvedBySource.Count -eq 0) {
+        Log "  [$why] no approved source is registered, so there is no approved video to start"
+        return $null
+    }
+
+    $recent = $null
+    try {
+        $recent = Invoke-RestMethod -Uri "http://${apiHost}:8080/stats/recent" -Headers $headers -TimeoutSec 10
+    } catch {
+        Log "  [$why] could not read GET /stats/recent: $($_.Exception.Message)"
+    }
+
+    $multi = @(); $single = @(); $seen = @{}
+    # Oldest first: $recent is newest-first and a JSON array arrives as one un-enumerated object, so it is
+    # indexed rather than wrapped (see Get-ApprovedSourceMap).
+    for ($i = @($recent).Count - 1; $i -ge 0; $i--) {
+        $event = @($recent)[$i]
+        if (-not $event.videoId -or -not $event.playlistId) { continue }
+        if ($seen.ContainsKey("$($event.videoId)")) { continue }
+        $source = $null
+        if ($approvedBySource.ContainsKey("$($event.playlistId)")) { $source = $approvedBySource["$($event.playlistId)"] }
+        # Played once but not approved any more: the app would refuse it, so it is not a candidate.
+        if (-not $source) { continue }
+        $seen["$($event.videoId)"] = $true
+        $candidate = [pscustomobject]@{
+            videoId    = "$($event.videoId)"
+            playlistId = "$($event.playlistId)"
+            videoCount = [int]$source.videoCount
+        }
+        if ($candidate.videoCount -gt 1) { $multi += $candidate } else { $single += $candidate }
+    }
+
+    foreach ($candidate in (@($multi) + @($single))) {
+        if ($Skip -contains $candidate.videoId) { continue }
+        Log "  [$why] starting approved video $($candidate.videoId) from source $($candidate.playlistId) ($($candidate.videoCount) approved videos)"
+        $logBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+        PlayVideo $candidate.videoId $candidate.playlistId
+        for ($i = 0; $i -lt 15; $i++) {
+            Start-Sleep -Seconds 2
+            $state = ApiState
+            if ($state -and $state.currentlyPlaying -and ($state.currentlyPlaying.videoId -eq $candidate.videoId)) {
+                # While the resume offer is up it owns the D-pad, so the queue keys would move the offer
+                # instead of the player. It withdraws itself after a few seconds; this dismisses it
+                # early, and only while the fresh log says it is actually up - a stray BACK with nothing
+                # open would leave the player entirely, which is how earlier phases went wrong.
+                $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $logBase) -join "`n"
+                if ($fresh -match 'Menu opened: RESUME' -and $fresh -notmatch 'Resume offer withdrawn') {
+                    Log "  [$why] a resume offer is up - dismissing it so the queue keys reach the player"
+                    Key 'KEYCODE_BACK'
+                    Start-Sleep -Seconds 2
+                }
+                return (Get-PlaybackState $why 3)
+            }
+        }
+        Log "  [$why] $($candidate.videoId) did not reach the player - trying the next approved item"
+        Adb @('shell', "am broadcast -a $pkg.DEBUG_STOP_PLAYBACK -p $pkg") | Out-Null
+        Start-Sleep -Seconds 3
+    }
+    return $null
+}
+
+# Waits for the app to report a DIFFERENT video playing, and returns the state it reported. $null means
+# playback stopped, which is itself an honest queue outcome rather than something a fixed sleep should
+# hide. A dropped status request is retried, never believed.
+function Wait-PlayingChange([string]$Before, [int]$TimeoutSec = 60) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $last = $null
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 2
+        $state = ApiState
+        if (-not $state) { continue }
+        $last = $state.currentlyPlaying
+        if (-not $last) { return $null }
+        if ($last.videoId -and ($last.videoId -ne $Before)) { return $last }
+    }
+    return $last
+}
+
+# Waits until the resume offer is out of the way before a queue key is pressed, judged from the app's own
+# log. While it is up the offer owns the D-pad: a NEXT press moves the offer instead of the queue, and a
+# BACK press only closes the offer - which is exactly what the first rehearsal of the BACK witness
+# measured, with playback carrying on after BACK (TvPlayerScreen sends BACK to closeMenu() whenever a
+# menu is open, and only to the player when none is).
+#
+# The offer is opened by the same prepare() call that logs "Playing <videoId>" and withdraws itself after
+# the 8s menu idle window, so a window that never mentions it proves there is none to clear. It gates
+# nothing, so it is waited out rather than raced.
+function Clear-ResumeOffer([string]$why) {
+    $base = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+    $deadline = (Get-Date).AddSeconds(20)
+    $waited = 0
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 1
+        $waited++
+        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $base) -join "`n"
+        # Withdrawn means it lapsed by itself or a previous BACK closed it: either way it is gone.
+        if ($fresh -match 'Resume offer withdrawn') { return }
+        if (-not ($fresh -match 'Menu opened: RESUME')) {
+            if ($waited -ge 10) { return }
+            continue
+        }
+        if ($waited -ge 10) {
+            Log "  [$why] the resume offer is still up - dismissing it (BACK closes the offer, not the player)"
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 2
+            if (-not (Get-PlaybackState $why)) {
+                Log "  [$why] WARNING: playback is no longer running after dismissing the offer"
+            }
+            return
+        }
+    }
+    Log "  [$why] the resume offer never cleared within the wait"
+}
+
+# Is this video authorized, by the app's own gate? PlaybackAuthorization approves a video only while it
+# is present in the approved cache AND its source still exists, and the player's queue is built from
+# exactly that cache. Three independent signals are required, so this is never inferred from "something
+# is playing": the status API must report it playing from the approved queue source, the app must have
+# recorded a play event for it under that source, and the fresh log must not say it was blocked.
+function Test-VideoAuthorized([string]$videoId, [string]$sourceId, [int]$LogBase) {
+    if ([string]::IsNullOrWhiteSpace($videoId) -or [string]::IsNullOrWhiteSpace($sourceId)) { return $false }
+    $state = Get-PlaybackState 'authorization' 3
+    if (-not $state) { return $false }
+    if ($state.videoId -ne $videoId) {
+        Log "  [authorization] GET /status reports $($state.videoId), not $videoId"
+        return $false
+    }
+    if ($state.playlistId -ne $sourceId) {
+        Log "  [authorization] $videoId is reported from source '$($state.playlistId)', not '$sourceId'"
+        return $false
+    }
+    $event = $null
+    try {
+        # Assigned first, then piped: a JSON array from Invoke-RestMethod arrives as one un-enumerated
+        # object, and Where-Object over the variable is what enumerates it (see Get-ApprovedSourceMap).
+        $recent = Invoke-RestMethod -Uri "http://${apiHost}:8080/stats/recent" -Headers $headers -TimeoutSec 10
+        $event = $recent | Where-Object { ($_.videoId -eq $videoId) -and ($_.playlistId -eq $sourceId) } | Select-Object -First 1
+    } catch {
+        Log "  [authorization] could not read GET /stats/recent: $($_.Exception.Message)"
+        return $false
+    }
+    if (-not $event) {
+        Log "  [authorization] no play event for $videoId under source $sourceId"
+        return $false
+    }
+    $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $LogBase) -join "`n"
+    if ($fresh -match ('Blocked playback of unapproved video: ' + [regex]::Escape($videoId))) { return $false }
+    if ($fresh -match ('Blocked playback from removed source: ' + [regex]::Escape($sourceId))) { return $false }
+    return $true
 }
 
 Shot '01-library'
@@ -1011,52 +1247,184 @@ if ($opened) {
     }
 
     # --- approved-queue navigation ----------------------------------
-    # Recompute the queue size for whatever is playing now (the caption step may have switched
-    # to a video from the multi-video playlist).
-    $current = PlayingNow
+    # The queue under test is the queue the app is ACTUALLY playing. It is resolved from the app's own
+    # status API at the moment of the probe and then matched against the approved library.
+    #
+    # WHAT WAS WRONG (Phase 5 closure run 2026-09-25-005712): this probe read PlayingNow directly, but the
+    # phases above deliberately STOP playback - the security checks broadcast DEBUG_STOP_PLAYBACK and then
+    # assert "stopped-before-security". PlayingNow therefore returned $null, $current.playlistId was
+    # empty, the /playlists lookup was skipped by its own "if ($current)" guard and $queueCount stayed 0,
+    # so the probe printed "queue under test: source= videos=0" and then took the single-video branch,
+    # whose "next-ends-at-queue-end" assertion passed vacuously against a stopped player. Nothing was
+    # wrong with the library, the catalog, authorization, production playback or the queue: the probe was
+    # reading a stopped player at a point where the harness itself had stopped it, and it called that
+    # "NOT APPLICABLE".
+    #
+    # So the probe now establishes the state it means to observe: when nothing is playing, an approved
+    # video is started (ids discovered from the app, never hard-coded), and the playlist id is then read
+    # from GET /status - the actual current playback state - never from a variable captured earlier.
+    # 1. Resolve the queue under test from the app's ACTUAL current playback state. The playlist id is
+    #    read from GET /status and matched against GET /playlists; when that state does not resolve to a
+    #    multi-item approved queue, an approved video is started from the approved library and the state
+    #    is read again. The id always comes from the status API, never from a variable captured earlier.
+    $current = Get-PlaybackState 'queue-under-test'
+    $playlistLookupId = ''
+    $approvedSource = $null
     $queueCount = 0
-    if ($current) {
-        try {
-            $sources = Invoke-RestMethod -Uri "http://${apiHost}:8080/playlists" -Headers $headers -TimeoutSec 10
-            $entry = $sources | Where-Object { $_.sourceId -eq $current.playlistId } | Select-Object -First 1
-            if ($entry) { $queueCount = [int]$entry.videoCount }
-        } catch { }
+    for ($resolveAttempt = 1; $resolveAttempt -le 2; $resolveAttempt++) {
+        $playlistLookupId = if ($current -and $current.playlistId) { "$($current.playlistId)" } else { '' }
+        $approvedSource = Get-ApprovedSource $playlistLookupId
+        $queueCount = if ($approvedSource) { [int]$approvedSource.videoCount } else { 0 }
+        if ($queueCount -ge 2) { break }
+        if ($resolveAttempt -gt 1) { break }
+        # Name the exact cause, so the artifact distinguishes the three cases that used to print the same
+        # blank line: nothing was playing, what is playing is no longer an approved source, and a source
+        # that genuinely holds fewer than two approved videos.
+        if (-not $current) {
+            Log '  queue under test: nothing is playing - starting an approved video so the queue can be observed'
+        } else {
+            Log "  queue under test: the app is playing $($current.videoId), but that state does not resolve to a multi-item approved queue (source='$playlistLookupId', approved videos=$queueCount) - starting an approved video"
+        }
+        EnsureApp 'queue-under-test' | Out-Null
+        $current = Start-ApprovedPlayback 'queue-under-test'
+        if (-not $current) {
+            Log '  queue under test: no approved video could be started'
+            break
+        }
     }
-    Log "  queue under test: source=$($current.playlistId) videos=$queueCount"
 
-    if ($queueCount -gt 1) {
-        # Capture before/after so a failure can distinguish: NEXT never executed / executed but the
-        # state did not change / the queue held only this item / the status API was stale.
+    $currentSourceText = '<no current playback state>'
+    if ($playlistLookupId -and $approvedSource) {
+        $currentSourceText = "$playlistLookupId ($($approvedSource.sourceType), $($approvedSource.videoCount) videos)"
+    } elseif ($playlistLookupId) {
+        $currentSourceText = "<not an approved source: GET /playlists does not list $playlistLookupId>"
+    }
+
+    # Diagnostic instrumentation in a safe form: identifiers, the approved source's own metadata and
+    # counts. No PIN, authentication token, cookie or credential is printed.
+    Log 'QUEUE_PROBE_DEBUG'
+    Log "currentVideoId=$($current.videoId)"
+    Log "currentPlaylistId=$($current.playlistId)"
+    Log "currentTitle=$($current.title)"
+    Log "currentSource=$currentSourceText"
+    Log "playlistLookupId=$playlistLookupId"
+    Log "queueCount=$queueCount"
+    Log 'QUEUE_PROBE_STATE_ENDPOINT=/status (the current playback state)'
+    Log 'QUEUE_PROBE_ENDPOINT=/playlists (the approved sources, matched on sourceId)'
+    Log "QUEUE_SOURCE=$playlistLookupId"
+    Log "QUEUE_SIZE=$queueCount"
+    Log "  queue under test: source=$playlistLookupId videos=$queueCount"
+
+    if ($queueCount -lt 2) {
+        # A hard precondition, never a "NOT APPLICABLE": an unresolvable queue and a genuinely
+        # single-video source used to print the same sentence, which is exactly how a harness bug read as
+        # a product result. The multi-item next/previous witness needs a real queue.
+        if ($queueCount -eq 1) {
+            # A genuinely single-video source is still measured on its own terms first - the app must end
+            # playback at the queue's end rather than ask YouTube for a recommendation - so that evidence
+            # is recorded before the precondition stops the run.
+            Key 'KEYCODE_MEDIA_NEXT'
+            Start-Sleep -Seconds 6
+            Record 'next-ends-at-queue-end' ($null -eq (PlayingNow)) 'single approved video: playback must stop'
+        }
+        Stop-HarnessPrecondition "queue under test is not multi-item: QUEUE_SOURCE='$playlistLookupId' QUEUE_SIZE=$queueCount (the multi-item NEXT/BACK witness requires QUEUE_SOURCE != blank and QUEUE_SIZE >= 2)"
+    }
+
+    # --- NEXT witness: the remote's own NEXT action must move the approved queue --------------------
+    # The starting point matters: NEXT from the LAST item of a queue legitimately ends playback
+    # ("Approved queue finished"), which says nothing about the queue having a next item - so when an
+    # attempt starts on the queue's end, the witness restarts on another approved item of the SAME queue
+    # instead of recording a false failure. The assertion itself is unchanged: the id must change.
+    $nextBefore = ''; $nextAfter = ''; $nextChanged = $false; $authLogBase = 0
+    $tried = @()
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        if ($attempt -gt 1) {
+            Log "  NEXT witness: attempt $attempt - restarting on another approved item of $playlistLookupId"
+            EnsureApp 'next-witness' | Out-Null
+            $current = Start-ApprovedPlayback 'next-witness' $tried
+            if (-not $current) {
+                Log '  NEXT witness: no other approved item could be started'
+                break
+            }
+            if ($current.playlistId) { $playlistLookupId = "$($current.playlistId)" }
+        }
+        $nextBefore = "$($current.videoId)"
+        $tried += $nextBefore
+        # The queue keys only reach the player once the resume offer is out of the way.
+        Clear-ResumeOffer 'next-witness'
+        $authLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
         Capture-PlayingState 'next-is-approved-queue:before'
         Key 'KEYCODE_MEDIA_NEXT'
-        Start-Sleep -Seconds 12
-        $nextId = (PlayingNow).videoId
+        $afterNext = Wait-PlayingChange $nextBefore 60
+        $nextAfter = if ($afterNext) { "$($afterNext.videoId)" } else { '' }
         Capture-PlayingState 'next-is-approved-queue:after'
-        Record 'next-is-approved-queue' (($null -ne $nextId) -and ($nextId -ne $current.videoId)) "queue $($current.videoId) -> $nextId"
-        Shot '04-next'
-
-        Key 'KEYCODE_MEDIA_PREVIOUS'
-        Start-Sleep -Seconds 12
-        $prevId = (PlayingNow).videoId
-        Record 'previous-is-approved-queue' ($prevId -eq $current.videoId) "queue $nextId -> $prevId"
-    } else {
-        # A single-video source has no next item: NEXT must end playback rather than ask
-        # YouTube for a recommendation.
-        Key 'KEYCODE_MEDIA_NEXT'
-        Start-Sleep -Seconds 6
-        Record 'next-ends-at-queue-end' ($null -eq (PlayingNow)) 'single approved video: playback must stop'
-        Log '  queue next/previous: NOT APPLICABLE (source holds 1 approved video)'
+        $nextChanged = ($nextAfter -ne '') -and ($nextAfter -ne $nextBefore)
+        Log "NEXT_BEFORE=$nextBefore"
+        Log "NEXT_AFTER=$nextAfter"
+        Log "NEXT_CHANGED=$(Format-Bool $nextChanged)"
+        if ($nextChanged) { break }
+        if ($nextAfter -eq '') {
+            Log "  NEXT witness: NEXT from $nextBefore ended the queue (it was the queue's last item) - restarting on another approved item"
+            continue
+        }
+        # Playback is still on the same video: the key did not move the queue. Retrying would only hide
+        # that, so the witness reports it.
+        Log "  NEXT witness: playback stayed on $nextBefore after NEXT - not retrying"
+        break
     }
 
-    # --- back returns to the library (only meaningful if still playing)
-    if (PlayingNow) {
+    Record 'next-is-approved-queue' $nextChanged "queue $nextBefore -> $nextAfter"
+    $nextAuthorized = Test-VideoAuthorized $nextAfter $playlistLookupId $authLogBase
+    Record 'next-item-is-authorized' $nextAuthorized "next item $nextAfter from source $playlistLookupId"
+    Log "NEXT_AFTER_AUTHORIZED=$(Format-Bool $nextAuthorized)"
+    Shot '04-next'
+
+    # --- PREVIOUS must return to the video the queue came from ---
+    if ($nextChanged) {
+        Key 'KEYCODE_MEDIA_PREVIOUS'
+        $afterPrev = Wait-PlayingChange $nextAfter 60
+        $prevId = if ($afterPrev) { "$($afterPrev.videoId)" } else { '' }
+        Record 'previous-is-approved-queue' ($prevId -eq $nextBefore) "queue $nextAfter -> $prevId"
+    } else {
+        Record 'previous-is-approved-queue' $false "no NEXT transition was witnessed, so PREVIOUS has no baseline"
+    }
+
+    # --- BACK witness: from playing, BACK must land on the library UI ------------------------------
+    # Not inferred from the stale-session fix and not inferred from "nothing is playing any more": the app
+    # must be in the FOREGROUND with the library actually on screen, and the BACK must be the press that
+    # left the player - so any open menu (a resume offer on the video PREVIOUS just restarted) is cleared
+    # first, or the BACK would only close that menu.
+    Clear-ResumeOffer 'back-witness'
+    $backBefore = Get-PlaybackState 'back-witness'
+    $backFromPlayback = ($null -ne $backBefore) -and (-not ([string]::IsNullOrWhiteSpace($backBefore.videoId)))
+    Log "BACK_FROM_PLAYBACK=$(Format-Bool $backFromPlayback)"
+    if ($backFromPlayback) {
+        Log "BACK_FROM_VIDEO=$($backBefore.videoId)"
         Key 'KEYCODE_BACK'
         Start-Sleep -Seconds 4
         Capture-PlayingState 'back-returns-to-library'
-        Record 'back-returns-to-library' ($null -eq (PlayingNow))
+        $backPlaying = PlayingNow
+        Record 'back-returns-to-library' ($null -eq $backPlaying)
+        $foregroundAfterBack = ForegroundPackage
+        if ($foregroundAfterBack -ne $pkg) { Start-Sleep -Seconds 3; $foregroundAfterBack = ForegroundPackage }
+        Record 'back-foreground-is-app' ($foregroundAfterBack -eq $pkg) "foreground=$foregroundAfterBack"
+        # A dump is the only way to see what is actually on screen. Taken after the API reads above,
+        # because repeated uiautomator dumps can destabilise the app's embedded server.
+        Dump '07-library-again'
+        $backDump = ''
+        $backDumpPath = Join-Path $out '07-library-again.xml'
+        if (Test-Path $backDumpPath) { $backDump = (Get-Content $backDumpPath -Raw) }
+        # The library is the only screen carrying both of these (see the D-pad navigation phase).
+        $libraryOnScreen = ($backDump -match 'SafeTube for Kids') -and ($backDump -match 'Refresh')
+        Record 'back-returned-to-library-ui' $libraryOnScreen
+        $backReturned = ($foregroundAfterBack -eq $pkg) -and $libraryOnScreen -and ($null -eq $backPlaying)
+        Log "BACK_RETURNED_TO_LIBRARY=$(Format-Bool $backReturned)"
+        Log "FOREGROUND_AFTER_BACK=$foregroundAfterBack"
         Shot '07-library-again'
     } else {
-        Log '  back test: SKIPPED because playback already ended at the queue boundary'
+        Log 'BACK_RETURNED_TO_LIBRARY=false'
+        Log "FOREGROUND_AFTER_BACK=$(ForegroundPackage)"
+        Record 'back-returns-to-library' $false 'no approved video was playing, so BACK could not be witnessed from playback'
     }
 }
 
