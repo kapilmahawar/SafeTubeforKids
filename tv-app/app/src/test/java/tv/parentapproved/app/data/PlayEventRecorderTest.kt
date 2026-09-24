@@ -106,4 +106,38 @@ class PlayEventRecorderTest {
         fakeTime = 20_000L // time passes while paused
         assertEquals(3_000L, PlayEventRecorder.getElapsedMs())
     }
+
+    @Test
+    fun clearNowPlaying_clearsThePublishedStateOfASessionTooShortToRecord() {
+        // Regression for a real, reproduced defect: opening a session publishes it as playing
+        // (startEvent sets isPlaying = true before Media3 has actually started anything). When that
+        // session is then terminated inside the same second, the callers' `elapsed > 0` guard skipped
+        // endEvent() entirely, so nothing ever undid it - and the app kept telling /status, and the
+        // parent dashboard, that a video was playing. Observed on the TV as
+        // "videoId=fdPu-wvl3KE positionSec=0 durationSec=125 playing=true" long after playback had
+        // stopped, which also made every later "nothing is playing" assertion fail.
+        PlayEventRecorder.startEvent("vid1", "pl1", title = "Vid", playlistTitle = "PL", durationMs = 125_000)
+        assertTrue("precondition: opening a session publishes it as playing", PlayEventRecorder.isPlaying)
+        assertEquals("vid1", PlayEventRecorder.currentVideoId)
+
+        // What the callers now do when elapsed == 0 (nothing worth recording).
+        PlayEventRecorder.clearNowPlaying()
+
+        assertNull("the stalled video must not stay published", PlayEventRecorder.currentVideoId)
+        assertFalse("and must not stay reported as playing", PlayEventRecorder.isPlaying)
+        assertNull(PlayEventRecorder.currentPlaylistId)
+        assertNull(PlayEventRecorder.currentTitle)
+        assertNull(PlayEventRecorder.currentPlaylistTitle)
+    }
+
+    @Test
+    fun clearNowPlaying_writesNoHistoryRow() {
+        PlayEventRecorder.startEvent("vid1", "pl1", title = "Vid", playlistTitle = "PL", durationMs = 125_000)
+
+        PlayEventRecorder.clearNowPlaying()
+
+        // startEvent's own insert is the only one: clearing published state must record nothing, so
+        // a zero-length session leaves no history row behind.
+        io.mockk.coVerify(exactly = 1) { mockDao.insert(any()) }
+    }
 }

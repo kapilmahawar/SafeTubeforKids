@@ -523,7 +523,14 @@ class PlaybackController(
         savePosition()
         if (playStartTime > 0) {
             val elapsed = elapsedSeconds()
+            // Same split as endCurrentEvent: record the history row only when there is a session
+            // worth recording, but always stop publishing a now-playing video.
             if (elapsed > 0) PlayEventRecorder.endEvent(elapsed, currentPercent())
+            else PlayEventRecorder.clearNowPlaying()
+        } else {
+            // No start time means no event was ever opened, but startEvent() may still have published
+            // this video as playing - leaving the screen must clear that regardless.
+            PlayEventRecorder.clearNowPlaying()
         }
         released = true
         player.release()
@@ -971,6 +978,10 @@ class PlaybackController(
 
     private fun endCurrentEvent(completedPct: Int) {
         val elapsed = elapsedSeconds()
+        // The guard is about history, not about state: a session too short to be worth a row must
+        // still stop being published as "playing now", or a video that never actually played stays
+        // reported as playing forever.
         if (elapsed > 0) PlayEventRecorder.endEvent(elapsed, completedPct)
+        else PlayEventRecorder.clearNowPlaying()
     }
 }

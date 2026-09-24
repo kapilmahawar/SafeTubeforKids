@@ -107,14 +107,33 @@ object PlayEventRecorder {
 
     fun endEvent(durationSec: Int, completedPct: Int) {
         updateEvent(durationSec, completedPct)
+        clearNowPlaying()
         currentEventId = null
+        pausedElapsedMs = 0
+    }
+
+    /**
+     * Clears only the *published* current-session state - what `GET /status` reports as
+     * `currentlyPlaying` - and writes nothing.
+     *
+     * This exists because two different concerns were sharing one guard. Recording a play event is
+     * only worth doing for a session that actually ran, which is why the callers skip
+     * [endEvent] when `elapsed == 0`. But clearing the published state is not optional: a session
+     * that opened and was terminated inside the same second (a video that never started playing, or
+     * a screen that went away immediately) still has [startEvent] having set `isPlaying = true`,
+     * and if nothing clears it the app keeps telling the status API - and the parent dashboard -
+     * that a video is playing when Media3 is not playing anything.
+     *
+     * So the guard stays exactly where it was, for history, and this is what runs when there is no
+     * row worth writing. No database row, catalog, authorization, queue or resume state is touched.
+     */
+    fun clearNowPlaying() {
         currentVideoId = null
         currentPlaylistId = null
         currentTitle = null
         currentPlaylistTitle = null
         currentDurationMs = 0
         isPlaying = false
-        pausedElapsedMs = 0
     }
 
     fun flushCurrentEvent() {
