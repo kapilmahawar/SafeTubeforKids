@@ -148,6 +148,13 @@ $env:ANDROID_HOME = "<android-sdk>"
 On Windows, PowerShell script execution may need `Set-ExecutionPolicy -Scope Process -ExecutionPolicy
 Bypass` first.
 
+**Exit codes.** `0` every assertion passed, `1` an assertion failed, `2` blocked (device or APK missing),
+`3` blocked (the app could not be driven), `4` `RESULT=HARNESS_PRECONDITION_FAILURE` — the run could not
+be performed at all, so the app was never measured and the result must not be read as either a product
+pass or a product failure. There are two of those, each with its own `REASON=` line: an empty approved
+library (`library empty — re-seed before running playback tiers`), and a queue under test that is not
+multi-item (a blank `QUEUE_SOURCE` or `QUEUE_SIZE < 2`) when the multi-item NEXT/BACK witness runs.
+
 **Tiers.** `smoke` ≈ 1.8 min (install, launch, dashboard reachable, D-pad opens a video, playback
 running, play/pause, seek both ways, media keys reach the player, survives HOME, no crash).
 `player` ≈ 3 min adds the menus (subtitles, captions on/off, speed, fit), resume/start-over.
@@ -158,6 +165,14 @@ deep link plays nothing, extras cannot start playback), plus quality/audio check
 Each run writes to `test-results/tv/<timestamp>/` (**gitignored**): `device.txt`, `commit.txt`,
 `install.log`, `test.log`, `logcat.txt`, `result.json` (one key per assertion), `api-*.json`, and
 screenshots including `09-final-ui.xml`.
+
+**Closure evidence in `test.log`.** The `full` tier prints the queue it actually observed
+(`QUEUE_PROBE_DEBUG` → `currentVideoId`, `currentPlaylistId`, `currentTitle`, `currentSource`,
+`playlistLookupId`, `queueCount`, then `QUEUE_SOURCE`/`QUEUE_SIZE` and the endpoints used), the NEXT
+witness (`NEXT_BEFORE`, `NEXT_AFTER`, `NEXT_CHANGED`, `NEXT_AFTER_AUTHORIZED`) and the BACK witness
+(`BACK_FROM_PLAYBACK`, `BACK_RETURNED_TO_LIBRARY`, `FOREGROUND_AFTER_BACK`). The queue is resolved from
+the app's own `/status` and matched against `/playlists`; nothing is hard-coded and a blank source is a
+precondition failure rather than `NOT APPLICABLE`.
 
 ### What has been run, and the results on record
 

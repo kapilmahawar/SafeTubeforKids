@@ -546,6 +546,32 @@ for ($attempt = 1; $attempt -le 20; $attempt++) {
 }
 Log "  library ready before navigating: $libraryReady"
 
+# A library precondition, not an advisory one. This loop used to give up quietly: the run carried on and
+# the D-pad phase then reported "no approved video started", which reads as "the remote cannot play
+# anything" while the real cause is a device with nothing approved on it. With nothing usable in the
+# library there is no video any playback tier can play, so every later failure would say nothing about
+# the app - the honest result is that the app was not measured.
+#
+# The registered sources are listed before failing, so "nothing registered at all" and "registered but
+# never resolved" can be told apart from the artifact instead of guessed at.
+#
+# This is a distinct exit code (4) with its own result line: RESULT=HARNESS_PRECONDITION_FAILURE is not a
+# product FAIL, and a caller must be able to tell the two apart.
+if (-not $libraryReady) {
+    if (-not $headers.ContainsKey('Authorization')) {
+        Stop-HarnessPrecondition 'no dashboard session - the PIN could not be exchanged for a token, so the approved library cannot be read'
+    }
+    $registered = Get-ApprovedSourceMap
+    Log "  approved sources registered: $($registered.Count)"
+    foreach ($key in $registered.Keys) {
+        $src = $registered[$key]
+        Log "    source=$($src.sourceId) videos=$($src.videoCount) status=$($src.status)"
+    }
+    # The em dash is built from its code point so this file stays pure ASCII: PowerShell 5.1 reads a
+    # BOM-less script as ANSI, which would mangle a literal dash and break the exact REASON text.
+    Stop-HarnessPrecondition ('library empty ' + [char]0x2014 + ' re-seed before running playback tiers')
+}
+
 # The app can be restored onto Settings or Connect from the previous session's saved view state, and
 # a library card must own focus before DOWN+OK can open a video. Without this the first OK landed on
 # a toolbar button and every later sequence ran inside the wrong screen, which read as "the remote
