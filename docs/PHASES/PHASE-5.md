@@ -159,3 +159,33 @@ or writes them was changed. A Phase 4 installation upgrading to this build needs
 
 Each is now backed by an executable assertion (new tests above, or the Phase 4 tests they inherit),
 rather than being an architectural intention that nothing checks.
+
+## Closure re-verification (2026-09-24)
+
+The playback-dependent criteria that the first Phase 5 pass could not run were re-attempted once
+YouTube stopped refusing anonymous resolution. Results:
+
+```
+playback probe      PASS     resolution recovered ("[OK] Resolved playlist ... 50 videos")
+player tier         32/32 PASS   first pass against a Phase 5 build
+full tier run 1     FAIL (5)
+full tier run 2     43/43 PASS
+full tier run 3     FAIL (5)
+stability           NOT MET — FAIL, PASS, FAIL
+```
+
+The five failures share one root cause and are **not** a Phase 5 regression: the runs reach playback
+completion, after which the app keeps reporting a live now-playing record, so four assertions that
+require "nothing is playing" fail (`stopped-before-security`, `deeplink-plays-nothing`,
+`extras-cannot-start-playback`, `back-returns-to-library`) along with `next-is-approved-queue`. The
+APK is byte-identical to the Phase 4 verified binary and the Phase 4 runs never reached
+`STATE_ENDED`, so this state had simply never been exercised. Full evidence, the three-run
+correlation table and the fix location are in `HANDOVER.md` → "Open defect".
+
+Security was unaffected in all three runs: `unapproved-video-blocked`,
+`unapproved-video-not-playing`, `api-refuses-unauth-read/write` and `no-view-deeplink-handler` passed,
+and the stale record referred to the same approved video. No unauthorized content played.
+
+**Phase 5 is therefore not closed as VERIFIED.** Its implementation and its unit, instrumented and
+player evidence stand; what remains is the end-of-video now-playing fix plus a clean three-run
+stability pass.

@@ -178,6 +178,10 @@ There are 50+ recorded runs in `test-results/tv/` (gitignored). Summarised hones
 | **smoke** | `2026-09-24-011529`, `-005836` | **12/12 PASS** | Phase 4 source (`fd73ff8` tree) |
 | **player** | `2026-09-24-033155` | **32/32 PASS** | Phase 4 source + repaired harness |
 | **full** | `2026-09-24-044035`, `-045016`, `-045950` | **43/43 PASS** ×3 consecutive | Phase 4 source + repaired harness |
+| **player** | `2026-09-24-093938` | **32/32 PASS** (first pass on a Phase 5 build) | `9abddbe` |
+| **full** | `2026-09-24-095942` | **43/43 PASS** | `9abddbe` |
+| full | `2026-09-24-094701`, `-101151` | **38 PASS / 5 FAIL** — stale now-playing state after playback completion; see `HANDOVER.md` → "Open defect" | `9abddbe` |
+| full | `2026-09-24-055858`, `-060050` | BLOCKED — YouTube `LOGIN_REQUIRED` (external; cleared later the same day) | `9abddbe` |
 
 **Resolved.** The gap this document used to flag is closed: `player` and `full` have now been run
 against Phase 4 builds. `player` is 32/32 and `full` is 43/43 on three consecutive runs.

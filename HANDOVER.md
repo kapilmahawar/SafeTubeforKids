@@ -1,6 +1,10 @@
 # SafeTube for Kids — handover
 
-State of the work as of commit `793afd0` on `kapilmahawar/SafeTubeforKids`.
+State of the work as of commit `9abddbe` on `kapilmahawar/SafeTubeforKids` (Phases 1-5).
+
+> **Read "Open defect" below before doing anything else.** There is exactly one known product defect
+> outstanding, it is reproducible, and it is the thing to fix next. Everything else marked verified in
+> this document still holds.
 
 ## What this is
 
@@ -35,7 +39,20 @@ node --check tv-app/app/src/main/assets/app.js
 
 ## Verified on real hardware
 
-Full suite last green: **39/39**. Plus targeted dumps for the error state and parent reachability.
+Current tier baselines (Phase 4 verified, Phase 5 re-verified on the Mi Box 4):
+
+```
+unit tests        564/564 PASS   (556 Phase 4 baseline + 8 Phase 5 authorization tests)
+instrumented       19/19 PASS
+smoke              12/12 PASS
+player tier        32/32 PASS
+full tier          43/43 PASS    but NOT stable — see "Open defect"
+```
+
+The individual claims below come from the pre-Phase-2 harness (whose suite was "39/39"); they remain
+accurate unless a later section supersedes them. The player tier and full tier were first run against
+a Phase 2/3/4/5 build only on 2026-09-24, because Phase 4 rewrote `HomeScreen` and nobody had
+re-run them; both are now green, which is how the defect below was found.
 
 - Player: play/pause, pause→resume, timeline, D-pad and media seek (±10s), auto-hide controls,
   buffering indicator, subtitle menu and captions on/off, quality, audio **language** tracks,
@@ -117,6 +134,64 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
    debug-build only. If a stronger boundary is ever wanted, the fix is a phone-driven unlock - the
    dashboard already holds a session - rather than hiding the code on the TV.
 
+## Open defect — stale now-playing state after playback completion
+
+**Confirmed, reproducible, NOT yet fixed. This is the next thing to fix.**
+
+When a video reaches its natural end, the app keeps reporting a live now-playing record instead of
+clearing it. Captured after playback had already stopped
+(`test-results/tv/2026-09-24-094701/api-playing.json`):
+
+```json
+"currentlyPlaying": {
+    "videoId": "e_04ZrNroTo", "playlistId": "PLT1rvk7Trkw5qNnjS-y7-0FZQOsdQOvHT",
+    "positionSec": 5, "durationSec": 229, "playing": true
+}
+```
+
+while the same run's log repeats `Player isPlaying=false`. So anything that asks "is something
+playing?" is told **yes** when nothing is.
+
+Five `full`-tier assertions fail together, and only in runs that reach this state:
+
+```
+stopped-before-security        requires PlayingNow to be null
+deeplink-plays-nothing         requires PlayingNow to be null
+extras-cannot-start-playback   requires PlayingNow to be null
+back-returns-to-library        requires PlayingNow to be null
+next-is-approved-queue         NEXT must change the video; it does not
+```
+
+**How it was isolated.** Three consecutive full-tier runs on the *same byte-identical APK*:
+
+| Run | `end-of-video-handling` ended as | Result |
+|---|---|---|
+| 1 `2026-09-24-094701` | "playback stopped" | FAIL — those 5 |
+| 2 `2026-09-24-095942` | "advanced to next approved item" | **PASS 43/43** |
+| 3 `2026-09-24-101151` | "playback stopped" | FAIL — those 5 |
+
+Perfect correlation across three runs: the failures appear exactly when playback reaches the end and
+stops, and never when the queue advances instead. This is state-dependent, not random flakiness —
+which is why it is worth fixing rather than re-running until it goes green. It also explains the
+older note that `back-returns-to-library` "fails only in runs where the probe phase also fails":
+those were runs that happened to end playback.
+
+**Why it is not a Phase 5 regression.** The APK is byte-identical to the Phase 4 verified binary
+(`BA54D0AFC9B48C7873448AF6C34991825A7F58A9299FE62F630A563C21E2C7E4`, device-side `sha256sum`
+confirmed), and Phase 5 changed no production source. Those Phase 4 runs never reached
+`STATE_ENDED` — end-of-video always advanced — so this state had simply never been exercised before.
+
+**Security impact: none demonstrated.** `unapproved-video-blocked`, `unapproved-video-not-playing`,
+`api-refuses-unauth-read/write` and `no-view-deeplink-handler` passed in all three runs. The stale
+record refers to the *same approved* video, so no unauthorized content ever played. The two deep-link
+assertions fail on their "nothing is playing" half, not on their security half.
+
+**Where to fix it.** Clear the reported now-playing state when playback completes — in
+`PlaybackController`, on `Player.STATE_ENDED` — so that "ended" and "stopped" are indistinguishable
+to anything asking whether something is playing. Then re-run the whole gate: unit tests,
+instrumented, player tier, three consecutive full tiers, and the physical-TV sequence. Do **not**
+paper over it in the harness: the harness is asking the right question.
+
 ## Pitfalls this codebase has already cost time on
 
 - **Silent no-match edits.** Files are CRLF; a multi-line anchor written with LF does nothing and
@@ -175,9 +250,13 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   with this IP, got error LOGIN_REQUIRED: "Sign in to confirm that you're not a bot"`. The
   child-facing behaviour was correct throughout - the player showed "Couldn't play this video" with
   Retry/Back, which is the error path it is supposed to show - and the approved library was
-  untouched. Waited out, it recurs. Before blaming the app, grep the log for `LOGIN_REQUIRED`, and
-  note that the harness still reports this as a navigation failure rather than as BLOCKED with the
-  real reason.
+  untouched. Waited out, it recurs. Before blaming the app, grep the log for `LOGIN_REQUIRED`.
+  **Fixed since:** the harness now detects this condition itself, prints
+  `NOTE: YouTube is refusing anonymous watch access from this IP (LOGIN_REQUIRED) - playback phases
+  will fail for that reason, not because of the app`, skips the playback phases and reports
+  `FINAL: BLOCKED` with exit code 3 instead of a misleading navigation FAIL. It cleared on its own
+  again on 2026-09-24 and playback was re-verified the same day (player tier 32/32), so treat it as
+  an external, recurring condition and never as a product failure.
 
 ## Verification notes (rounds 52-54)
 
@@ -199,3 +278,31 @@ Full suite last green: **39/39**. Plus targeted dumps for the error state and pa
   "Skipping invisible child ... ViewFactoryHolder"), so player-screen assertions must read the app
   log rather than UI dumps.
 - YouTube throttling: see the earlier note. It clears on its own; the harness now names it.
+
+## Verification notes (Phase 5 closure, 2026-09-24)
+
+- **Phase 5 was a verification phase, not a player rewrite.** The brief asked to modernize the player
+  onto AndroidX Media3. The audit found it already was Media3: `media3-exoplayer`,
+  `media3-exoplayer-dash` and `media3-ui` pinned at `1.11.1`, with `AppNavigation` → `PlaybackScreen`
+  → `TvPlayerScreen` rendering `androidx.media3.ui.PlayerView` (built-in controller disabled, custom
+  Compose TV controls) driven by `androidx.media3.exoplayer.ExoPlayer`. Every item on the brief's own
+  P5.1 list was already implemented, so rewriting it would have risked focus handling, the nine resume
+  sub-cases and 43 tier assertions for no functional gain. Phase 5 therefore added the missing tests:
+  `PlaybackAuthorizationTest` (8 tests) pins the invariants a Media3 migration must never break —
+  including the one that matters most, where a video whose source the parent withdrew *stays in the
+  approved cache and remains fully resolvable* and the gate must still refuse it. That is
+  "a playable URL is not proof of authorization", made executable.
+- The player tier passed **32/32** for the first time against a Phase 5 build, and the full tier
+  passed **43/43** once (run 2 below); it is the end-of-video state in the "Open defect" section that
+  keeps three consecutive passes out of reach.
+- `-QualityProbe` is still required to exercise quality/audio; without it those assertions are
+  skipped. The audio findings remain a **test-media limitation** (the resolver reports `0 audio`),
+  not a player capability gap, and no tracks were fabricated to make them pass.
+- The older `back-returns-to-library` note is now explained rather than merely observed: it fails
+  whenever playback has reached its end. See "Open defect".
+- **Instrumented tests uninstall the app.** `:app:connectedDebugAndroidTest` removes the package when
+  it finishes, deleting `/data/data/...` — the Room database *and* `catalog.json`. Re-seed afterwards
+  through the app's own API (PIN → `POST /auth` → `POST /playlists`) and do not fabricate the parent's
+  catalog. Related trap: `adb shell install <path>` is not a valid install — it must be host-side
+  `adb install -r <path>`. Getting that wrong leaves the app uninstalled, so later probes emit no
+  logs at all, which is easily misread as a YouTube block (it was, once, in this very session).
