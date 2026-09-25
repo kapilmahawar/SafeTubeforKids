@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tv.safetubeforkids.app.data.catalog.CatalogNodeConverters
 import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
 import tv.safetubeforkids.app.data.catalog.CatalogNodeType
 import tv.safetubeforkids.app.data.catalog.CatalogNodeValidation
@@ -149,5 +150,57 @@ class CatalogNodeValidationTest {
             "the first implementation must not claim custom images",
             ThumbnailMode.entries.take(2).contains(ThumbnailMode.CUSTOM),
         )
+    }
+
+    // ------------------------------------- the stored representation is a name, never an ordinal
+
+    /**
+     * `catalog_nodes` is the only catalog storage, so [CatalogNodeConverters] is what decides what the
+     * database actually holds. These two tests are the storage-representation guard the removed
+     * `content_items` converter used to carry, moved onto the converter that is still in the build.
+     */
+    @Test
+    fun theStoredTypeAndThumbnailModeAreNamesRatherThanOrdinals() {
+        val converters = CatalogNodeConverters()
+
+        // Guard against a stored-value change: the database holds these five strings, written as
+        // literals so a rename of the enum cannot follow them silently.
+        assertEquals("CATEGORY", converters.nodeTypeToString(CatalogNodeType.CATEGORY))
+        assertEquals("SUBCATEGORY", converters.nodeTypeToString(CatalogNodeType.SUBCATEGORY))
+        assertEquals("VIDEO", converters.nodeTypeToString(CatalogNodeType.VIDEO))
+        assertEquals("AUTO", converters.thumbnailModeToString(ThumbnailMode.AUTO))
+        assertEquals("CUSTOM", converters.thumbnailModeToString(ThumbnailMode.CUSTOM))
+
+        // and the same five come back as the same values
+        assertEquals(CatalogNodeType.VIDEO, converters.stringToNodeType("VIDEO"))
+        assertEquals(CatalogNodeType.CATEGORY, converters.stringToNodeType("CATEGORY"))
+        assertEquals(ThumbnailMode.VIDEO, converters.stringToThumbnailMode("VIDEO"))
+        assertEquals(ThumbnailMode.CUSTOM, converters.stringToThumbnailMode("CUSTOM"))
+    }
+
+    @Test
+    fun anUnknownStoredValueIsNotSilentlyAccepted() {
+        val converters = CatalogNodeConverters()
+
+        // A row written by a newer build, or by hand, must fail loudly rather than decode to the
+        // first enum constant and be rendered as something the parent never configured.
+        try {
+            converters.stringToNodeType("CHANNEL")
+            throw AssertionError("an unknown node type should not be silently accepted")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "the failure should name the offending value, got: ${expected.message}",
+                expected.message!!.contains("CHANNEL"),
+            )
+        }
+        try {
+            converters.stringToThumbnailMode("PROVIDED")
+            throw AssertionError("an unknown thumbnail mode should not be silently accepted")
+        } catch (expected: IllegalArgumentException) {
+            assertTrue(
+                "the failure should name the offending value, got: ${expected.message}",
+                expected.message!!.contains("PROVIDED"),
+            )
+        }
     }
 }

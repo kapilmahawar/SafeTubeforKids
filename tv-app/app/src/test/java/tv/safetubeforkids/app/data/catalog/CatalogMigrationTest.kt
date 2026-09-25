@@ -198,6 +198,13 @@ class CatalogMigrationTest {
             9,
             writable.version,
         )
+
+        // A version-6 installation has no catalog rows (6 -> 7 creates the two tables empty), so this is
+        // also the empty-tree path through 8 -> 9: the renumbering step must run against a table with
+        // nothing in it without failing.
+        assertEquals(0, writable.query("SELECT COUNT(*) FROM catalog_nodes").use { c ->
+            if (c.moveToFirst()) c.getInt(0) else -1
+        })
     }
 
     @Test

@@ -1,7 +1,6 @@
 package tv.safetubeforkids.app.data.catalog
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -96,28 +95,6 @@ class CatalogValidationTest {
             throw AssertionError("should have thrown")
         } catch (expected: IllegalArgumentException) {
             assertTrue(expected.message!!.contains("Malformed catalog content item"))
-        }
-    }
-
-    @Test
-    fun theEnumStoresNamesRatherThanOrdinals() {
-        // Guard against a stored-value change: the database holds these two strings.
-        assertEquals("PLAYLIST", ContentItemType.PLAYLIST.name)
-        assertEquals("VIDEO", ContentItemType.VIDEO.name)
-
-        val converters = CatalogConverters()
-        assertEquals("PLAYLIST", converters.fromContentItemType(ContentItemType.PLAYLIST))
-        assertEquals(ContentItemType.VIDEO, converters.toContentItemType("VIDEO"))
-        assertFalse(ContentItemType.entries.size > 2)
-    }
-
-    @Test
-    fun anUnknownStoredTypeIsNotSilentlyAccepted() {
-        try {
-            CatalogConverters().toContentItemType("CHANNEL")
-            throw AssertionError("an unknown type should not be silently accepted")
-        } catch (expected: IllegalArgumentException) {
-            assertTrue(expected.message!!.contains("Unknown catalog content type"))
         }
     }
 }

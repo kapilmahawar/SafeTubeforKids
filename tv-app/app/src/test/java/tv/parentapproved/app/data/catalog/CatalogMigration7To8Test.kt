@@ -19,6 +19,7 @@ import org.robolectric.RuntimeEnvironment
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.catalog.CatalogNodeType
 import tv.safetubeforkids.app.data.catalog.CatalogOrderingService
+import tv.safetubeforkids.app.data.catalog.CatalogRepository
 import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
@@ -213,6 +214,7 @@ class CatalogMigration7To8Test {
 
     /** A raw handle on the version-7 file, so one migration step can be applied at a time. */
     private fun rawDatabase(): SupportSQLiteDatabase {
+        rawHelper?.let { return it.writableDatabase }
         val config = SupportSQLiteOpenHelper.Configuration.builder(context)
             .name(dbName)
             .callback(object : SupportSQLiteOpenHelper.Callback(7) {
@@ -225,22 +227,86 @@ class CatalogMigration7To8Test {
         return helper.writableDatabase
     }
 
+    /** Hands the file back to Room, which must open it with no connection of ours left on it. */
+    private fun releaseRawDatabase() {
+        rawHelper?.close()
+        rawHelper = null
+    }
+
+    /**
+     * The positions a real upgraded installation can hold: `sort_order` was whatever the parent's
+     * configuration source sent, so the v7 fixture is given numbers that are neither contiguous nor in
+     * id order, plus one pair that shares a number.
+     *
+     *  - roots: Music 0, Cartoon 10 - Cartoon's id sorts first, so only the numbers can decide.
+     *  - Cartoon's entries: Cocomelon 20, Halloween 5, Hidden 5 - a duplicate, broken by id.
+     *  - the imported episodes: vidB 30, vidA 10, vidC 20 - the reverse of their cache order.
+     */
+    private fun applyLegacyPositions() {
+        val db = rawDatabase()
+        db.execSQL("UPDATE `categories` SET `sort_order` = 0 WHERE `id` = 'cat-music'")
+        db.execSQL("UPDATE `categories` SET `sort_order` = 10 WHERE `id` = 'cat-cartoon'")
+        db.execSQL("UPDATE `content_items` SET `sort_order` = 20 WHERE `id` = 'i-cocomelon'")
+        db.execSQL("UPDATE `content_items` SET `sort_order` = 5 WHERE `id` = 'i-halloween'")
+        db.execSQL("UPDATE `content_items` SET `sort_order` = 5 WHERE `id` = 'i-hidden'")
+        db.execSQL("UPDATE `videos` SET `position` = 30 WHERE `videoId` = 'vidB'")
+        db.execSQL("UPDATE `videos` SET `position` = 10 WHERE `videoId` = 'vidA'")
+        db.execSQL("UPDATE `videos` SET `position` = 20 WHERE `videoId` = 'vidC'")
+    }
+
     private fun SupportSQLiteDatabase.tableNames(): List<String> =
         firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
 
     /**
-     * Every column of every node, as text, in a stable order. Equality of two snapshots is what "the
-     * drop changed no node" means: ids, parents, positions, types, titles, visibility, YouTube ids,
-     * playlist provenance, thumbnail configuration and both timestamps.
+     * One parent's children as the tree renders them - `position ASC, id ASC` - each with its stored
+     * position. `parent_id IS :parentId` is the null-safe comparison the DAO itself uses, so ROOT is
+     * the same query with a null parent.
      */
-    private fun SupportSQLiteDatabase.nodeSnapshot(): List<String> = firstColumnOf(
-        "SELECT `id` || '|' || COALESCE(`parent_id`, '-') || '|' || `node_type` || '|' || `title` || '|' || " +
-            "`position` || '|' || `enabled` || '|' || COALESCE(`youtube_video_id`, '-') || '|' || " +
-            "COALESCE(`youtube_playlist_id`, '-') || '|' || `thumbnail_mode` || '|' || " +
-            "COALESCE(`thumbnail_video_id`, '-') || '|' || COALESCE(`thumbnail_url`, '-') || '|' || " +
-            "`created_at` || '|' || `updated_at` " +
-            "FROM `catalog_nodes` ORDER BY `parent_id` IS NOT NULL, `parent_id`, `position`, `id`"
-    )
+    private fun SupportSQLiteDatabase.childrenUnder(parentId: String?): List<Pair<String, Int>> =
+        query(
+            "SELECT `id`, `position` FROM `catalog_nodes` " +
+                "WHERE `parent_id` IS ${parentId?.let { "'$it'" } ?: "NULL"} " +
+                "ORDER BY `position` ASC, `id` ASC"
+        ).use { c -> buildList { while (c.moveToNext()) add(c.getString(0) to c.getInt(1)) } }
+
+    private fun SupportSQLiteDatabase.childIdsUnder(parentId: String?): List<String> =
+        childrenUnder(parentId).map { it.first }
+
+    private fun SupportSQLiteDatabase.positionsUnder(parentId: String?): List<Int> =
+        childrenUnder(parentId).map { it.second }
+
+    /** The invariant itself: every sibling list is numbered 0..n-1. */
+    private fun SupportSQLiteDatabase.assertEverySiblingListIsCanonical() {
+        val parents = firstColumnOf("SELECT DISTINCT COALESCE(`parent_id`, '<root>') FROM `catalog_nodes`")
+        assertTrue("the tree must not be empty", parents.isNotEmpty())
+        parents.forEach { parent ->
+            val rows = childrenUnder(parent.takeIf { it != "<root>" })
+            assertEquals(
+                "positions under $parent must be 0..n-1",
+                rows.indices.toList(),
+                rows.map { it.second },
+            )
+        }
+    }
+
+    /**
+     * Every column of every node, as text, in a stable order. Equality of two snapshots is what "the
+     * replacement changed no node" means: ids, parents, positions, types, titles, visibility, YouTube
+     * ids, playlist provenance, thumbnail configuration and both timestamps.
+     *
+     * [includePosition] is false when the only thing allowed to change is the numbering - a migration
+     * that renumbers siblings must leave every other column of every row exactly as it was.
+     */
+    private fun SupportSQLiteDatabase.nodeSnapshot(includePosition: Boolean = true): List<String> =
+        firstColumnOf(
+            "SELECT `id` || '|' || COALESCE(`parent_id`, '-') || '|' || `node_type` || '|' || `title` || '|' || " +
+                (if (includePosition) "`position` || '|' || " else "") +
+                "`enabled` || '|' || COALESCE(`youtube_video_id`, '-') || '|' || " +
+                "COALESCE(`youtube_playlist_id`, '-') || '|' || `thumbnail_mode` || '|' || " +
+                "COALESCE(`thumbnail_video_id`, '-') || '|' || COALESCE(`thumbnail_url`, '-') || '|' || " +
+                "`created_at` || '|' || `updated_at` " +
+                "FROM `catalog_nodes` ORDER BY `parent_id` IS NOT NULL, `parent_id`, `id`"
+        )
 
     private fun CacheDatabase.catalogNodeCount(): Int =
         openHelper.readableDatabase
@@ -290,7 +356,9 @@ class CatalogMigration7To8Test {
         val before = db.nodeSnapshot()
         assertTrue("the 7 -> 8 conversion must have produced nodes", before.isNotEmpty())
 
-        // Step 2: the removal itself.
+        // This fixture's legacy sort_order values are already 0..n-1, so step 2 has nothing to renumber
+        // and must leave every single column of every node alone. The renumbering case is covered by
+        // migration8To9CanonicalizesLegacyPositionsAndKeepsTheSiblingOrder.
         CacheDatabase.MIGRATION_8_9.migrate(db)
         db.version = 9
 
@@ -301,7 +369,7 @@ class CatalogMigration7To8Test {
         assertTrue("catalog_metadata must survive, tables: $after", after.contains("catalog_metadata"))
 
         // Nothing was copied or rewritten: every node is byte-for-byte what 7 -> 8 produced.
-        assertEquals("8 -> 9 must not touch the tree", before, db.nodeSnapshot())
+        assertEquals("8 -> 9 must not touch a canonical tree", before, db.nodeSnapshot())
 
         // And the dropped tables' indices went with them rather than lingering as orphans.
         val indices = db.firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'index'")
@@ -313,6 +381,70 @@ class CatalogMigration7To8Test {
             "index_content_items_category_id_sort_order outlived its table: $indices",
             indices.contains("index_content_items_category_id_sort_order"),
         )
+    }
+
+    @Test
+    fun migration8To9CanonicalizesLegacyPositionsAndKeepsTheSiblingOrder() {
+        createVersion7Database()
+        applyLegacyPositions()
+        val db = rawDatabase()
+
+        CacheDatabase.MIGRATION_7_8.migrate(db)
+        db.version = 8
+
+        // Version 8 holds the legacy numbers verbatim: 7 -> 8 moves data and changes nothing else.
+        assertEquals(listOf(0, 10), db.positionsUnder(null))
+        assertEquals(listOf(5, 5, 20), db.positionsUnder("cat-cartoon"))
+        assertEquals(listOf(10, 20, 30), db.positionsUnder("i-cocomelon"))
+        val before = db.nodeSnapshot(includePosition = false)
+
+        CacheDatabase.MIGRATION_8_9.migrate(db)
+        db.version = 9
+
+        // 0/10/20 becomes 0/1/2 - here 0/10 -> 0/1 and 5/5/20 -> 0/1/2 - for every parent, including
+        // the container's own children.
+        assertEquals(listOf(0, 1), db.positionsUnder(null))
+        assertEquals(listOf(0, 1, 2), db.positionsUnder("cat-cartoon"))
+        assertEquals(listOf(0, 1, 2), db.positionsUnder("i-cocomelon"))
+        assertEquals(listOf(0), db.positionsUnder("cat-music"))
+
+        // ...and the relative order the legacy numbers described is exactly what is left, duplicates
+        // included: two children sharing 5 are ordered by id, which is the tree's documented tie-break.
+        assertEquals(listOf("cat-music", "cat-cartoon"), db.childIdsUnder(null))
+        assertEquals(listOf("i-halloween", "i-hidden", "i-cocomelon"), db.childIdsUnder("cat-cartoon"))
+        assertEquals(
+            // The imported episodes are the container's children, so their ids are derived
+            // (`<item id>#<video id>`); the order is what the legacy 10/20/30 described.
+            listOf("i-cocomelon#vidA", "i-cocomelon#vidC", "i-cocomelon#vidB"),
+            db.childIdsUnder("i-cocomelon"),
+        )
+
+        // Only the numbering moved: id, parent, type, title, visibility, YouTube identity, playlist
+        // provenance, thumbnail configuration and both timestamps are untouched.
+        assertEquals("only position may change", before, db.nodeSnapshot(includePosition = false))
+
+        db.assertEverySiblingListIsCanonical()
+    }
+
+    @Test
+    fun legacyPositionsReachTheTvAsContiguousPositionsInTheSameOrder() = runBlocking {
+        createVersion7Database()
+        applyLegacyPositions()
+        releaseRawDatabase()
+
+        // The real upgrade path: Room opens the version-7 file and runs 7 -> 8 -> 9 itself.
+        val repo = CatalogRepository(openWithRoom())
+
+        // The shelves are in the order the legacy numbers described - Music (0) before Cartoon (10),
+        // even though the ids sort the other way - and each reports a canonical position.
+        assertEquals(listOf("Music", "Cartoon"), repo.getCategories().map { it.displayName })
+        assertEquals(listOf(0, 1), repo.getCategories().map { it.sortOrder })
+
+        assertEquals(
+            listOf("Halloween Special", "Hidden Episode", "Cocomelon"),
+            repo.getItems("cat-cartoon").map { it.displayName },
+        )
+        assertEquals(listOf(0, 1, 2), repo.getItems("cat-cartoon").map { it.sortOrder })
     }
 
     @Test

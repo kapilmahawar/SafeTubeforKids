@@ -261,6 +261,11 @@ abstract class CacheDatabase : RoomDatabase() {
          *
          * Creating VIDEO nodes from the approved cache grants nothing: PlaybackAuthorization still reads
          * only `channels` and `videos`, so a migrated node is configuration, not permission.
+         *
+         * The legacy numbers are kept verbatim here on purpose - this step moves data and changes nothing
+         * else. [MIGRATION_8_9] then renumbers every sibling list to the canonical 0..n-1 without
+         * changing the order, so a migrated installation ends up with the representation a fresh ingest
+         * produces.
          */
         val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -332,18 +337,61 @@ abstract class CacheDatabase : RoomDatabase() {
             }
         }
         /**
-         * Version 8 -> 9: the obsolete `categories` / `content_items` tables are dropped.
+         * Version 8 -> 9: sibling positions become canonical, and the obsolete `categories` /
+         * `content_items` tables are dropped.
          *
-         * [MIGRATION_7_8] already moved every category, item, ordering position, visibility flag and
-         * playlist provenance into `catalog_nodes`, so this migration is deliberately just the removal:
-         * it copies nothing and does not touch - let alone recreate - the node tree, which therefore
-         * keeps its ids, parents, positions, types, enabled flags, playlist sources, thumbnail
-         * configuration and timestamps exactly as they were.
+         * Canonical means the representation a fresh ingest produces: for every parent, the children
+         * numbered 0..n-1 in the order the tree already renders them - `position ASC, id ASC`. It is a
+         * pure renumbering, so a sibling's relative order cannot change: `id` only breaks a tie two
+         * positions share, exactly as every read does. Nothing else about a node moves - not its id,
+         * its parent, its type, its title, its enabled flag, its YouTube identity, its playlist
+         * provenance, its thumbnail configuration, or either timestamp.
          *
-         * Dropping a table also drops its indices; no other table is affected.
+         * Why it is needed: [MIGRATION_7_8] preserves the legacy `sort_order` values verbatim, so a
+         * migrated installation can hold 0/10/20 where a freshly synced one holds 0/1/2 for the same
+         * catalog. Both render in the same order, but "the parent's order" should have exactly one
+         * representation, and the ordering service already maintains that one (every move renumbers
+         * its sibling lists contiguous).
+         *
+         * The ranking is computed into a temporary table *before* any row is written: SQLite may let an
+         * UPDATE see rows it has already renumbered, which would make the result depend on scan order.
+         * The temporary table is dropped again immediately, so it never becomes part of the schema Room
+         * validates.
          */
         val MIGRATION_8_9 = object : Migration(8, 9) {
             override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. One canonical representation of the parent's order.
+                db.execSQL("DROP TABLE IF EXISTS `catalog_node_canonical_positions`")
+                db.execSQL(
+                    """
+                    CREATE TEMP TABLE `catalog_node_canonical_positions` AS
+                    SELECT
+                        `node`.`id` AS `node_id`,
+                        (
+                            SELECT COUNT(*)
+                            FROM `catalog_nodes` AS `earlier`
+                            WHERE `earlier`.`parent_id` IS `node`.`parent_id`
+                              AND (
+                                  `earlier`.`position` < `node`.`position`
+                                  OR (
+                                      `earlier`.`position` = `node`.`position`
+                                      AND `earlier`.`id` < `node`.`id`
+                                  )
+                              )
+                        ) AS `canonical_position`
+                    FROM `catalog_nodes` AS `node`
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "UPDATE `catalog_nodes` SET `position` = (" +
+                        "SELECT `canonical_position` FROM `catalog_node_canonical_positions` " +
+                        "WHERE `catalog_node_canonical_positions`.`node_id` = `catalog_nodes`.`id`" +
+                        ")"
+                )
+                db.execSQL("DROP TABLE `catalog_node_canonical_positions`")
+
+                // 2. The removal this migration exists for. `content_items` first: it is the child side
+                // of the foreign key to `categories`.
                 db.execSQL("DROP TABLE IF EXISTS `content_items`")
                 db.execSQL("DROP TABLE IF EXISTS `categories`")
             }
