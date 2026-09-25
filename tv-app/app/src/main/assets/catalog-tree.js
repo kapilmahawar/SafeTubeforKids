@@ -114,12 +114,14 @@ var CatalogTree = (function () {
         return chips.join('');
     }
 
-    function renderRow(node, depth) {
+    function renderRow(node, options) {
         var type = String(node.nodeType || 'UNKNOWN');
         var enabled = node.enabled !== false;
         var position = typeof node.position === 'number' ? node.position : 0;
+        var selected = !!(options && options.selectedId && options.selectedId === node.id);
 
-        return '<div class="catalog-node-row">' +
+        return '<div class="catalog-node-row' + (selected ? ' is-selected' : '') +
+            '" data-node-id="' + escapeHtml(node.id) + '">' +
             '<span class="catalog-node-title">' + escapeHtml(node.title) + '</span>' +
             '<span class="catalog-node-type catalog-type-' + escapeHtml(type.toLowerCase()) + '">' +
                 escapeHtml(TYPE_LABELS[type] || type) + '</span>' +
@@ -131,17 +133,17 @@ var CatalogTree = (function () {
             '</div>';
     }
 
-    function renderBranch(node, childrenOf, rendered) {
+    function renderBranch(node, childrenOf, rendered, options) {
         if (rendered[node.id]) return '';
         rendered[node.id] = true;
 
         var children = childrenOf[node.id] || [];
         var html = '<li class="catalog-node catalog-node-' + escapeHtml(String(node.nodeType || 'unknown').toLowerCase()) +
-            (node.enabled === false ? ' catalog-node-disabled' : '') + '">' + renderRow(node);
+            (node.enabled === false ? ' catalog-node-disabled' : '') + '">' + renderRow(node, options);
 
         if (children.length) {
             html += '<ul class="catalog-children">';
-            children.forEach(function (child) { html += renderBranch(child, childrenOf, rendered); });
+            children.forEach(function (child) { html += renderBranch(child, childrenOf, rendered, options); });
             html += '</ul>';
         }
 
@@ -149,18 +151,23 @@ var CatalogTree = (function () {
     }
 
     /**
-     * The whole tree as HTML. Read-only: nothing here is clickable, editable or draggable.
+     * The whole tree as HTML.
+     *
+     * Every row carries its node id in a `data-node-id` attribute, so the dashboard can tell which row
+     * a click landed on, and `options.selectedId` marks one row as selected. Nothing here is clickable,
+     * editable or draggable in itself: the controls live in the editor panel beside the tree, and this
+     * function stays a rendering of the tree.
      */
-    function render(nodes) {
+    function render(nodes, options) {
         var grouped = order(nodes);
 
         if (grouped.total === 0) {
-            return '<p class="catalog-empty">No shelves configured yet.</p>';
+            return '<p class="catalog-empty">No shelves configured yet. Add one below.</p>';
         }
 
         var rendered = {};
         var html = '<ul class="catalog-tree">';
-        grouped.roots.forEach(function (root) { html += renderBranch(root, grouped.childrenOf, rendered, {}); });
+        grouped.roots.forEach(function (root) { html += renderBranch(root, grouped.childrenOf, rendered, options); });
         html += '</ul>';
 
         if (grouped.unplaced.length) {
@@ -168,7 +175,7 @@ var CatalogTree = (function () {
                 '<p class="catalog-hint">These nodes name a parent that is missing, or sit in a cycle of ' +
                 'parents, so no shelf can show them.</p><ul class="catalog-tree">';
             grouped.unplaced.forEach(function (node) {
-                html += '<li class="catalog-node catalog-node-unplaced">' + renderRow(node) + '</li>';
+                html += '<li class="catalog-node catalog-node-unplaced">' + renderRow(node, options) + '</li>';
             });
             html += '</ul></div>';
         }

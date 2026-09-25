@@ -236,12 +236,18 @@ test('a title is escaped, so a name cannot inject markup into the dashboard', ()
     assert.match(html, /Tom &amp; Jerry &lt;b&gt;/);
 });
 
-test('the rendered tree is read-only: it offers no control of any kind', () => {
-    const html = CatalogTree.render(catalog);
+test('the rendered tree is a tree: the editor controls live in the panel, not in the rows', () => {
+    const html = CatalogTree.render(catalog, { selectedId: 'i-cocomelon' });
 
+    // Rows carry the id a click landed on and can be marked selected...
+    assert.match(html, /data-node-id="i-cocomelon"/);
+    assert.match(html, /catalog-node-row is-selected" data-node-id="i-cocomelon"/);
+
+    // ...but the rendering itself still offers no control of any kind.
     assert.doesNotMatch(html, /<button/);
     assert.doesNotMatch(html, /<input/);
     assert.doesNotMatch(html, /<form/);
+    assert.doesNotMatch(html, /<select/);
     assert.doesNotMatch(html, /ondragstart/);
     assert.doesNotMatch(html, /contenteditable/);
     assert.doesNotMatch(html, /onclick/);
@@ -292,16 +298,18 @@ test('the catalog view fetches the server document and renders it into the page'
     const appSource = code('app.js');
     const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
 
-    // The view reads the server's document on load and on refresh; it never renders a stored copy.
+    // The view reads the server's document on load and on reload; it never renders a stored copy.
     assert.match(appSource, /apiCall\('GET', '\/catalog'\)/);
-    assert.match(appSource, /CatalogTree\.render\(catalog\.nodes\)/);
+    assert.match(appSource, /CatalogEditor\.reload\(/);
+    assert.match(appSource, /CatalogTree\.render\(editorSession\.nodes/);
     assert.match(appSource, /getElementById\('catalog-tree'\)/);
     assert.match(appSource, /loadCatalog\(\);/);
 
-    // And the page has the section and the script the view needs.
+    // And the page has the section, the tree, and the scripts the view needs.
     assert.match(html, /id="catalog-section"/);
     assert.match(html, /id="catalog-tree"/);
     assert.match(html, /<script src="catalog-tree.js"><\/script>/);
+    assert.match(html, /<script src="catalog-editor.js"><\/script>/);
     // The dashboard page itself carries no catalog data: it is fetched at runtime or not at all.
     assert.doesNotMatch(html, /"nodes"\s*:/);
 });

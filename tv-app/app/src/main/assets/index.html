@@ -173,10 +173,88 @@
                 <div class="catalog-card">
                     <div class="catalog-header">
                         <span id="catalog-meta" class="catalog-meta">Loading…</span>
-                        <button type="button" id="catalog-refresh-btn" class="btn-small" onclick="loadCatalog()">Refresh</button>
+                        <span id="catalog-status" class="catalog-status"></span>
+                        <button type="button" id="catalog-reload-btn" class="btn-small" onclick="reloadCatalogFromServer()">Reload</button>
+                        <button type="button" id="catalog-save-btn" class="btn-small btn-primary" onclick="saveCatalog()">Save</button>
                     </div>
-                    <p class="catalog-hint">What the TV receives: the shelves and items stored on this TV, in the order they are shown.</p>
-                    <div id="catalog-tree" class="catalog-tree-container"></div>
+
+                    <p id="catalog-unsaved" class="catalog-unsaved hidden">
+                        Unsaved changes — they exist only in this browser. Press Save to publish them; a page
+                        refresh would discard them.
+                    </p>
+
+                    <div id="catalog-conflict" class="catalog-conflict hidden">
+                        <p id="catalog-conflict-text"></p>
+                        <div class="catalog-conflict-actions">
+                            <button type="button" onclick="reloadCatalogFromServer()">Reload server version</button>
+                            <button type="button" onclick="keepEditing()">Keep editing</button>
+                        </div>
+                        <p class="catalog-hint">
+                            Keeping your edits does not publish them: saving stays disabled until you reload,
+                            because they were made against a catalog that has since changed.
+                        </p>
+                    </div>
+
+                    <div class="catalog-editor">
+                        <div id="catalog-tree" class="catalog-tree-container"></div>
+                        <div class="catalog-panel">
+                            <h3>Selected node</h3>
+                            <p id="catalog-panel-empty" class="catalog-hint">Select a node in the tree to edit it.</p>
+                            <div id="catalog-panel" class="hidden">
+                                <p class="catalog-panel-meta">
+                                    <span id="panel-type" class="catalog-node-type"></span>
+                                    <code id="panel-id" class="catalog-node-id"></code>
+                                    <span id="panel-detail" class="catalog-hint"></span>
+                                </p>
+                                <label class="catalog-field">
+                                    <span>Name</span>
+                                    <input type="text" id="panel-title" maxlength="120">
+                                </label>
+                                <p class="catalog-panel-row">
+                                    <button type="button" onclick="renameSelected()">Rename</button>
+                                    <span id="panel-rename-hint" class="catalog-hint"></span>
+                                </p>
+                                <p class="catalog-panel-row">
+                                    <label class="catalog-checkbox">
+                                        <input type="checkbox" id="panel-enabled" onchange="toggleSelectedEnabled()">
+                                        Shown to the child
+                                    </label>
+                                </p>
+                                <p class="catalog-panel-row">
+                                    <button type="button" onclick="moveSelectedUp()">Move Up</button>
+                                    <button type="button" onclick="moveSelectedDown()">Move Down</button>
+                                </p>
+                                <p class="catalog-panel-row">
+                                    <label class="catalog-field">
+                                        <span>Move to</span>
+                                        <select id="panel-parent"></select>
+                                    </label>
+                                    <button type="button" onclick="moveSelectedTo()">Move</button>
+                                </p>
+                                <p class="catalog-panel-row">
+                                    <button type="button" class="btn-danger" onclick="deleteSelected()">Delete</button>
+                                    <span class="catalog-hint">Deleting a shelf or subcategory deletes everything inside it.</span>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="catalog-add">
+                        <h3>Add</h3>
+                        <div class="catalog-add-row">
+                            <select id="add-kind" onchange="refreshAddForm()">
+                                <option value="CATEGORY">Category</option>
+                                <option value="SUBCATEGORY">Subcategory</option>
+                                <option value="VIDEO">Video</option>
+                            </select>
+                            <select id="add-parent"></select>
+                            <input type="text" id="add-title" placeholder="Name shown to your child" maxlength="120">
+                            <input type="text" id="add-video" placeholder="YouTube video URL or id" maxlength="200">
+                            <button type="button" onclick="addNode()">Add</button>
+                        </div>
+                        <p id="add-hint" class="catalog-hint"></p>
+                    </div>
+
                     <p id="catalog-error" class="error hidden"></p>
                 </div>
             </section>
@@ -221,6 +299,7 @@
         </div>
     </div>
     <script src="catalog-tree.js"></script>
+    <script src="catalog-editor.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

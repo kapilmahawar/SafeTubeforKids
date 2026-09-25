@@ -89,6 +89,20 @@ class DashboardRoutesTest {
     }
 
     @Test
+    fun rootRelative_catalogEditorJs_routeExists() = testApp {
+        // The editor model (every mutation, and the save/reload conversation) is a separate script so
+        // that it can be pure - no DOM, no fetch, no storage - and therefore testable outside a browser.
+        val response = client.get("/catalog-editor.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun legacy_assetsCatalogEditorJs_routeExists() = testApp {
+        val response = client.get("/assets/catalog-editor.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
     fun legacy_assetsAppJs_routeExists() = testApp {
         val response = client.get("/assets/app.js")
         assertEquals(HttpStatusCode.NotFound, response.status)

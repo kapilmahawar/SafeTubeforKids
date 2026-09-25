@@ -776,45 +776,426 @@
         }
     };
 
-    // --- Catalog (read-only) ---
+    // --- Catalog editor ---
     //
-    // The tree is fetched from the TV's own server on every load and on every refresh. Nothing about
-    // the catalog is written to localStorage or any other browser storage: the server's document is
-    // the authoritative catalog, and a browser that cached its own copy could show a parent a tree
-    // that is no longer the one the TV is showing.
-    async function loadCatalog() {
-        var container = document.getElementById('catalog-tree');
-        var meta = document.getElementById('catalog-meta');
-        var errorBox = document.getElementById('catalog-error');
-        if (!container) return;
+    // The tree comes from the TV's own server and the edits live here until Save publishes them as one
+    // document. Nothing about the catalog is written to localStorage or any other browser storage: the
+    // server's document is the authoritative catalog, and a browser holding its own copy could show a
+    // parent a tree the TV is not showing. The consequence - a refresh discards unsaved edits - is
+    // stated in the UI rather than hidden.
+    //
+    // The model (every mutation, and the save/reload conversation with the server) lives in
+    // catalog-editor.js, which touches no DOM. This file only moves between that model and the page.
 
-        var result = await apiCall('GET', '/catalog');
-        var catalog = result.data || {};
+    var editorSession = null;
+    var editorConflict = null;   // {serverVersion} while a save is blocked by a stale working copy
+    var selectedNodeId = null;
+    var editorNewId = null;      // kept so a reload keeps generating ids the same way
 
-        if (result.status !== 200 || !catalog.nodes) {
-            container.innerHTML = '';
-            if (errorBox) {
-                errorBox.textContent = 'Catalog unavailable' +
-                    (catalog.error ? ': ' + catalog.error : ' (status ' + result.status + ')');
-                errorBox.classList.remove('hidden');
-            }
-            if (meta) meta.textContent = 'Not available';
+    function catalogError(message) {
+        var box = document.getElementById('catalog-error');
+        if (!box) return;
+        if (!message) {
+            box.classList.add('hidden');
+            box.textContent = '';
             return;
         }
+        box.textContent = message;
+        box.classList.remove('hidden');
+    }
 
-        if (errorBox) errorBox.classList.add('hidden');
+    function setCatalogStatus(kind, message) {
+        var el = document.getElementById('catalog-status');
+        if (!el) return;
+        el.className = 'catalog-status status-' + kind;
+        el.textContent = message;
+    }
 
-        var counts = CatalogTree.summary(catalog.nodes);
-        container.innerHTML = CatalogTree.render(catalog.nodes);
-        if (meta) {
-            meta.textContent = 'Version ' + catalog.catalogVersion + ' — ' + counts.total + ' nodes (' +
-                counts.categories + ' categories, ' + counts.subcategories + ' subcategories, ' +
-                counts.videos + ' videos' + (counts.disabled ? ', ' + counts.disabled + ' disabled' : '') + ')';
+    function selectedNode() {
+        return editorSession && selectedNodeId ? CatalogEditor.nodeById(editorSession, selectedNodeId) : null;
+    }
+
+    /** Which of the four states the parent needs to be able to tell apart. */
+    function refreshCatalogNotices() {
+        var unsaved = document.getElementById('catalog-unsaved');
+        var saveBtn = document.getElementById('catalog-save-btn');
+        var dirty = !!(editorSession && CatalogEditor.isDirty(editorSession));
+
+        if (saveBtn) saveBtn.disabled = !editorSession || !!editorConflict || !dirty;
+        if (!unsaved) return;
+
+        if (editorConflict) {
+            unsaved.textContent = 'Your unsaved changes were not applied: the catalog changed on the server. ' +
+                'Reload to take the server version (which discards what is here), then edit and save again.';
+            unsaved.classList.remove('hidden');
+        } else if (dirty) {
+            unsaved.textContent = 'Unsaved changes — they exist only in this browser. Press Save to publish ' +
+                'them; a page refresh would discard them.';
+            unsaved.classList.remove('hidden');
+        } else {
+            unsaved.classList.add('hidden');
         }
     }
 
-    // Exposed for the Refresh button in index.html, like the other inline handlers on this page.
+    function renderCatalog() {
+        var container = document.getElementById('catalog-tree');
+        var meta = document.getElementById('catalog-meta');
+        if (!container) return;
+
+        if (!editorSession) {
+            container.innerHTML = '';
+            if (meta) meta.textContent = 'Not available';
+            refreshCatalogNotices();
+            return;
+        }
+
+        container.innerHTML = CatalogTree.render(editorSession.nodes, { selectedId: selectedNodeId });
+        var counts = CatalogTree.summary(editorSession.nodes);
+        if (meta) {
+            meta.textContent = 'Version ' + editorSession.catalogVersion + ' — ' + counts.total + ' nodes (' +
+                counts.categories + ' categories, ' + counts.subcategories + ' subcategories, ' +
+                counts.videos + ' videos' + (counts.disabled ? ', ' + counts.disabled + ' disabled' : '') + ')';
+        }
+        renderCatalogPanel();
+        refreshAddForm();
+        refreshCatalogNotices();
+    }
+
+    function renderCatalogPanel() {
+        var panel = document.getElementById('catalog-panel');
+        var empty = document.getElementById('catalog-panel-empty');
+        if (!panel || !empty) return;
+
+        var node = selectedNode();
+        if (!node) {
+            panel.classList.add('hidden');
+            empty.classList.remove('hidden');
+            return;
+        }
+        panel.classList.remove('hidden');
+        empty.classList.add('hidden');
+
+        document.getElementById('panel-type').textContent = node.nodeType;
+        document.getElementById('panel-type').className = 'catalog-node-type catalog-type-' + node.nodeType.toLowerCase();
+        document.getElementById('panel-id').textContent = node.id;
+        document.getElementById('panel-title').value = node.title;
+        document.getElementById('panel-enabled').checked = node.enabled !== false;
+
+        var detail = [];
+        if (node.youtubeVideoId) detail.push('video ' + node.youtubeVideoId);
+        if (node.youtubePlaylistId) detail.push('playlist ' + node.youtubePlaylistId);
+        detail.push('position #' + node.position);
+        document.getElementById('panel-detail').textContent = detail.join(' · ');
+
+        // A video keeps the name it was added with; the parent renames shelves and subcategories.
+        var renameHint = document.getElementById('panel-rename-hint');
+        var titleInput = document.getElementById('panel-title');
+        var renameable = node.nodeType !== 'VIDEO';
+        titleInput.disabled = !renameable;
+        renameHint.textContent = renameable
+            ? ''
+            : 'A video keeps its name; rename the shelf or subcategory it sits in.';
+
+        // Moving is only offered where it is possible: a shelf always sits at the top level.
+        var select = document.getElementById('panel-parent');
+        var options = CatalogEditor.validParentsFor(editorSession, node.nodeType).filter(function (parentId) {
+            if (parentId === node.id) return false;
+            if (parentId === null) return node.nodeType === 'CATEGORY';
+            return CatalogEditor.subtreeIds(editorSession, node.id).indexOf(parentId) === -1;
+        });
+        select.innerHTML = options.map(function (parentId) {
+            var label = parentId === null ? 'Top level' : parentLabel(parentId);
+            return '<option value="' + (parentId === null ? '' : parentId) + '"' +
+                (parentId === (node.parentId || null) ? ' selected' : '') + '>' + label + '</option>';
+        }).join('');
+        select.disabled = options.length <= 1;
+    }
+
+    function parentLabel(id) {
+        var parent = CatalogEditor.nodeById(editorSession, id);
+        return parent ? parent.title + ' (' + parent.nodeType.toLowerCase() + ')' : id;
+    }
+
+    function refreshAddForm() {
+        var kindSelect = document.getElementById('add-kind');
+        var parentSelect = document.getElementById('add-parent');
+        var videoInput = document.getElementById('add-video');
+        var hint = document.getElementById('add-hint');
+        if (!kindSelect || !parentSelect || !editorSession) return;
+
+        var kind = kindSelect.value;
+        var parents = kind === 'CATEGORY' ? [] : editorSession.nodes
+            .filter(function (node) { return CatalogEditor.childTypesOf(node.nodeType).indexOf(kind) !== -1; })
+            .sort(function (a, b) { return a.title < b.title ? -1 : 1; });
+
+        if (kind === 'CATEGORY') {
+            parentSelect.innerHTML = '<option value="">Top level</option>';
+            parentSelect.disabled = true;
+        } else {
+            parentSelect.innerHTML = parents.map(function (node) {
+                return '<option value="' + node.id + '">' + node.title + '</option>';
+            }).join('');
+            parentSelect.disabled = parents.length === 0;
+        }
+
+        var needsVideo = kind === 'VIDEO';
+        videoInput.classList.toggle('hidden', !needsVideo);
+        if (hint) {
+            hint.textContent = kind === 'CATEGORY'
+                ? 'A category is a shelf at the top level of the home screen.'
+                : (parents.length === 0
+                    ? 'There is nothing to put this in yet — add a category first.'
+                    : (kind === 'VIDEO'
+                        ? 'The parent names the video; the YouTube id is only the source.'
+                        : 'A subcategory holds videos you add to it.'));
+        }
+    }
+
+    async function loadCatalog() {
+        setCatalogStatus('saving', 'Loading…');
+        var result = await CatalogEditor.reload(
+            function () { return apiCall('GET', '/catalog'); },
+            { newId: editorNewId || undefined },
+        );
+
+        if (result.outcome !== 'reloaded') {
+            editorSession = null;
+            catalogError('Catalog unavailable: ' + result.reason);
+            setCatalogStatus('error', 'Error');
+            renderCatalog();
+            return;
+        }
+
+        editorSession = result.session;
+        editorNewId = editorSession.newId;
+        editorConflict = null;
+        if (!CatalogEditor.nodeById(editorSession, selectedNodeId)) selectedNodeId = null;
+        var conflictBox = document.getElementById('catalog-conflict');
+        if (conflictBox) conflictBox.classList.add('hidden');
+        catalogError('');
+        setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
+        renderCatalog();
+    }
+
+    /** Every edit goes through here: a refused one changes nothing and says why. */
+    function applyEditorResult(result) {
+        if (!result.ok) {
+            catalogError('Not changed: ' + result.reason);
+            return false;
+        }
+        editorSession = result.session;
+        catalogError('');
+        setCatalogStatus('editing', 'Editing — not saved yet');
+        renderCatalog();
+        return true;
+    }
+
+    function selectNode(id) {
+        selectedNodeId = id;
+        renderCatalog();
+    }
+
+    function addNode() {
+        if (!editorSession) return;
+        var kind = document.getElementById('add-kind').value;
+        var parentId = document.getElementById('add-parent').value || null;
+        var title = document.getElementById('add-title').value;
+        var videoId = document.getElementById('add-video').value;
+
+        // Remembered before the edit so the node that was just added can be recognised afterwards.
+        var beforeIds = editorSession.nodes.map(function (node) { return node.id; });
+
+        var result;
+        if (kind === 'CATEGORY') result = CatalogEditor.addCategory(editorSession, { title: title });
+        else if (kind === 'SUBCATEGORY') result = CatalogEditor.addSubcategory(editorSession, { parentId: parentId, title: title });
+        else result = CatalogEditor.addVideo(editorSession, { parentId: parentId, title: title, youtubeVideoId: videoId });
+
+        if (!applyEditorResult(result)) return;
+
+        // Select what was just added, so the panel is ready for the next edit.
+        var added = result.session.nodes.filter(function (node) { return beforeIds.indexOf(node.id) === -1; });
+        document.getElementById('add-title').value = '';
+        document.getElementById('add-video').value = '';
+        if (added.length === 1) {
+            selectedNodeId = added[0].id;
+            renderCatalog();
+        }
+    }
+
+    function renameSelected() {
+        if (!editorSession || !selectedNodeId) return;
+        var title = document.getElementById('panel-title').value;
+        applyEditorResult(CatalogEditor.rename(editorSession, { id: selectedNodeId, title: title }));
+    }
+
+    function toggleSelectedEnabled() {
+        if (!editorSession || !selectedNodeId) return;
+        var enabled = document.getElementById('panel-enabled').checked;
+        applyEditorResult(CatalogEditor.setEnabled(editorSession, { id: selectedNodeId, enabled: enabled }));
+    }
+
+    function moveSelectedUp() {
+        if (!editorSession || !selectedNodeId) return;
+        applyEditorResult(CatalogEditor.moveUp(editorSession, { id: selectedNodeId }));
+    }
+
+    function moveSelectedDown() {
+        if (!editorSession || !selectedNodeId) return;
+        applyEditorResult(CatalogEditor.moveDown(editorSession, { id: selectedNodeId }));
+    }
+
+    function moveSelectedTo() {
+        if (!editorSession || !selectedNodeId) return;
+        var parentId = document.getElementById('panel-parent').value || null;
+        applyEditorResult(CatalogEditor.moveTo(editorSession, { id: selectedNodeId, parentId: parentId }));
+    }
+
+    function deleteSelected() {
+        if (!editorSession || !selectedNodeId) return;
+        var node = selectedNode();
+        if (!node) return;
+
+        var removed = CatalogEditor.subtreeIds(editorSession, selectedNodeId).length - 1;
+        var question = removed > 0
+            ? 'Delete "' + node.title + '" and the ' + removed + ' node(s) inside it? This cannot be undone.'
+            : 'Delete "' + node.title + '"? This cannot be undone.';
+        if (!window.confirm(question)) return;
+
+        var parentId = node.parentId || null;
+        if (applyEditorResult(CatalogEditor.remove(editorSession, { id: selectedNodeId }))) {
+            selectedNodeId = parentId;
+            renderCatalog();
+        }
+    }
+
+    async function saveCatalog() {
+        if (!editorSession || editorConflict) return;
+
+        if (!CatalogEditor.isDirty(editorSession)) {
+            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
+            return;
+        }
+
+        setCatalogStatus('saving', 'Saving…');
+        catalogError('');
+
+        var result = await CatalogEditor.save(editorSession, function (body) {
+            return apiCall('PUT', '/catalog', body);
+        });
+
+        if (result.outcome === 'saved') {
+            // Only here, after the server answered 200, is anything called saved.
+            editorSession = result.session;
+            editorConflict = null;
+            var box = document.getElementById('catalog-conflict');
+            if (box) box.classList.add('hidden');
+            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
+            renderCatalog();
+            return;
+        }
+
+        if (result.outcome === 'conflict') {
+            editorSession = result.session;   // the unsaved edits, untouched
+            editorConflict = { serverVersion: result.serverVersion };
+            setCatalogStatus('conflict', 'Conflict');
+            showCatalogConflict(result.serverVersion);
+            renderCatalog();
+            return;
+        }
+
+        if (result.outcome === 'rejected') {
+            setCatalogStatus('error', 'Error');
+            catalogError('The server refused the catalog: ' + result.reasons.join('; '));
+            return;
+        }
+
+        setCatalogStatus('error', 'Error');
+        catalogError('Not saved — ' + result.reason + '. Your changes are still here; press Save to try again.');
+    }
+
+    function showCatalogConflict(serverVersion) {
+        var box = document.getElementById('catalog-conflict');
+        var text = document.getElementById('catalog-conflict-text');
+        if (!box || !text) return;
+        text.textContent = 'Catalog changed on the server' +
+            (serverVersion === null || serverVersion === undefined ? '' : ' (now version ' + serverVersion + ')') +
+            '. Your unsaved changes were not applied.';
+        box.classList.remove('hidden');
+    }
+
+    async function reloadCatalogFromServer() {
+        if (!editorSession) return;
+
+        if (CatalogEditor.isDirty(editorSession) && !editorConflict) {
+            if (!window.confirm('Discard your unsaved changes and reload the catalog from the server?')) return;
+        }
+
+        setCatalogStatus('saving', 'Loading…');
+        var result = await CatalogEditor.reload(
+            function () { return apiCall('GET', '/catalog'); },
+            { newId: editorNewId || undefined },
+        );
+
+        if (result.outcome !== 'reloaded') {
+            setCatalogStatus('error', 'Error');
+            catalogError('Could not reload: ' + result.reason);
+            return;
+        }
+
+        editorSession = result.session;
+        editorNewId = editorSession.newId;
+        editorConflict = null;
+        if (!CatalogEditor.nodeById(editorSession, selectedNodeId)) selectedNodeId = null;
+        var box = document.getElementById('catalog-conflict');
+        if (box) box.classList.add('hidden');
+        catalogError('');
+        setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
+        renderCatalog();
+    }
+
+    /** Keep looking at your edits without pretending they can be published as they are. */
+    function keepEditing() {
+        var box = document.getElementById('catalog-conflict');
+        if (box) box.classList.add('hidden');
+        setCatalogStatus('conflict', 'Conflict — reload before saving again');
+        refreshCatalogNotices();
+    }
+
     window.loadCatalog = loadCatalog;
+    window.reloadCatalogFromServer = reloadCatalogFromServer;
+    window.saveCatalog = saveCatalog;
+    window.keepEditing = keepEditing;
+    window.refreshAddForm = refreshAddForm;
+    window.addNode = addNode;
+    window.renameSelected = renameSelected;
+    window.toggleSelectedEnabled = toggleSelectedEnabled;
+    window.moveSelectedUp = moveSelectedUp;
+    window.moveSelectedDown = moveSelectedDown;
+    window.moveSelectedTo = moveSelectedTo;
+    window.deleteSelected = deleteSelected;
+
+    // Selecting a row: delegated, so re-rendering the tree never leaves a stale handler behind.
+    (function () {
+        var container = document.getElementById('catalog-tree');
+        if (!container) return;
+        container.addEventListener('click', function (event) {
+            var target = event.target;
+            while (target && target !== container && !target.getAttribute('data-node-id')) {
+                target = target.parentNode;
+            }
+            if (!target || target === container) return;
+            selectNode(target.getAttribute('data-node-id'));
+        });
+    })();
+
+    // A refresh with unsaved edits loses them. Say so before it happens rather than after.
+    window.addEventListener('beforeunload', function (event) {
+        if (editorSession && CatalogEditor.isDirty(editorSession)) {
+            event.preventDefault();
+            event.returnValue = '';
+            return '';
+        }
+    });
 
     // --- Dashboard lifecycle ---
     async function loadDashboard() {

@@ -858,6 +858,47 @@ class CatalogSyncServiceTest {
     }
 
     @Test
+    fun aDocumentBuiltByTheEditorInstallsAsTheSameHierarchyTheServerHolds() = runBlocking {
+        // What the dashboard editor publishes: a shelf holding a container and a direct video, and two
+        // videos inside the container - the shape a two-level catalog could not describe.
+        enqueueCatalog(
+            CatalogSnapshot(
+                schemaVersion = CATALOG_SCHEMA_VERSION,
+                catalogVersion = 1L,
+                nodes = listOf(
+                    CatalogNodeDto(
+                        id = "cat-cartoon", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+                        title = "Cartoons", position = 0,
+                    ),
+                    CatalogNodeDto(
+                        id = "i-cocomelon", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+                        title = "Cocomelon", position = 0,
+                    ),
+                    videoItem("i-cocomelon#a", "Video A", 0, "vidA").copy(parentId = "i-cocomelon"),
+                    videoItem("i-cocomelon#b", "Video B", 1, "vidB").copy(parentId = "i-cocomelon"),
+                    videoItem("i-direct", "Direct Video", 1, "vidDirect").copy(parentId = "cat-cartoon"),
+                ),
+            )
+        )
+
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        // The TV holds the same tree the server described: the shelf, its two children - a container
+        // and a direct video, in the configured order - and the container's own videos.
+        val tree = repository.getTree()
+        assertEquals(
+            listOf("i-cocomelon" to 0, "i-direct" to 1),
+            tree.filter { it.parentId == "cat-cartoon" }.sortedBy { it.position }.map { it.id to it.position },
+        )
+        assertEquals(
+            listOf("i-cocomelon#a" to 0, "i-cocomelon#b" to 1),
+            tree.filter { it.parentId == "i-cocomelon" }.sortedBy { it.position }.map { it.id to it.position },
+        )
+        assertEquals(listOf("Cartoons"), localCategoryNames())
+        assertEquals("the direct video is a card of its own", 2, localItems("cat-cartoon").size)
+    }
+
+    @Test
     fun aVersion1ResponseIsRefusedRatherThanReadAsTheNodeTree() = runBlocking {
         installLocal(2L, listOf(category("cat-cartoon", "Cartoon", 0)))
 

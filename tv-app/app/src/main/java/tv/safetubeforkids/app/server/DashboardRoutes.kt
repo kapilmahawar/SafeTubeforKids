@@ -29,6 +29,7 @@ fun Route.dashboardRoutes() {
     val assetFiles = mapOf(
         "app.js" to ContentType("application", "javascript"),
         "catalog-tree.js" to ContentType("application", "javascript"),
+        "catalog-editor.js" to ContentType("application", "javascript"),
         "style.css" to ContentType.Text.CSS,
         "favicon.svg" to ContentType("image", "svg+xml"),
     )
