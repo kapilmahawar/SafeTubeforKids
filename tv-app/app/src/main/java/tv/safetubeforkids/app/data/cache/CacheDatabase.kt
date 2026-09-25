@@ -7,6 +7,8 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import tv.safetubeforkids.app.data.catalog.CatalogMetadataDao
+import tv.safetubeforkids.app.data.catalog.CatalogNodeDao
+import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
 import tv.safetubeforkids.app.data.catalog.CatalogMetadataEntity
 import tv.safetubeforkids.app.data.catalog.CategoryDao
 import tv.safetubeforkids.app.data.catalog.CategoryEntity
@@ -16,8 +18,8 @@ import tv.safetubeforkids.app.data.events.PlayEventDao
 import tv.safetubeforkids.app.data.events.PlayEventEntity
 
 @Database(
-    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class, CategoryEntity::class, ContentItemEntity::class, CatalogMetadataEntity::class],
-    version = 7,
+    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class, CategoryEntity::class, ContentItemEntity::class, CatalogMetadataEntity::class, CatalogNodeEntity::class],
+    version = 8,
     // Schema export stays off. Turning it on makes Room's processor serialise the schema bundle,
     // and on this project that crashes a clean `kspDebugKotlin`:
     //   java.lang.AbstractMethodError: Receiver class
@@ -42,6 +44,9 @@ abstract class CacheDatabase : RoomDatabase() {
     abstract fun categoryDao(): CategoryDao
     abstract fun contentItemDao(): ContentItemDao
     abstract fun catalogMetadataDao(): CatalogMetadataDao
+
+    /** The parent's content tree: one table, one ordering rule (parent_id + position). */
+    abstract fun catalogNodeDao(): CatalogNodeDao
 
     companion object {
         @Volatile
@@ -241,6 +246,97 @@ abstract class CacheDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Version 7 -> 8: categories + content_items become one tree of catalog nodes.
+         *
+         * Purely additive to the schema - every pre-existing table is left exactly as it was, so all
+         * approved sources, cached videos, resume positions, watch history and settings survive - and
+         * the conversion preserves the parent's configured order:
+         *
+         *  - each `categories` row becomes a CATEGORY node at ROOT, keeping its sort_order as position;
+         *  - each VIDEO item becomes a VIDEO node under its category, keeping identity, title, order and
+         *    its youtube_video_id;
+         *  - each PLAYLIST item becomes a SUBCATEGORY node named as the parent named it (the card they
+         *    saw), keeping the playlist id as its import source - which is what a playlist is in the
+         *    tree: a way to bring videos in, never a child-facing tile;
+         *  - the videos already cached for that playlist become that container's children, in cache
+         *    order, each keeping its own youtube_video_id as the deduplication key.
+         *
+         * Child ids are derived (`<item id>#<video id>`) rather than invented, so running the conversion
+         * is deterministic; INSERT OR REPLACE means a pathological id cannot abort the upgrade.
+         *
+         * Creating VIDEO nodes from the approved cache grants nothing: PlaybackAuthorization still reads
+         * only `channels` and `videos`, so a migrated node is configuration, not permission.
+         */
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `catalog_nodes` (
+                        `id` TEXT NOT NULL,
+                        `parent_id` TEXT,
+                        `node_type` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `position` INTEGER NOT NULL,
+                        `enabled` INTEGER NOT NULL,
+                        `youtube_video_id` TEXT,
+                        `youtube_playlist_id` TEXT,
+                        `thumbnail_mode` TEXT NOT NULL,
+                        `thumbnail_video_id` TEXT,
+                        `thumbnail_url` TEXT,
+                        `created_at` INTEGER NOT NULL,
+                        `updated_at` INTEGER NOT NULL,
+                        PRIMARY KEY(`id`),
+                        FOREIGN KEY(`parent_id`) REFERENCES `catalog_nodes`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_catalog_nodes_parent_id_position` " +
+                        "ON `catalog_nodes` (`parent_id`, `position`)"
+                )
+
+                val nodeColumns =
+                    "(`id`,`parent_id`,`node_type`,`title`,`position`,`enabled`,`youtube_video_id`," +
+                        "`youtube_playlist_id`,`thumbnail_mode`,`thumbnail_video_id`,`thumbnail_url`," +
+                        "`created_at`,`updated_at`)"
+
+                // Categories keep their order.
+                db.execSQL(
+                    "INSERT OR REPLACE INTO `catalog_nodes` $nodeColumns " +
+                        "SELECT `id`, NULL, 'CATEGORY', `display_name`, `sort_order`, `enabled`, " +
+                        "NULL, NULL, 'AUTO', NULL, NULL, `created_at`, `updated_at` FROM `categories`"
+                )
+
+                // Direct videos keep their identity and position inside their category.
+                db.execSQL(
+                    "INSERT OR REPLACE INTO `catalog_nodes` $nodeColumns " +
+                        "SELECT `id`, `category_id`, 'VIDEO', `display_name`, `sort_order`, `enabled`, " +
+                        "`youtube_video_id`, NULL, 'AUTO', NULL, NULL, `created_at`, `updated_at` " +
+                        "FROM `content_items` WHERE `type` = 'VIDEO'"
+                )
+
+                // Playlist entries become containers holding what the playlist brought in.
+                db.execSQL(
+                    "INSERT OR REPLACE INTO `catalog_nodes` $nodeColumns " +
+                        "SELECT `id`, `category_id`, 'SUBCATEGORY', `display_name`, `sort_order`, `enabled`, " +
+                        "NULL, `youtube_playlist_id`, 'AUTO', NULL, NULL, `created_at`, `updated_at` " +
+                        "FROM `content_items` WHERE `type` = 'PLAYLIST'"
+                )
+
+                // The already-cached approved videos of that playlist, in cache order.
+                db.execSQL(
+                    "INSERT OR REPLACE INTO `catalog_nodes` $nodeColumns " +
+                        "SELECT `ci`.`id` || '#' || `v`.`videoId`, `ci`.`id`, 'VIDEO', " +
+                        "CASE WHEN `v`.`title` = '' THEN `v`.`videoId` ELSE `v`.`title` END, " +
+                        "`v`.`position`, 1, `v`.`videoId`, `ci`.`youtube_playlist_id`, 'AUTO', NULL, NULL, " +
+                        "`ci`.`created_at`, `ci`.`updated_at` " +
+                        "FROM `content_items` `ci` JOIN `videos` `v` " +
+                        "ON `v`.`playlistId` = `ci`.`youtube_playlist_id` " +
+                        "WHERE `ci`.`type` = 'PLAYLIST'"
+                )
+            }
+        }
         fun getInstance(context: Context): CacheDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -248,7 +344,7 @@ abstract class CacheDatabase : RoomDatabase() {
                     CacheDatabase::class.java,
                     "parentapproved_cache"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
                     .build()
                 INSTANCE = instance
                 instance

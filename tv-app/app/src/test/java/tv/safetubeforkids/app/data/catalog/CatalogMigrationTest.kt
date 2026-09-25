@@ -24,7 +24,7 @@ import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
 /**
- * CAT-DB-09 / CAT-DB-10: version 6 -> 7.
+ * CAT-DB-09 / CAT-DB-10: version 6 -> 7 -> 8 (the whole upgrade path a real installation takes).
  *
  * The test builds a real version-6 database on real SQLite and then opens it with Room at version 7
  * and [CacheDatabase.MIGRATION_6_7], so the migration is the only thing that can produce a working
@@ -161,7 +161,7 @@ class CatalogMigrationTest {
 
     private fun openWithRoom(): CacheDatabase {
         val opened = Room.databaseBuilder(context, CacheDatabase::class.java, dbName)
-            .addMigrations(CacheDatabase.MIGRATION_6_7)
+            .addMigrations(CacheDatabase.MIGRATION_6_7, CacheDatabase.MIGRATION_7_8)
             .allowMainThreadQueries()
             .build()
         room = opened
@@ -180,13 +180,13 @@ class CatalogMigrationTest {
     // ------------------------------------------------------------------ CAT-DB-09
 
     @Test
-    fun version6DatabaseMigratesToVersion7() {
+    fun version6DatabaseMigratesToTheCurrentVersion() {
         createVersion6Database()
 
         val db = openWithRoom()
         val writable = db.openHelper.writableDatabase
 
-        assertEquals("Room must have run MIGRATION_6_7", 7, writable.version)
+        assertEquals("Room must have run MIGRATION_6_7 and then MIGRATION_7_8", 8, writable.version)
     }
 
     @Test
@@ -403,7 +403,7 @@ class CatalogMigrationTest {
 
         // A second open is a plain version-7 open: Room re-validates the schema identity.
         val reopened = openWithRoom()
-        assertEquals(7, reopened.openHelper.writableDatabase.version)
+        assertEquals(8, reopened.openHelper.writableDatabase.version)
         assertEquals(
             "categories",
             reopened.openHelper.readableDatabase

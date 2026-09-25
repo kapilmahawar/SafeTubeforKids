@@ -57,6 +57,7 @@ class DebugReceiver : BroadcastReceiver() {
             "$PKG.DEBUG_SYNC_CATALOG" -> handleSyncCatalog()
             "$PKG.DEBUG_CATALOG_SYNC_UNAVAILABLE" -> handleCatalogSyncUnavailable(intent)
             "$PKG.DEBUG_DUMP_CATALOG_UI" -> handleDumpCatalogUi()
+            "$PKG.DEBUG_DUMP_CATALOG_NODES" -> handleDumpCatalogNodes()
             "$PKG.DEBUG_CLEAR_RESUME_POSITIONS" -> handleClearResumePositions()
 
             // --- PIN/Auth ---
@@ -352,6 +353,40 @@ class DebugReceiver : BroadcastReceiver() {
 
     // --- PIN/Auth ---
 
+
+
+    /**
+     * Dumps the parent's content tree exactly as the device has it stored: every node with its parent,
+     * type, position and visibility, in catalog order. Debug builds only.
+     *
+     * This is the evidence that a catalog migration or a sync produced the tree it claims to: the
+     * sibling order here is `position ASC, id ASC`, the same rule the TV renders with.
+     */
+    private fun handleDumpCatalogNodes() {
+        scope.launch {
+            try {
+                val nodes = ServiceLocator.database.catalogNodeDao().all()
+                val json = buildJsonArray {
+                    nodes.forEach { node ->
+                        add(buildJsonObject {
+                            put("id", node.id)
+                            put("parentId", node.parentId ?: "")
+                            put("type", node.nodeType.name)
+                            put("title", node.title)
+                            put("position", node.position)
+                            put("enabled", node.enabled)
+                            put("videoId", node.youtubeVideoId ?: "")
+                            put("playlistId", node.youtubePlaylistId ?: "")
+                            put("thumbnailMode", node.thumbnailMode.name)
+                        })
+                    }
+                }
+                logResult(json.toString())
+            } catch (e: Exception) {
+                logResult("""{"error":"${e.message}"}""")
+            }
+        }
+    }
     private fun handleGetPin() {        val pin = ServiceLocator.pinManager.getCurrentPin()
         logResult("""{"pin":"$pin"}""")
     }
