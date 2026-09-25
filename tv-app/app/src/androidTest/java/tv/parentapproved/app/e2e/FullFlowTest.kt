@@ -23,15 +23,39 @@ class FullFlowTest {
     @Before
     fun setup() {
         db = CacheDatabase.getInMemoryInstance(context)
-        ServiceLocator.initForTest(db, PinManager(), SessionManager())
+        // A PIN authenticates only if something can issue a session for it. A callback-less PinManager
+        // now fails closed (PinResult.NotConfigured) rather than reporting a success with an empty
+        // token, so the test wires the same session-issuing callback production wires in
+        // ServiceLocator.init - a real SessionManager, not a stand-in token.
+        val sessionManager = SessionManager()
+        ServiceLocator.initForTest(
+            db = db,
+            pin = PinManager(onPinValidated = { sessionManager.createSession() ?: "" }),
+            session = sessionManager,
+        )
     }
 
     @Test
     fun e2e_authThenAddSource_fullCycle() = runBlocking {
+        // The contract this flow depends on, asserted here so the flow cannot silently revert to the
+        // old expectation: the same correct PIN authenticates only when a session can be issued for it.
+        val unconfigured = PinManager()
+        val unconfiguredResult = unconfigured.validate(unconfigured.getCurrentPin())
+        assertTrue(
+            "a correct PIN with no session-issuing callback must not authenticate",
+            unconfiguredResult is PinResult.NotConfigured,
+        )
+
         // Authenticate
         val pin = ServiceLocator.pinManager.getCurrentPin()
         val result = ServiceLocator.pinManager.validate(pin)
         assertTrue(result is PinResult.Success)
+        val issuedToken = (result as PinResult.Success).token
+        assertTrue("the callback must have issued a real session", issuedToken.isNotBlank())
+        assertTrue(
+            "the issued token must be a session this SessionManager knows",
+            ServiceLocator.sessionManager.validateSession(issuedToken),
+        )
 
         // Create session
         val token = ServiceLocator.sessionManager.createSession()
