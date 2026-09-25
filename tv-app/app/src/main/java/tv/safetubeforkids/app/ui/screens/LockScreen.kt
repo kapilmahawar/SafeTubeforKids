@@ -1,7 +1,7 @@
 package tv.safetubeforkids.app.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -47,7 +46,7 @@ fun LockScreen(
     onUnlocked: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
-    val focusRequester = remember { FocusRequester() }
+    val requestButtonFocus = remember { FocusRequester() }
     var requestSent by remember { mutableStateOf(false) }
     var requestCooldown by remember { mutableStateOf(false) }
 
@@ -89,16 +88,21 @@ fun LockScreen(
 
     // Request focus
     LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+        // The only actionable control owns focus, so the remote can reach it. runCatching for the same
+        // reason the catalog cards use it: a request against a node that is not focusable yet (or is
+        // disabled, once a request has been sent) must not throw.
+        runCatching { requestButtonFocus.requestFocus() }
     }
+
+    // BACK must not leave the lock. It used to be swallowed by the root, which meant every D-pad key
+    // was swallowed with it and the child could never reach the button below. Consuming only BACK here
+    // keeps the lock exactly as strict while leaving D-pad movement to Compose's focus system.
+    BackHandler(enabled = true) { }
 
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(KidBackground)
-            .focusRequester(focusRequester)
-            .onKeyEvent { true } // Intercept all keys including Back
-            .focusable(),
+            .background(KidBackground),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -151,6 +155,7 @@ fun LockScreen(
                 },
                 enabled = !requestCooldown,
                 colors = ButtonDefaults.buttonColors(containerColor = ParentAccent),
+                modifier = Modifier.focusRequester(requestButtonFocus),
             ) {
                 Text(
                     text = if (requestSent) "Request sent!" else "Request More Time",
