@@ -8,6 +8,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -24,11 +25,13 @@ import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
 /**
- * CAT-DB-09 / CAT-DB-10: version 6 -> 7 -> 8 (the whole upgrade path a real installation takes).
+ * CAT-DB-09 / CAT-DB-10: version 6 -> 7 -> 8 -> 9 (the whole upgrade path a real installation takes).
  *
- * The test builds a real version-6 database on real SQLite and then opens it with Room at version 7
- * and [CacheDatabase.MIGRATION_6_7], so the migration is the only thing that can produce a working
- * database.
+ * The test builds a real version-6 database on real SQLite and then opens it with Room at the current
+ * version and the chained migrations, so the migrations are the only thing that can produce a working
+ * database. Version 8 -> 9 is the storage swap's last step: it drops the obsolete `categories` /
+ * `content_items` tables, so the assertions that used to describe *those* tables now describe
+ * `catalog_nodes` - and prove the removed ones are really gone.
  *
  * The version-6 DDL below is not guessed. It is the DDL Room itself generates for the seven
  * pre-existing tables - the `CREATE TABLE` / `CREATE ... INDEX` statements in Room's own
@@ -161,7 +164,11 @@ class CatalogMigrationTest {
 
     private fun openWithRoom(): CacheDatabase {
         val opened = Room.databaseBuilder(context, CacheDatabase::class.java, dbName)
-            .addMigrations(CacheDatabase.MIGRATION_6_7, CacheDatabase.MIGRATION_7_8)
+            .addMigrations(
+                CacheDatabase.MIGRATION_6_7,
+                CacheDatabase.MIGRATION_7_8,
+                CacheDatabase.MIGRATION_8_9,
+            )
             .allowMainThreadQueries()
             .build()
         room = opened
@@ -186,19 +193,25 @@ class CatalogMigrationTest {
         val db = openWithRoom()
         val writable = db.openHelper.writableDatabase
 
-        assertEquals("Room must have run MIGRATION_6_7 and then MIGRATION_7_8", 8, writable.version)
+        assertEquals(
+            "Room must have run MIGRATION_6_7, MIGRATION_7_8 and then MIGRATION_8_9",
+            9,
+            writable.version,
+        )
     }
 
     @Test
-    fun migrationCreatesTheThreeCatalogTables() {
+    fun migrationLeavesTheNodeTreeAsTheOnlyCatalogTable() {
         createVersion6Database()
         val writable = openWithRoom().openHelper.writableDatabase
 
         val tables = writable.firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'table'")
 
-        assertTrue("categories missing, tables: $tables", tables.contains("categories"))
-        assertTrue("content_items missing, tables: $tables", tables.contains("content_items"))
+        assertTrue("catalog_nodes missing, tables: $tables", tables.contains("catalog_nodes"))
         assertTrue("catalog_metadata missing, tables: $tables", tables.contains("catalog_metadata"))
+        // MIGRATION_8_9's whole job: the two tables the node tree replaced are gone.
+        assertFalse("categories should have been dropped, tables: $tables", tables.contains("categories"))
+        assertFalse("content_items should have been dropped, tables: $tables", tables.contains("content_items"))
         // and the pre-existing tables are still there
         listOf(
             "videos", "play_events", "channels", "time_limit_config",
@@ -211,19 +224,15 @@ class CatalogMigrationTest {
         createVersion6Database()
         val writable = openWithRoom().openHelper.writableDatabase
 
-        val categoryColumns = writable.tableColumns("categories")
-        assertEquals(
-            listOf("id", "display_name", "sort_order", "enabled", "created_at", "updated_at"),
-            categoryColumns,
-        )
-
-        val itemColumns = writable.tableColumns("content_items")
+        val nodeColumns = writable.tableColumns("catalog_nodes")
         assertEquals(
             listOf(
-                "id", "category_id", "type", "display_name", "sort_order",
-                "youtube_playlist_id", "youtube_video_id", "enabled", "created_at", "updated_at",
+                "id", "parent_id", "node_type", "title", "position", "enabled",
+                "youtube_video_id", "youtube_playlist_id",
+                "thumbnail_mode", "thumbnail_video_id", "thumbnail_url",
+                "created_at", "updated_at",
             ),
-            itemColumns,
+            nodeColumns,
         )
 
         val metadataColumns = writable.tableColumns("catalog_metadata")
@@ -235,33 +244,30 @@ class CatalogMigrationTest {
             metadataColumns,
         )
 
-        // varchar/int primary keys
-        val itemPk = writable.firstColumnOf(
-            "SELECT name FROM pragma_table_info('content_items') WHERE pk > 0"
+        // varchar primary key
+        val nodePk = writable.firstColumnOf(
+            "SELECT name FROM pragma_table_info('catalog_nodes') WHERE pk > 0"
         )
-        assertEquals(listOf("id"), itemPk)
+        assertEquals(listOf("id"), nodePk)
 
-        val categoryIndices = writable.firstColumnOf("SELECT name FROM pragma_index_list('categories')")
+        // The one ordering rule: the children of one parent, in position order.
+        val nodeIndices = writable.firstColumnOf("SELECT name FROM pragma_index_list('catalog_nodes')")
         assertTrue(
-            "index_categories_sort_order missing, got $categoryIndices",
-            categoryIndices.contains("index_categories_sort_order"),
-        )
-
-        val itemIndices = writable.firstColumnOf("SELECT name FROM pragma_index_list('content_items')")
-        assertTrue(
-            "index_content_items_category_id_sort_order missing, got $itemIndices",
-            itemIndices.contains("index_content_items_category_id_sort_order"),
+            "index_catalog_nodes_parent_id_position missing, got $nodeIndices",
+            nodeIndices.contains("index_catalog_nodes_parent_id_position"),
         )
         assertEquals(
-            listOf("category_id", "sort_order"),
-            writable.firstColumnOf("SELECT name FROM pragma_index_info('index_content_items_category_id_sort_order') ORDER BY seqno"),
+            listOf("parent_id", "position"),
+            writable.firstColumnOf(
+                "SELECT name FROM pragma_index_info('index_catalog_nodes_parent_id_position') ORDER BY seqno"
+            ),
         )
 
-        // The foreign key that keeps items from being orphaned.
-        writable.query("PRAGMA foreign_key_list(`content_items`)").use { c ->
-            assertTrue("content_items has no foreign key", c.moveToFirst())
-            assertEquals("categories", c.getString(c.getColumnIndexOrThrow("table")))
-            assertEquals("category_id", c.getString(c.getColumnIndexOrThrow("from")))
+        // The self-referencing foreign key that keeps a child from outliving its parent.
+        writable.query("PRAGMA foreign_key_list(`catalog_nodes`)").use { c ->
+            assertTrue("catalog_nodes has no foreign key", c.moveToFirst())
+            assertEquals("catalog_nodes", c.getString(c.getColumnIndexOrThrow("table")))
+            assertEquals("parent_id", c.getString(c.getColumnIndexOrThrow("from")))
             assertEquals("id", c.getString(c.getColumnIndexOrThrow("to")))
             assertEquals("CASCADE", c.getString(c.getColumnIndexOrThrow("on_delete")))
             assertEquals(1, c.count)
@@ -391,7 +397,7 @@ class CatalogMigrationTest {
             repo.getItems("cat-music").map { it.displayName },
         )
         repo.deleteCategory("cat-music")
-        assertEquals(0, db.contentItemDao().count())
+        assertEquals(0, repo.getCategories().sumOf { repo.getItems(it.id).size })
         assertEquals("Stories-style empty shelf is unaffected", 0, repo.getItems("cat-cartoon").size)
     }
 
@@ -401,15 +407,25 @@ class CatalogMigrationTest {
         openWithRoom().openHelper.writableDatabase.version
         room?.close()
 
-        // A second open is a plain version-7 open: Room re-validates the schema identity.
+        // A second open is a plain open at the current version: Room re-validates the schema identity.
         val reopened = openWithRoom()
-        assertEquals(8, reopened.openHelper.writableDatabase.version)
-        assertEquals(
-            "categories",
-            reopened.openHelper.readableDatabase
-                .query("SELECT name FROM sqlite_master WHERE type='table' AND name='categories'")
-                .use { c -> if (c.moveToFirst()) c.getString(0) else "MISSING" },
-        )
+        assertEquals(9, reopened.openHelper.writableDatabase.version)
+
+        // The reopen is also where a dropped table would come back if the entity list still declared
+        // it, so this is the guard that the swap is permanent rather than a one-off DROP.
+        val tables = reopened.openHelper.readableDatabase
+            .query("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            .use { c -> buildList { while (c.moveToNext()) add(c.getString(0)) } }
+        assertTrue("catalog_nodes is the catalog storage, tables: $tables", tables.contains("catalog_nodes"))
+        assertFalse("categories came back on reopen, tables: $tables", tables.contains("categories"))
+        assertFalse("content_items came back on reopen, tables: $tables", tables.contains("content_items"))
+
+        // And a reopened, migrated database is a working catalog database.
+        runBlocking {
+            val repo = CatalogRepository(reopened)
+            repo.upsertCategory(CategoryEntity("cat-reopened", "Reopened", 0))
+            assertEquals(listOf("Reopened"), repo.getCategories().map { it.displayName })
+        }
     }
 
     @Test

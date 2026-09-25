@@ -254,8 +254,11 @@ class DebugReceiver : BroadcastReceiver() {
                     put("catalogVersion", metadata?.catalogVersion ?: 0)
                     put("serverVersion", metadata?.serverVersion ?: 0)
                     put("lastSuccessfulSyncAt", metadata?.lastSuccessfulSyncAt ?: 0)
-                    put("categories", ServiceLocator.database.categoryDao().count())
-                    put("items", ServiceLocator.database.contentItemDao().count())
+                    // Both counts are derived from the node tree, which is the only catalog storage
+                    // there is: a shelf is a ROOT CATEGORY node, an entry is one of its children.
+                    val catalogCategories = ServiceLocator.catalogRepository.getCategories()
+                    put("categories", catalogCategories.size)
+                    put("items", catalogCategories.sumOf { ServiceLocator.catalogRepository.getItems(it.id).size })
                 }
                 logResult(json.toString())
             } catch (e: Exception) {
@@ -625,7 +628,7 @@ class DebugReceiver : BroadcastReceiver() {
                 // The local catalog as the TV's own Room rows hold it: the shelves in the order the
                 // parent configured them, plus the version the TV believes it is showing.
                 val catalog = ServiceLocator.catalogRepository.getCategories()
-                val catalogItems = ServiceLocator.database.contentItemDao().count()
+                val catalogItems = catalog.sumOf { ServiceLocator.catalogRepository.getItems(it.id).size }
                 val catalogMetadata = ServiceLocator.catalogRepository.getMetadata()
                 val catalogNames = catalog.joinToString("|") { it.displayName }
                 val catalogVersion = catalogMetadata?.catalogVersion ?: 0

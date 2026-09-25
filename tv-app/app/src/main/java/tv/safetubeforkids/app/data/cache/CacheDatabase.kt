@@ -10,16 +10,12 @@ import tv.safetubeforkids.app.data.catalog.CatalogMetadataDao
 import tv.safetubeforkids.app.data.catalog.CatalogNodeDao
 import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
 import tv.safetubeforkids.app.data.catalog.CatalogMetadataEntity
-import tv.safetubeforkids.app.data.catalog.CategoryDao
-import tv.safetubeforkids.app.data.catalog.CategoryEntity
-import tv.safetubeforkids.app.data.catalog.ContentItemDao
-import tv.safetubeforkids.app.data.catalog.ContentItemEntity
 import tv.safetubeforkids.app.data.events.PlayEventDao
 import tv.safetubeforkids.app.data.events.PlayEventEntity
 
 @Database(
-    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class, CategoryEntity::class, ContentItemEntity::class, CatalogMetadataEntity::class, CatalogNodeEntity::class],
-    version = 8,
+    entities = [VideoEntity::class, PlayEventEntity::class, ChannelEntity::class, TimeLimitConfigEntity::class, KioskConfigEntity::class, WhitelistEntity::class, PlaybackPositionEntity::class, CatalogMetadataEntity::class, CatalogNodeEntity::class],
+    version = 9,
     // Schema export stays off. Turning it on makes Room's processor serialise the schema bundle,
     // and on this project that crashes a clean `kspDebugKotlin`:
     //   java.lang.AbstractMethodError: Receiver class
@@ -40,9 +36,7 @@ abstract class CacheDatabase : RoomDatabase() {
     abstract fun whitelistDao(): WhitelistDao
     abstract fun playbackPositionDao(): PlaybackPositionDao
 
-    /** Local catalog (Phase 2): configuration only - see [CategoryEntity]. */
-    abstract fun categoryDao(): CategoryDao
-    abstract fun contentItemDao(): ContentItemDao
+    // The catalog itself is [catalogNodeDao]: one ordered tree, the only catalog storage there is.
     abstract fun catalogMetadataDao(): CatalogMetadataDao
 
     /** The parent's content tree: one table, one ordering rule (parent_id + position). */
@@ -337,6 +331,23 @@ abstract class CacheDatabase : RoomDatabase() {
                 )
             }
         }
+        /**
+         * Version 8 -> 9: the obsolete `categories` / `content_items` tables are dropped.
+         *
+         * [MIGRATION_7_8] already moved every category, item, ordering position, visibility flag and
+         * playlist provenance into `catalog_nodes`, so this migration is deliberately just the removal:
+         * it copies nothing and does not touch - let alone recreate - the node tree, which therefore
+         * keeps its ids, parents, positions, types, enabled flags, playlist sources, thumbnail
+         * configuration and timestamps exactly as they were.
+         *
+         * Dropping a table also drops its indices; no other table is affected.
+         */
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP TABLE IF EXISTS `content_items`")
+                db.execSQL("DROP TABLE IF EXISTS `categories`")
+            }
+        }
         fun getInstance(context: Context): CacheDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -344,7 +355,7 @@ abstract class CacheDatabase : RoomDatabase() {
                     CacheDatabase::class.java,
                     "parentapproved_cache"
                 )
-                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9)
                     .build()
                 INSTANCE = instance
                 instance

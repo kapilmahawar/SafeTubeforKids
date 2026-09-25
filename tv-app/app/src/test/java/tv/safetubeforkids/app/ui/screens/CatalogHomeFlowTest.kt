@@ -418,9 +418,36 @@ class CatalogHomeFlowTest {
         assertEquals(listOf("Shown Shelf"), uiState().shelves.map { it.title })
 
         // The disabled shelf and its item are still on disk, ready to be switched back on.
-        assertEquals(2, runBlocking { db.categoryDao().count() })
-        assertEquals(2, runBlocking { db.contentItemDao().count() })
+        // Both counts are derived from the node tree, which is all the catalog is stored in.
+        assertEquals(2, runBlocking { repository.getCategories().size })
+        assertEquals(
+            2,
+            runBlocking { repository.getCategories().sumOf { repository.getItems(it.id).size } },
+        )
         assertFalse(runBlocking { repository.getCategory("cat-a") }!!.enabled)
         assertEquals("Hidden item", runBlocking { repository.getItem("i-a") }!!.displayName)
+    }
+
+    @Test
+    fun theHomeScreenRendersFromNodesAndTheLegacyTablesStayGone() = runBlocking {
+        installCatalog(
+            1L,
+            listOf(
+                category("cat-music", "Music", 0, listOf(playlistItem("i-p", "Nursery", 0, "PLnursery"))),
+                category("cat-stories", "Stories", 1, listOf(videoItem("i-v", "Bedtime", 0, "vidbed"))),
+            ),
+        )
+
+        // Rendering reads the tree, and rendering must not recreate the removed tables.
+        assertEquals(listOf("Music", "Stories"), uiState().shelves.map { it.title })
+
+        val tables = mutableListOf<String>()
+        db.openHelper.readableDatabase
+            .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .use { c -> while (c.moveToNext()) tables.add(c.getString(0)) }
+
+        assertTrue("catalog_nodes is the catalog storage: $tables", tables.contains("catalog_nodes"))
+        assertFalse("categories must be gone: $tables", tables.contains("categories"))
+        assertFalse("content_items must be gone: $tables", tables.contains("content_items"))
     }
 }

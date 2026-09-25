@@ -1,10 +1,5 @@
 package tv.safetubeforkids.app.data.catalog
 
-import androidx.room.ColumnInfo
-import androidx.room.Entity
-import androidx.room.Index
-import androidx.room.PrimaryKey
-
 /**
  * A parent-defined shelf shown to the child ("Cartoon", "Music", "Learning", "Stories").
  *
@@ -13,18 +8,17 @@ import androidx.room.PrimaryKey
  * [displayName] is the SafeTube name the parent chose; it is intentionally unrelated to any
  * YouTube channel or playlist title.
  *
- * The index exists for the table's only access pattern: everything reads the shelves in
- * [sortOrder] order.
+ * **This is a value type, not a table.** Since W1b the only catalog storage is the `catalog_nodes`
+ * tree, where a shelf is a ROOT `CATEGORY` node: [sortOrder] is that node's `position` and
+ * [createdAt] / [updatedAt] are its timestamps, in the render order `position ASC, id ASC`. Nothing
+ * persists this class - [CatalogRepository] derives it from the tree on read and translates it back
+ * to nodes on write - and it exists so the projection and the sync payload keep their shape.
  */
-@Entity(
-    tableName = "categories",
-    indices = [Index(value = ["sort_order"])],
-)
 data class CategoryEntity(
-    @PrimaryKey val id: String,
-    @ColumnInfo(name = "display_name") val displayName: String,
-    @ColumnInfo(name = "sort_order") val sortOrder: Int,
-    @ColumnInfo(name = "enabled") val enabled: Boolean = true,
-    @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
-    @ColumnInfo(name = "updated_at") val updatedAt: Long = System.currentTimeMillis(),
+    val id: String,
+    val displayName: String,
+    val sortOrder: Int,
+    val enabled: Boolean = true,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
 )

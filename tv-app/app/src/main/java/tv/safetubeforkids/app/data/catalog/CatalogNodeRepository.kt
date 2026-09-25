@@ -40,9 +40,11 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
 
     suspend fun count(): Int = dao.count()
 
-    /** How many nodes a version-1 payload would produce, without writing anything. */
-    suspend fun planIngest(categories: List<CategoryEntity>): List<CatalogNodeEntity> =
-        buildTree(categories)
+    /** The nodes a version-1 payload would produce, without writing anything. */
+    suspend fun planIngest(
+        categories: List<CategoryEntity>,
+        items: List<ContentItemEntity>,
+    ): List<CatalogNodeEntity> = buildTree(categories, items)
 
     /**
      * Replaces the stored tree with the one [categories] describes, in one transaction: either the
@@ -50,8 +52,11 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
      *
      * Returns the number of nodes written (0 means the tree was already exactly this).
      */
-    suspend fun ingest(categories: List<CategoryEntity>): Int = db.withTransaction {
-        val desired = buildTree(categories)
+    suspend fun ingest(
+        categories: List<CategoryEntity>,
+        items: List<ContentItemEntity>,
+    ): Int = db.withTransaction {
+        val desired = buildTree(categories, items)
         val existing = dao.all().associateBy { it.id }
         val now = System.currentTimeMillis()
 
@@ -70,8 +75,10 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
                 // Unchanged in every way that matters: leave the row (and its timestamps) alone.
                 previous.sameContentAs(node) -> Unit
 
+                // Updated in place, never re-inserted: a REPLACE would delete the row first and the
+                // cascade would take the container's children with it.
                 else -> {
-                    dao.insert(node.copy(createdAt = previous.createdAt, updatedAt = now))
+                    dao.update(node.copy(createdAt = previous.createdAt, updatedAt = now))
                     written++
                 }
             }
@@ -82,6 +89,25 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
     /** Appends a node through the ordering service, which owns positions. */
     suspend fun add(node: CatalogNodeEntity): CatalogNodeEntity =
         CatalogOrderingService(db).append(node)
+
+    /**
+     * Inserts or updates one node by id, preserving identity: a new node is stamped now, an unchanged
+     * node is not rewritten at all (so it keeps its timestamps), and a changed one keeps its
+     * `created_at` **and its children** - an existing row is updated in place, never replaced.
+     */
+    suspend fun put(node: CatalogNodeEntity) {
+        val previous = dao.getById(node.id)
+        val now = System.currentTimeMillis()
+        when {
+            previous == null -> dao.insert(node.copy(createdAt = now, updatedAt = now))
+            !previous.sameContentAs(node) ->
+                dao.update(node.copy(createdAt = previous.createdAt, updatedAt = now))
+
+            else -> Unit
+        }
+    }
+
+    suspend fun deleteChildrenOf(parentId: String?) = dao.deleteChildrenOf(parentId)
 
     suspend fun move(nodeId: String, newParentId: String?, position: Int): Boolean =
         CatalogOrderingService(db).move(nodeId, newParentId, position)
@@ -114,37 +140,58 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
     }
 
     /**
-     * A category's children as the shape the projection already consumes: a container reads as the
-     * PLAYLIST item it used to be (its playlist id), a video as a VIDEO item.
+     * A category's children as the shape the projection already consumes: a video as a VIDEO item, and a
+     * container as the PLAYLIST item it used to be - its playlist id when it has an import source,
+     * otherwise its first enabled video, so a container the parent built by hand still opens something
+     * rather than presenting a card that can only fail. (W4 replaces this compatibility shape with real
+     * container navigation.)
      */
-    suspend fun items(categoryId: String): List<ContentItemEntity> =
-        dao.childrenOf(categoryId).map { node ->
-            ContentItemEntity(
-                id = node.id,
-                categoryId = categoryId,
-                type = if (node.nodeType == CatalogNodeType.VIDEO) {
-                    ContentItemType.VIDEO
-                } else {
-                    ContentItemType.PLAYLIST
-                },
-                displayName = node.title,
-                sortOrder = node.position,
-                youtubePlaylistId = node.youtubePlaylistId,
-                youtubeVideoId = node.youtubeVideoId,
-                enabled = node.enabled,
-                createdAt = node.createdAt,
-                updatedAt = node.updatedAt,
-            )
+    suspend fun items(categoryId: String): List<ContentItemEntity> {
+        val result = mutableListOf<ContentItemEntity>()
+        dao.childrenOf(categoryId).forEach { node ->
+            when (node.nodeType) {
+                CatalogNodeType.VIDEO -> result += node.asItem(categoryId)
+
+                CatalogNodeType.SUBCATEGORY -> {
+                    if (!node.youtubePlaylistId.isNullOrBlank()) {
+                        result += node.asItem(categoryId)
+                    } else {
+                        dao.childrenOf(node.id)
+                            .firstOrNull { it.nodeType == CatalogNodeType.VIDEO && it.enabled }
+                            ?.let { result += it.asItem(categoryId) }
+                    }
+                }
+
+                CatalogNodeType.CATEGORY -> Unit
+            }
         }
+        return result
+    }
+
+    private fun CatalogNodeEntity.asItem(categoryId: String) = ContentItemEntity(
+        id = id,
+        categoryId = categoryId,
+        type = if (nodeType == CatalogNodeType.VIDEO) ContentItemType.VIDEO else ContentItemType.PLAYLIST,
+        displayName = title,
+        sortOrder = position,
+        youtubePlaylistId = youtubePlaylistId,
+        youtubeVideoId = youtubeVideoId,
+        enabled = enabled,
+        createdAt = createdAt,
+        updatedAt = updatedAt,
+    )
 
     // --- version 1 -> the tree ---------------------------------------------------------------------
 
-    private suspend fun buildTree(categories: List<CategoryEntity>): List<CatalogNodeEntity> {
+    private suspend fun buildTree(
+        categories: List<CategoryEntity>,
+        contentItems: List<ContentItemEntity>,
+    ): List<CatalogNodeEntity> {
         val ordered = categories.sortedWith(compareBy({ it.sortOrder }, { it.id }))
         val nodes = mutableListOf<CatalogNodeEntity>()
 
         ordered.forEachIndexed { categoryPosition, category ->
-            val categoryNode = CatalogNodeEntity(
+            nodes += CatalogNodeEntity(
                 id = category.id,
                 parentId = null,
                 nodeType = CatalogNodeType.CATEGORY,
@@ -154,16 +201,40 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
                 createdAt = category.createdAt,
                 updatedAt = category.updatedAt,
             )
-            nodes += categoryNode
+        }
 
-            val items = db.contentItemDao().getByCategory(category.id)
-                .sortedWith(compareBy({ it.sortOrder }, { it.id }))
+        val byCategory = contentItems.groupBy { it.categoryId }
 
-            items.forEachIndexed { itemPosition, item ->
+        ordered.forEach { category ->
+            nodes += itemNodes(category.id, byCategory[category.id].orEmpty())
+        }
+
+        // An entry naming a shelf the payload does not contain still becomes a node, with that
+        // missing shelf as its parent: the self-referencing foreign key then refuses the whole
+        // replacement inside the transaction, so the previous catalog survives intact. Filtering
+        // those entries out instead would quietly drop part of a parent's configuration and report
+        // the sync as a success.
+        ordered.map { it.id }.toSet().let { known ->
+            (byCategory.keys - known).sorted().forEach { missingCategoryId ->
+                nodes += itemNodes(missingCategoryId, byCategory.getValue(missingCategoryId))
+            }
+        }
+
+        return nodes
+    }
+
+    /** The nodes one shelf's configured entries become, in the parent's order, positions 0..n-1. */
+    private suspend fun itemNodes(
+        categoryId: String,
+        items: List<ContentItemEntity>,
+    ): List<CatalogNodeEntity> {
+        val nodes = mutableListOf<CatalogNodeEntity>()
+        items.sortedWith(compareBy({ it.sortOrder }, { it.id }))
+            .forEachIndexed { itemPosition, item ->
                 when (item.type) {
                     ContentItemType.VIDEO -> nodes += CatalogNodeEntity(
                         id = item.id,
-                        parentId = category.id,
+                        parentId = categoryId,
                         nodeType = CatalogNodeType.VIDEO,
                         title = item.displayName,
                         position = itemPosition,
@@ -177,7 +248,7 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
                         // The container the parent named, carrying the playlist as its import source.
                         nodes += CatalogNodeEntity(
                             id = item.id,
-                            parentId = category.id,
+                            parentId = categoryId,
                             nodeType = CatalogNodeType.SUBCATEGORY,
                             title = item.displayName,
                             position = itemPosition,
@@ -209,7 +280,6 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
                     }
                 }
             }
-        }
         return nodes
     }
 

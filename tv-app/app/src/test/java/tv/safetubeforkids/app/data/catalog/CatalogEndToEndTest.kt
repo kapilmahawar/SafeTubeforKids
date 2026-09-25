@@ -137,6 +137,11 @@ class CatalogEndToEndTest {
 
     private fun localNames() = runBlocking { repository.getCategories().map { it.displayName } }
 
+    /** How many entries the local catalog holds - one per configured child of a shelf, from nodes. */
+    private fun localItemCount() = runBlocking {
+        repository.getCategories().sumOf { repository.getItems(it.id).size }
+    }
+
     @Test
     fun aParentPublishesOverHttpAndTheTvInstallsIt() = runBlocking {
         val store = catalogStore()
@@ -157,7 +162,7 @@ class CatalogEndToEndTest {
         assertEquals(listOf("Cartoon", "Music"), localNames())
         assertEquals(1L, repository.getMetadata()!!.catalogVersion)
         assertEquals(1L, repository.getMetadata()!!.serverVersion)
-        assertEquals(2, db.contentItemDao().count())
+        assertEquals(2, localItemCount())
     }
 
     @Test

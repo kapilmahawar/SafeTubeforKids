@@ -21,12 +21,18 @@ import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
 /**
- * The catalog DAO/entity/repository contract, against a real Room database on real SQLite (the JVM
- * suite runs Android code through Robolectric).
+ * The catalog repository contract, against a real Room database on real SQLite (the JVM suite runs
+ * Android code through Robolectric).
  *
  * These tests deliberately use a real database rather than a hand-written fake: what is under test
- * is `ORDER BY sort_order`, foreign-key cascade and the enum/column mapping - none of which a fake
- * DAO can prove.
+ * is the `position` ordering rule, the foreign-key cascade and the enum/column mapping - none of
+ * which a fake can prove.
+ *
+ * **The storage of record is `catalog_nodes`, and only `catalog_nodes`.** Everything here seeds and
+ * reads through [CatalogRepository], whose reads are derived from the node tree, so a shelf is a ROOT
+ * `CATEGORY` node and an entry is one of its children. The old `categories` / `content_items` tables
+ * and their DAOs are gone - that is why the seeding no longer says `insert` into a table, and
+ * `theLegacyCatalogTablesAreGone` proves the tables cannot come back.
  */
 @RunWith(RobolectricTestRunner::class)
 class CatalogDatabaseTest {
@@ -48,11 +54,12 @@ class CatalogDatabaseTest {
         db.close()
     }
 
-    private suspend fun category(id: String, name: String, sortOrder: Int) =
-        db.categoryDao().insert(CategoryEntity(id = id, displayName = name, sortOrder = sortOrder))
+    private suspend fun category(id: String, name: String, sortOrder: Int) {
+        repo.upsertCategory(CategoryEntity(id = id, displayName = name, sortOrder = sortOrder))
+    }
 
-    private suspend fun playlist(id: String, categoryId: String, name: String, sortOrder: Int, playlistId: String) =
-        db.contentItemDao().insert(
+    private suspend fun playlist(id: String, categoryId: String, name: String, sortOrder: Int, playlistId: String) {
+        repo.upsertItem(
             ContentItemEntity(
                 id = id,
                 categoryId = categoryId,
@@ -62,9 +69,10 @@ class CatalogDatabaseTest {
                 youtubePlaylistId = playlistId,
             )
         )
+    }
 
-    private suspend fun video(id: String, categoryId: String, name: String, sortOrder: Int, videoId: String) =
-        db.contentItemDao().insert(
+    private suspend fun video(id: String, categoryId: String, name: String, sortOrder: Int, videoId: String) {
+        repo.upsertItem(
             ContentItemEntity(
                 id = id,
                 categoryId = categoryId,
@@ -74,6 +82,37 @@ class CatalogDatabaseTest {
                 youtubeVideoId = videoId,
             )
         )
+    }
+
+    /** The shelves in configured order. A derived view of the ROOT CATEGORY nodes. */
+    private suspend fun categories(): List<CategoryEntity> = repo.getCategories()
+
+    /** One shelf's entries in configured order. A derived view of that node's children. */
+    private suspend fun itemsIn(categoryId: String): List<ContentItemEntity> = repo.getItems(categoryId)
+
+    /** Every entry of every shelf, in the flat `category_id, sort_order, id` order the old table used. */
+    private suspend fun allItems(): List<ContentItemEntity> =
+        repo.getCategories().flatMap { repo.getItems(it.id) }
+            .sortedWith(compareBy({ it.categoryId }, { it.sortOrder }, { it.id }))
+
+    /**
+     * How many entries the catalog holds. Counts each configured child of a shelf once, which is
+     * exactly the row count the removed `content_items` table used to report - a playlist is one
+     * entry, not one entry per episode it later imported.
+     */
+    private suspend fun itemCount(): Int =
+        repo.getCategories().sumOf { repo.getItems(it.id).size }
+
+    private suspend fun categoryCount(): Int = repo.getCategories().size
+
+    /** Table names as SQLite itself reports them, which is where a removed table must be absent. */
+    private fun tableNames(): List<String> {
+        val names = mutableListOf<String>()
+        db.openHelper.readableDatabase
+            .query("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .use { c -> while (c.moveToNext()) names.add(c.getString(0)) }
+        return names
+    }
 
     // ------------------------------------------------------------------ CAT-DB-01
 
@@ -85,7 +124,7 @@ class CatalogDatabaseTest {
         category("cat-music", "Music", 10)
         category("cat-stories", "Stories", 30)
 
-        val names = db.categoryDao().getAll().map { it.displayName }
+        val names = categories().map { it.displayName }
 
         assertEquals(listOf("Cartoon", "Music", "Learning", "Stories"), names)
     }
@@ -93,11 +132,11 @@ class CatalogDatabaseTest {
     @Test
     fun categorySelectorsDoNotDependOnDisplayNameOrPrimaryKeyOrder() = runBlocking {
         // Identifiers sort in exactly the opposite order to the display order, and the display
-        // names are alphabetical in the opposite order too: only sort_order can produce this.
+        // names are alphabetical in the opposite order too: only position can produce this.
         category("a-cat", "Zebras", 0)
         category("z-cat", "Apples", 1)
 
-        assertEquals(listOf("Zebras", "Apples"), db.categoryDao().getAll().map { it.displayName })
+        assertEquals(listOf("Zebras", "Apples"), categories().map { it.displayName })
     }
 
     @Test
@@ -116,14 +155,14 @@ class CatalogDatabaseTest {
     fun getCategoryByIdAndMetadataFields() = runBlocking {
         category("cat-music", "Music", 1)
 
-        val loaded = db.categoryDao().getById("cat-music")
+        val loaded = repo.getCategory("cat-music")
         assertNotNull(loaded)
         assertEquals("Music", loaded!!.displayName)
         assertEquals(1, loaded.sortOrder)
         assertTrue(loaded.enabled)
         assertTrue("createdAt should be stamped", loaded.createdAt > 0)
         assertTrue("updatedAt should be stamped", loaded.updatedAt > 0)
-        assertNull(db.categoryDao().getById("nope"))
+        assertNull(repo.getCategory("nope"))
     }
 
     // ------------------------------------------------------------------ CAT-DB-02
@@ -135,7 +174,7 @@ class CatalogDatabaseTest {
         video("i-cartoon", "cat-music", "Cartoon Song", 5, "vid-cartoon")
         video("i-music", "cat-music", "Music Song", 10, "vid-music")
 
-        val names = db.contentItemDao().getByCategory("cat-music").map { it.displayName }
+        val names = itemsIn("cat-music").map { it.displayName }
 
         assertEquals(listOf("Cartoon Song", "Music Song", "Learning Song"), names)
     }
@@ -147,10 +186,10 @@ class CatalogDatabaseTest {
         video("i-a", "cat-a", "In A", 0, "vid-a")
         video("i-b", "cat-b", "In B", 0, "vid-b")
 
-        assertEquals(listOf("In A"), db.contentItemDao().getByCategory("cat-a").map { it.displayName })
-        assertEquals(1, db.contentItemDao().countByCategory("cat-a"))
-        assertEquals(1, db.contentItemDao().countByCategory("cat-b"))
-        assertEquals(2, db.contentItemDao().count())
+        assertEquals(listOf("In A"), itemsIn("cat-a").map { it.displayName })
+        assertEquals(1, itemsIn("cat-a").size)
+        assertEquals(1, itemsIn("cat-b").size)
+        assertEquals(2, itemCount())
     }
 
     @Test
@@ -171,7 +210,7 @@ class CatalogDatabaseTest {
         category("cat-cartoon", "Cartoon", 0)
         playlist("i-peppa", "cat-cartoon", "Peppa Pig", 0, "PLpeppa123")
 
-        val stored = db.contentItemDao().getById("i-peppa")!!
+        val stored = repo.getItem("i-peppa")!!
 
         assertEquals(ContentItemType.PLAYLIST, stored.type)
         assertEquals("PLpeppa123", stored.youtubePlaylistId)
@@ -179,17 +218,21 @@ class CatalogDatabaseTest {
     }
 
     @Test
-    fun playlistTypeSurvivesTheRoundTripAsText() = runBlocking {
+    fun nodeTypeSurvivesTheRoundTripAsText() = runBlocking {
         category("cat-cartoon", "Cartoon", 0)
         playlist("i-peppa", "cat-cartoon", "Peppa Pig", 0, "PLpeppa123")
+        video("i-twinkle", "cat-cartoon", "Twinkle Twinkle", 1, "DuXwFlL8Usk")
 
-        // Read the raw column: the enum is stored by name, not by ordinal, so reordering the enum
-        // in future cannot silently reinterpret stored rows.
-        db.openHelper.readableDatabase.query("SELECT type FROM content_items WHERE id = 'i-peppa'")
-            .use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals("PLAYLIST", cursor.getString(0))
-            }
+        // Read the raw column: the node type is stored by name, not by ordinal, so reordering the
+        // enum in future cannot silently reinterpret stored rows. The expected values are written
+        // as literals for the same reason - `CatalogNodeType.SUBCATEGORY.name` would follow a rename
+        // and prove nothing.
+        val stored = mutableListOf<String>()
+        db.openHelper.readableDatabase
+            .query("SELECT node_type FROM catalog_nodes WHERE id IN ('i-peppa', 'i-twinkle') ORDER BY id")
+            .use { c -> while (c.moveToNext()) stored.add(c.getString(0)) }
+
+        assertEquals(listOf("SUBCATEGORY", "VIDEO"), stored)
     }
 
     // ------------------------------------------------------------------ CAT-DB-04
@@ -199,7 +242,7 @@ class CatalogDatabaseTest {
         category("cat-music", "Music", 0)
         video("i-twinkle", "cat-music", "Twinkle Twinkle", 2, "DuXwFlL8Usk")
 
-        val stored = db.contentItemDao().getById("i-twinkle")!!
+        val stored = repo.getItem("i-twinkle")!!
 
         assertEquals(ContentItemType.VIDEO, stored.type)
         assertEquals("DuXwFlL8Usk", stored.youtubeVideoId)
@@ -289,11 +332,11 @@ class CatalogDatabaseTest {
         )
         assertTrue(repo.upsertItem(blankName) is CatalogWriteResult.Rejected)
 
-        assertEquals("nothing should have been written", 0, db.contentItemDao().count())
+        assertEquals("nothing should have been written", 0, itemCount())
 
         assertTrue(repo.upsertCategory(CategoryEntity(id = "", displayName = "X", sortOrder = 0))
             is CatalogWriteResult.Rejected)
-        assertEquals(1, db.categoryDao().count())
+        assertEquals(1, categoryCount())
     }
 
     // ------------------------------------------------------------------ CAT-DB-06
@@ -309,7 +352,7 @@ class CatalogDatabaseTest {
             playlistId = "PLsuperFunEducationalSongs2026Official",
         )
 
-        val stored = db.contentItemDao().getById("i-nursery")!!
+        val stored = repo.getItem("i-nursery")!!
 
         assertEquals("Nursery Songs", stored.displayName)
         assertEquals("PLsuperFunEducationalSongs2026Official", stored.youtubePlaylistId)
@@ -328,14 +371,14 @@ class CatalogDatabaseTest {
         playlist("i-nursery", "cat-music", "Nursery Songs", 0, "PLnursery")
         video("i-twinkle", "cat-music", "Twinkle Twinkle", 1, "vidtwinkle")
         video("i-story", "cat-stories", "Bedtime Story", 0, "vidstory")
-        assertEquals(3, db.contentItemDao().count())
+        assertEquals(3, itemCount())
 
         repo.deleteCategory("cat-music")
 
-        assertEquals(0, db.contentItemDao().countByCategory("cat-music"))
-        assertEquals("the other category's items must survive", 1, db.contentItemDao().count())
-        assertEquals(listOf("Bedtime Story"), db.contentItemDao().getAll().map { it.displayName })
-        assertNull(db.contentItemDao().getById("i-nursery"))
+        assertEquals(0, itemsIn("cat-music").size)
+        assertEquals("the other category's items must survive", 1, itemCount())
+        assertEquals(listOf("Bedtime Story"), allItems().map { it.displayName })
+        assertNull(repo.getItem("i-nursery"))
     }
 
     @Test
@@ -346,7 +389,7 @@ class CatalogDatabaseTest {
         )
 
         try {
-            db.contentItemDao().insert(orphan)
+            repo.upsertItem(orphan)
             throw AssertionError("the foreign key should have refused an unknown category")
         } catch (expected: android.database.sqlite.SQLiteConstraintException) {
             assertTrue(
@@ -415,7 +458,7 @@ class CatalogDatabaseTest {
         video("i-twinkle", "cat-music", "Twinkle Twinkle", 2, "vidtwinkle")
         playlist("i-nursery", "cat-music", "Nursery Songs", 0, "PLnursery")
 
-        val items = db.contentItemDao().getByCategory("cat-music")
+        val items = itemsIn("cat-music")
 
         assertEquals(
             listOf("Nursery Songs", "ABC Songs", "Twinkle Twinkle", "Wheels on Bus"),
@@ -516,28 +559,28 @@ class CatalogDatabaseTest {
         assertTrue(PlaybackAuthorization.authorize(db, "approvedVid") is PlaybackApproval.Rejected)
 
         // The catalogue held no authorization data of its own to fall back on.
-        assertEquals(2, db.contentItemDao().count())
+        assertEquals(2, itemCount())
     }
 
     @Test
-    fun theItemIndexIsActuallyUsedByTheItemQuery() {
+    fun theSiblingIndexIsActuallyUsedByTheChildQuery() {
         val plan = mutableListOf<String>()
         db.openHelper.readableDatabase.query(
             "EXPLAIN QUERY PLAN " +
-                "SELECT * FROM content_items WHERE category_id = 'cat-music' " +
-                "ORDER BY sort_order ASC, id ASC"
+                "SELECT * FROM catalog_nodes WHERE parent_id = 'cat-music' " +
+                "ORDER BY position ASC, id ASC"
         ).use { c ->
             while (c.moveToNext()) plan.add(c.getString(c.getColumnIndexOrThrow("detail")))
         }
 
-        // Without the composite index the first line would be "SCAN content_items". The second line
-        // is the honest, bounded cost of the `id` tie-break: SQLite uses the index for the
-        // category_id lookup and its sort_order order, then sorts only the matching category's rows
-        // to break ties. The tie-break is not optional - without it the order of two items sharing a
-        // sort_order would be unspecified.
+        // Without the composite index the first line would be "SCAN catalog_nodes". The second line
+        // is the honest, bounded cost of the `id` tie-break: SQLite uses the index for the parent
+        // lookup and its position order, then sorts only that parent's children to break ties. The
+        // tie-break is not optional - without it the order of two children sharing a position would
+        // be unspecified.
         assertEquals(
             listOf(
-                "SEARCH TABLE content_items USING INDEX index_content_items_category_id_sort_order (category_id=?)",
+                "SEARCH TABLE catalog_nodes USING INDEX index_catalog_nodes_parent_id_position (parent_id=?)",
                 "USE TEMP B-TREE FOR RIGHT PART OF ORDER BY",
             ),
             plan,
@@ -547,19 +590,73 @@ class CatalogDatabaseTest {
     @Test
     fun catalogTablesCarryNoApprovalFlags() {
         val columns = mutableListOf<String>()
-        db.openHelper.readableDatabase.query("PRAGMA table_info(`content_items`)").use { c ->
+        db.openHelper.readableDatabase.query("PRAGMA table_info(`catalog_nodes`)").use { c ->
             while (c.moveToNext()) columns.add(c.getString(c.getColumnIndexOrThrow("name")))
         }
 
         assertEquals(
             listOf(
-                "id", "category_id", "type", "display_name", "sort_order",
-                "youtube_playlist_id", "youtube_video_id", "enabled", "created_at", "updated_at",
+                "id", "parent_id", "node_type", "title", "position", "enabled",
+                "youtube_video_id", "youtube_playlist_id",
+                "thumbnail_mode", "thumbnail_video_id", "thumbnail_url",
+                "created_at", "updated_at",
             ),
             columns,
         )
         assertFalse(columns.contains("approved"))
         assertFalse(columns.contains("playback_allowed"))
+    }
+
+    // -------------------------------------------------- the legacy tables are gone
+
+    /**
+     * The swap's acceptance condition, stated where SQLite can answer it: `catalog_nodes` is the only
+     * catalog table, and `categories` / `content_items` do not exist - not at rest, not after a write
+     * and not after a replacement.
+     *
+     * The compile-time half of this guard is the deletion of `CategoryDao` / `ContentItemDao`: any
+     * source reference to them, or to a `categoryDao()` / `contentItemDao()` accessor, is now a build
+     * error rather than a runtime surprise. The reflection check below asserts the types are really
+     * absent from the compiled artifact rather than merely unreferenced.
+     */
+    @Test
+    fun theLegacyCatalogTablesAreGone() = runBlocking {
+        assertFalse("categories must not exist in a fresh database", tableNames().contains("categories"))
+        assertFalse("content_items must not exist in a fresh database", tableNames().contains("content_items"))
+        assertTrue("catalog_nodes is the catalog storage", tableNames().contains("catalog_nodes"))
+
+        // A write through every mutation path must not recreate them either.
+        category("cat-music", "Music", 0)
+        playlist("i-nursery", "cat-music", "Nursery Songs", 0, "PLnursery")
+        video("i-twinkle", "cat-music", "Twinkle Twinkle", 1, "vidtwinkle")
+        repo.deleteItem("i-twinkle")
+        repo.replaceCatalog(
+            categories = listOf(CategoryEntity("cat-music", "Music", 0)),
+            contentItems = listOf(
+                ContentItemEntity("i-nursery", "cat-music", ContentItemType.PLAYLIST, "Nursery Songs", 0, youtubePlaylistId = "PLnursery"),
+            ),
+            metadata = CatalogMetadataEntity(catalogVersion = 1L),
+            syncedAt = 100L,
+        )
+
+        val tables = tableNames()
+        assertTrue("the catalog must still be readable through the tree", tables.contains("catalog_nodes"))
+        assertFalse("categories came back: $tables", tables.contains("categories"))
+        assertFalse("content_items came back: $tables", tables.contains("content_items"))
+        assertEquals(listOf("Music"), categories().map { it.displayName })
+        assertEquals(listOf("Nursery Songs"), itemsIn("cat-music").map { it.displayName })
+
+        listOf(
+            "tv.safetubeforkids.app.data.catalog.CategoryDao",
+            "tv.safetubeforkids.app.data.catalog.ContentItemDao",
+        ).forEach { type ->
+            try {
+                Class.forName(type)
+                throw AssertionError("$type still exists on the classpath")
+            } catch (expected: ClassNotFoundException) {
+                // expected: the legacy DAO type is not in the build at all
+            }
+        }
     }
 
     // ------------------------------------------------------------- atomic replacement
@@ -590,7 +687,7 @@ class CatalogDatabaseTest {
 
         assertEquals(CatalogWriteResult.Written, result)
         assertEquals(listOf("Cartoon", "Music"), repo.getCategories().map { it.displayName })
-        assertEquals(2, db.contentItemDao().count())
+        assertEquals(2, itemCount())
         assertNull("the replaced shelf must be gone", repo.getItem("old-item"))
         assertEquals(12L, repo.getMetadata()!!.catalogVersion)
         assertEquals(900L, repo.getMetadata()!!.lastSuccessfulSyncAt)
@@ -627,7 +724,7 @@ class CatalogDatabaseTest {
 
         assertEquals(listOf("Good Shelf"), repo.getCategories().map { it.displayName })
         assertEquals(listOf("Good Video"), repo.getItems("cat-good").map { it.displayName })
-        assertEquals("no half-applied rows", 1, db.contentItemDao().count())
+        assertEquals("no half-applied rows", 1, itemCount())
         assertEquals("the failed replacement must not claim success", 1L, repo.getMetadata()!!.catalogVersion)
         assertEquals(100L, repo.getMetadata()!!.lastSuccessfulSyncAt)
     }
@@ -663,7 +760,10 @@ class CatalogDatabaseTest {
             ContentItemEntity("i-abc", "cat-music", ContentItemType.PLAYLIST, "ABC", 1, youtubePlaylistId = "PLabc")
         )
 
-        db.categoryDao().update(CategoryEntity("cat-music", "Music Time", 0))
+        // Renaming a shelf must not take its entries with it: an existing node is updated in place,
+        // never re-inserted, because SQLite's REPLACE would delete the row first and the foreign
+        // key's ON DELETE CASCADE would then remove every child.
+        repo.upsertCategory(CategoryEntity("cat-music", "Music Time", 0))
         assertEquals("Music Time", repo.getCategory("cat-music")!!.displayName)
 
         repo.deleteItem("i-abc")
@@ -675,8 +775,8 @@ class CatalogDatabaseTest {
         repo.upsertItem(
             ContentItemEntity("i-again", "cat-music", ContentItemType.VIDEO, "Again", 0, youtubeVideoId = "v")
         )
-        assertEquals(1, db.contentItemDao().count())
+        assertEquals(1, itemCount())
         repo.deleteCategory("cat-music")
-        assertEquals(0, db.contentItemDao().count())
+        assertEquals(0, itemCount())
     }
 }

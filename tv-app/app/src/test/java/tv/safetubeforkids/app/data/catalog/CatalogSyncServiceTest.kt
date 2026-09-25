@@ -158,6 +158,16 @@ class CatalogSyncServiceTest {
         repository.getItems(categoryId)
     }
 
+    /** Every entry of every shelf. Derived from the node tree, which is the only catalog storage. */
+    private fun localAllItems(): List<ContentItemEntity> = runBlocking {
+        repository.getCategories().flatMap { repository.getItems(it.id) }
+    }
+
+    /** How many entries the local catalog holds - one per configured child of a shelf. */
+    private fun localItemCount(): Int = runBlocking {
+        repository.getCategories().sumOf { repository.getItems(it.id).size }
+    }
+
     // ------------------------------------------------------------------ SYNC-01
 
     @Test
@@ -406,7 +416,7 @@ class CatalogSyncServiceTest {
 
         assertEquals(CatalogSyncResult.Updated(6L), result)
         assertTrue(localCategoryNames().isEmpty())
-        assertEquals(0, db.contentItemDao().count())
+        assertEquals(0, localItemCount())
         assertEquals(6L, repository.getMetadata()!!.catalogVersion)
     }
 
@@ -424,7 +434,7 @@ class CatalogSyncServiceTest {
         // Make the database itself refuse one row of the incoming payload, halfway through the
         // replacement: everything before it has already been deleted inside the transaction.
         db.openHelper.writableDatabase.execSQL(
-            "CREATE TRIGGER sync_test_failure BEFORE INSERT ON categories " +
+            "CREATE TRIGGER sync_test_failure BEFORE INSERT ON catalog_nodes " +
                 "WHEN NEW.id = 'cat-boom' BEGIN SELECT RAISE(ABORT, 'simulated mid-replacement failure'); END"
         )
 
@@ -485,7 +495,11 @@ class CatalogSyncServiceTest {
         assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
 
         assertEquals(listOf("Learning", "Cartoon", "Music"), localCategoryNames())
-        assertEquals(listOf(0, 10, 20), repository.getCategories().map { it.sortOrder })
+        // The order the server configured is what the TV shows. The node tree stores that order as
+        // contiguous positions 0..n-1 rather than the server's arbitrary 0/10/20 values, because
+        // `parent_id + position` with no gaps is the only ordering mechanism the tree has - the
+        // relative order is what the parent configured, and it is preserved exactly.
+        assertEquals(listOf(0, 1, 2), repository.getCategories().map { it.sortOrder })
     }
 
     @Test
@@ -532,7 +546,7 @@ class CatalogSyncServiceTest {
         assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
 
         // Read back through the real Room query, not through the in-memory payload.
-        val rows = db.contentItemDao().getByCategory("cat-music")
+        val rows = localItems("cat-music")
         assertEquals(
             listOf("Nursery Songs", "ABC Songs", "Twinkle Twinkle", "Wheels on Bus"),
             rows.map { it.displayName },
@@ -576,7 +590,7 @@ class CatalogSyncServiceTest {
 
         assertEquals(
             listOf("Nursery Songs", "ABC Songs", "Twinkle Twinkle", "Wheels on Bus"),
-            db.contentItemDao().getByCategory("cat-music").map { it.displayName },
+            localItems("cat-music").map { it.displayName },
         )
     }
 
@@ -785,7 +799,7 @@ class CatalogSyncServiceTest {
         assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
 
         val categoryIds = repository.getCategories().map { it.id }.toSet()
-        val itemCategoryIds = db.contentItemDao().getAll().map { it.categoryId }.toSet()
+        val itemCategoryIds = localAllItems().map { it.categoryId }.toSet()
         assertEquals(2, itemCategoryIds.size)
         assertTrue(
             "every stored item must point at a stored category",

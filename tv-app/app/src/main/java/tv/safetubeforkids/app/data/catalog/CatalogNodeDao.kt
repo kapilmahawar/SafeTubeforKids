@@ -5,6 +5,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
+import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -47,6 +48,17 @@ interface CatalogNodeDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(node: CatalogNodeEntity)
 
+    /**
+     * Rewrites an existing node **in place**, returning the number of rows changed.
+     *
+     * Deliberately an `UPDATE` rather than another `INSERT OR REPLACE`: SQLite implements REPLACE by
+     * deleting the conflicting row first, and with `ON DELETE CASCADE` that delete takes the node's
+     * children with it. A rename or a reorder of a container would therefore silently wipe the
+     * episodes inside it. Nothing that already exists is ever written with [insert].
+     */
+    @Update
+    suspend fun update(node: CatalogNodeEntity): Int
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAll(nodes: List<CatalogNodeEntity>)
 
@@ -72,6 +84,8 @@ interface CatalogNodeDao {
     @Query("DELETE FROM catalog_nodes WHERE id = :id")
     suspend fun deleteById(id: String)
 
+    @Query("DELETE FROM catalog_nodes WHERE parent_id IS :parentId")
+    suspend fun deleteChildrenOf(parentId: String?)
     @Query("DELETE FROM catalog_nodes")
     suspend fun deleteAll()
 }

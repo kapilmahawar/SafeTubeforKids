@@ -26,6 +26,11 @@ import tv.safetubeforkids.app.data.catalog.ContentItemType
  * migrated installation and a freshly synced one must produce identical trees, with derived ids so a
  * re-sync cannot churn identity, and unchanged nodes left alone.
  *
+ * The payload is held **in memory**, because that is what the sync layer hands [CatalogNodeRepository]:
+ * ingestion no longer reads a stored `categories` / `content_items` table (there is none), it is given
+ * the version-1 lists. Editing those lists is how these tests play the part of a parent who reordered,
+ * renamed or removed something on the server.
+ *
  * Real Room database, real SQLite: idempotence, ordering and transactional rollback are database
  * behaviours, not in-memory ones.
  */
@@ -36,6 +41,10 @@ class CatalogNodeRepositoryIngestTest {
     private lateinit var repo: CatalogNodeRepository
 
     private val playlist = "PLcocomelon"
+
+    /** The version-1 payload the server sent: what a sync hands to `ingest`. */
+    private val categories = mutableListOf<CategoryEntity>()
+    private val items = mutableListOf<ContentItemEntity>()
 
     @Before
     fun setUp() {
@@ -50,13 +59,15 @@ class CatalogNodeRepositoryIngestTest {
         db.close()
     }
 
-    private suspend fun seedCategory(id: String, name: String, order: Int, enabled: Boolean = true) {
-        db.categoryDao().insert(
-            CategoryEntity(id = id, displayName = name, sortOrder = order, enabled = enabled)
-        )
+    /** Ingests the payload as it currently stands, the way the sync layer does. */
+    private suspend fun ingest(): Int = repo.ingest(categories.toList(), items.toList())
+
+    private fun seedCategory(id: String, name: String, order: Int, enabled: Boolean = true) {
+        categories.removeAll { it.id == id }
+        categories += CategoryEntity(id = id, displayName = name, sortOrder = order, enabled = enabled)
     }
 
-    private suspend fun seedItem(
+    private fun seedItem(
         id: String,
         categoryId: String,
         type: ContentItemType,
@@ -66,12 +77,27 @@ class CatalogNodeRepositoryIngestTest {
         videoId: String? = null,
         enabled: Boolean = true,
     ) {
-        db.contentItemDao().insert(
-            ContentItemEntity(
-                id = id, categoryId = categoryId, type = type, displayName = name, sortOrder = order,
-                youtubePlaylistId = playlistId, youtubeVideoId = videoId, enabled = enabled,
-            )
+        items.removeAll { it.id == id }
+        items += ContentItemEntity(
+            id = id, categoryId = categoryId, type = type, displayName = name, sortOrder = order,
+            youtubePlaylistId = playlistId, youtubeVideoId = videoId, enabled = enabled,
         )
+    }
+
+    /** A parent editing one entry on the server, without touching the others. */
+    private fun updateItem(item: ContentItemEntity) {
+        items.removeAll { it.id == item.id }
+        items += item
+    }
+
+    private fun deleteItem(id: String) {
+        items.removeAll { it.id == id }
+    }
+
+    /** A parent deleting a shelf on the server: the shelf and everything configured on it go. */
+    private fun deleteCategory(categoryId: String) {
+        items.removeAll { it.categoryId == categoryId }
+        categories.removeAll { it.id == categoryId }
     }
 
     /** The approved cache: videos the resolved playlist already brought in, in cache order. */
@@ -86,13 +112,11 @@ class CatalogNodeRepositoryIngestTest {
         )
     }
 
-    private suspend fun payload(): List<CategoryEntity> = db.categoryDao().getAll()
-
     // --- the tree the payload describes ----------------------------------------------------------
 
     @Test
     fun anEmptyCatalogProducesNoNodes() = runBlocking {
-        assertEquals(0, repo.ingest(emptyList()))
+        assertEquals(0, repo.ingest(emptyList(), emptyList()))
         assertEquals(0, repo.count())
     }
 
@@ -102,7 +126,7 @@ class CatalogNodeRepositoryIngestTest {
         seedCategory("c-learning", "Learning", 2)
         seedCategory("c-cartoon", "Cartoon", 0)
 
-        repo.ingest(payload())
+        ingest()
 
         assertEquals(listOf("Cartoon", "Music", "Learning"), repo.childrenOf(null).map { it.title })
         assertEquals(listOf(0, 1, 2), repo.childrenOf(null).map { it.position })
@@ -117,7 +141,7 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-halloween", "cat-cartoon", ContentItemType.VIDEO, "Halloween Special", 1, videoId = "vid-halloween")
         seedItem("i-bluey", "cat-cartoon", ContentItemType.PLAYLIST, "Bluey", 2, playlistId = "PLbluey")
 
-        repo.ingest(payload())
+        ingest()
 
         val children = repo.childrenOf("cat-cartoon")
         assertEquals(listOf("Cocomelon", "Halloween Special", "Bluey"), children.map { it.title })
@@ -135,7 +159,7 @@ class CatalogNodeRepositoryIngestTest {
         // Cache order is deliberately not alphabetical, so using it is observable.
         seedCachedVideos("vidB", "vidA", "vidC")
 
-        repo.ingest(payload())
+        ingest()
 
         val container = repo.node("i-cocomelon")!!
         assertEquals(CatalogNodeType.SUBCATEGORY, container.nodeType)
@@ -155,7 +179,7 @@ class CatalogNodeRepositoryIngestTest {
         seedCategory("cat-music", "Music", 0)
         seedItem("i-nursery", "cat-music", ContentItemType.PLAYLIST, "Nursery Songs", 0, playlistId = "PLnursery")
 
-        repo.ingest(payload())
+        ingest()
 
         assertEquals(CatalogNodeType.SUBCATEGORY, repo.node("i-nursery")!!.nodeType)
         assertEquals("PLnursery", repo.node("i-nursery")!!.youtubePlaylistId)
@@ -168,7 +192,7 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-halloween", "cat-cartoon", ContentItemType.VIDEO, "Halloween Special", 0, videoId = "vid-halloween")
         seedItem("i-hidden", "cat-cartoon", ContentItemType.VIDEO, "Hidden Episode", 1, videoId = "vid-hidden", enabled = false)
 
-        repo.ingest(payload())
+        ingest()
 
         assertEquals("vid-halloween", repo.node("i-halloween")!!.youtubeVideoId)
         assertTrue(repo.node("i-halloween")!!.enabled)
@@ -179,7 +203,7 @@ class CatalogNodeRepositoryIngestTest {
     fun disabledCategoriesSurviveTheTranslation() = runBlocking {
         seedCategory("cat-hidden", "Hidden", 0, enabled = false)
 
-        repo.ingest(payload())
+        ingest()
 
         assertEquals(false, repo.node("cat-hidden")!!.enabled)
     }
@@ -193,7 +217,7 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 2, playlistId = playlist)
         seedCachedVideos("v1", "v2")
 
-        repo.ingest(payload())
+        ingest()
 
         listOf(null, "cat-cartoon", "cat-music", "i-cocomelon").forEach { parentId ->
             val children = repo.childrenOf(parentId)
@@ -209,7 +233,7 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
         seedCachedVideos("v1", "v2")
 
-        val first = repo.ingest(payload())
+        val first = ingest()
         assertTrue("the first ingest must write the tree", first > 0)
         val before = repo.tree().associate { it.id to (it.createdAt to it.updatedAt) }
         assertEquals(
@@ -217,7 +241,7 @@ class CatalogNodeRepositoryIngestTest {
             repo.tree().map { it.id }.sorted(),
         )
 
-        val second = repo.ingest(payload())
+        val second = ingest()
 
         assertEquals("an unchanged payload must not rewrite anything", 0, second)
         assertEquals(before, repo.tree().associate { it.id to (it.createdAt to it.updatedAt) })
@@ -228,28 +252,74 @@ class CatalogNodeRepositoryIngestTest {
         seedCategory("cat-cartoon", "Cartoon", 0)
         seedItem("i-a", "cat-cartoon", ContentItemType.VIDEO, "A", 0, videoId = "vid-a")
         seedItem("i-b", "cat-cartoon", ContentItemType.VIDEO, "B", 1, videoId = "vid-b")
-        repo.ingest(payload())
+        ingest()
         val createdAt = repo.node("i-a")!!.createdAt
 
         // The parent puts B first on the server.
-        db.contentItemDao().update(
+        updateItem(
             ContentItemEntity(
                 id = "i-b", categoryId = "cat-cartoon", type = ContentItemType.VIDEO,
                 displayName = "B", sortOrder = 0, youtubeVideoId = "vid-b",
             )
         )
-        db.contentItemDao().update(
+        updateItem(
             ContentItemEntity(
                 id = "i-a", categoryId = "cat-cartoon", type = ContentItemType.VIDEO,
                 displayName = "A", sortOrder = 1, youtubeVideoId = "vid-a",
             )
         )
 
-        repo.ingest(payload())
+        ingest()
 
         assertEquals(listOf("B", "A"), repo.childrenOf("cat-cartoon").map { it.title })
         assertEquals(listOf(0, 1), repo.childrenOf("cat-cartoon").map { it.position })
         assertEquals("identity survives a reorder", createdAt, repo.node("i-a")!!.createdAt)
+    }
+
+    @Test
+    fun renamingAContainerOnTheServerKeepsTheEpisodesItImported() = runBlocking {
+        seedCategory("cat-cartoon", "Cartoon", 0)
+        seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
+        seedCachedVideos("v1", "v2")
+        ingest()
+        assertEquals(4, repo.count())
+
+        // The parent renames the container in the dashboard. The container changes; the episodes it
+        // imported must not - rewriting an existing node must never go through INSERT OR REPLACE,
+        // whose implicit delete would cascade onto every child.
+        seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "CoComelon Songs", 0, playlistId = playlist)
+        ingest()
+
+        assertEquals("CoComelon Songs", repo.node("i-cocomelon")!!.title)
+        assertEquals(
+            listOf("i-cocomelon#v1", "i-cocomelon#v2"),
+            repo.childrenOf("i-cocomelon").map { it.id },
+        )
+        assertEquals(4, repo.count())
+    }
+
+    @Test
+    fun renamingACategoryOnTheServerKeepsItsWholeSubtree() = runBlocking {
+        seedCategory("cat-cartoon", "Cartoon", 0)
+        seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
+        seedItem("i-halloween", "cat-cartoon", ContentItemType.VIDEO, "Halloween Special", 1, videoId = "vid-halloween")
+        seedCachedVideos("v1", "v2")
+        ingest()
+        assertEquals(5, repo.count())
+
+        seedCategory("cat-cartoon", "Cartoons", 0)
+        ingest()
+
+        assertEquals("Cartoons", repo.node("cat-cartoon")!!.title)
+        assertEquals(
+            listOf("i-cocomelon", "i-halloween"),
+            repo.childrenOf("cat-cartoon").map { it.id },
+        )
+        assertEquals(
+            listOf("i-cocomelon#v1", "i-cocomelon#v2"),
+            repo.childrenOf("i-cocomelon").map { it.id },
+        )
+        assertEquals(5, repo.count())
     }
 
     @Test
@@ -258,11 +328,11 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-a", "cat-cartoon", ContentItemType.VIDEO, "A", 0, videoId = "vid-a")
         seedItem("i-b", "cat-cartoon", ContentItemType.VIDEO, "B", 1, videoId = "vid-b")
         seedItem("i-gone", "cat-cartoon", ContentItemType.VIDEO, "Gone", 2, videoId = "vid-gone")
-        repo.ingest(payload())
+        ingest()
         assertEquals(4, repo.count())
 
-        db.contentItemDao().deleteById("i-gone")
-        repo.ingest(payload())
+        deleteItem("i-gone")
+        ingest()
 
         assertEquals(3, repo.count())
         assertEquals(listOf("A", "B"), repo.childrenOf("cat-cartoon").map { it.title })
@@ -273,13 +343,12 @@ class CatalogNodeRepositoryIngestTest {
         seedCategory("cat-cartoon", "Cartoon", 0)
         seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
         seedCachedVideos("v1", "v2")
-        repo.ingest(payload())
+        ingest()
         assertEquals(4, repo.count())
 
         // The category is gone on the server, so the whole subtree goes - container and episodes.
-        db.contentItemDao().deleteByCategory("cat-cartoon")
-        db.categoryDao().deleteById("cat-cartoon")
-        repo.ingest(payload())
+        deleteCategory("cat-cartoon")
+        ingest()
 
         assertEquals(0, repo.count())
     }
@@ -288,7 +357,7 @@ class CatalogNodeRepositoryIngestTest {
     fun anIngestThatFailsHalfWayLeavesThePreviousTreeIntact() = runBlocking {
         seedCategory("cat-cartoon", "Cartoon", 0)
         seedItem("i-a", "cat-cartoon", ContentItemType.VIDEO, "A", 0, videoId = "vid-a")
-        repo.ingest(payload())
+        ingest()
         val before = repo.tree().map { it.id to it.position }
 
         seedCategory("cat-new", "New", 1)
@@ -296,7 +365,7 @@ class CatalogNodeRepositoryIngestTest {
             "CREATE TRIGGER fail_ingest BEFORE INSERT ON catalog_nodes " +
                 "BEGIN SELECT RAISE(ABORT, 'forced ingest failure'); END"
         )
-        val failure = runCatching { repo.ingest(payload()) }
+        val failure = runCatching { ingest() }
         assertTrue("the forced SQLite failure must reach the caller", failure.isFailure)
         db.openHelper.writableDatabase.execSQL("DROP TRIGGER IF EXISTS fail_ingest")
 
@@ -313,7 +382,7 @@ class CatalogNodeRepositoryIngestTest {
         seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
         seedItem("i-halloween", "cat-cartoon", ContentItemType.VIDEO, "Halloween Special", 1, videoId = "vid-halloween")
 
-        repo.ingest(payload())
+        ingest()
 
         val categories = repo.categories()
         assertEquals(listOf("Cartoon", "Music"), categories.map { it.displayName })
@@ -336,7 +405,7 @@ class CatalogNodeRepositoryIngestTest {
         seedCategory("cat-cartoon", "Cartoon", 0)
         seedItem("i-a", "cat-cartoon", ContentItemType.VIDEO, "A", 0, videoId = "vid-a")
         seedItem("i-b", "cat-cartoon", ContentItemType.VIDEO, "B", 1, videoId = "vid-b")
-        repo.ingest(payload())
+        ingest()
 
         repo.add(
             CatalogNodeEntity(

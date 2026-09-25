@@ -8,6 +8,7 @@ import androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -22,7 +23,8 @@ import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
 /**
- * Version 7 -> 8: categories + content_items become one ordered tree of catalog nodes.
+ * Version 7 -> 8 -> 9: categories + content_items become one ordered tree of catalog nodes, and the
+ * two tables they were stored in are then dropped.
  *
  * The fixture is a real version-7 database built from Room's own DDL for those tables (the statements
  * in MIGRATION_6_7, which are what Room generates and validates), seeded with the shape a parent would
@@ -31,6 +33,11 @@ import tv.safetubeforkids.app.playback.PlaybackAuthorization
  *
  * Room validates every table, index and foreign key during `onUpgrade`, so opening this database also
  * proves the new table is exactly the schema Room expects and that nothing else moved.
+ *
+ * The two steps are also exercised *separately* against a raw SQLite handle
+ * ([migration8To9DropsTheReplacedTablesAndLeavesEveryNodeUntouched]): Room only ever runs the whole
+ * chain, and the acceptance condition for 8 -> 9 is specifically that it changes no node - which is
+ * only observable if the version-8 tree can be read before the drop.
  */
 @RunWith(RobolectricTestRunner::class)
 class CatalogMigration7To8Test {
@@ -38,6 +45,7 @@ class CatalogMigration7To8Test {
     private val dbName = "catalog-migration-7-8-test.db"
     private lateinit var context: Context
     private var room: CacheDatabase? = null
+    private var rawHelper: SupportSQLiteOpenHelper? = null
 
     private val approvedPlaylist = "PLcocomelon"
     private val approvedVideos = listOf("vidB", "vidA", "vidC") // deliberately not alphabetical
@@ -51,6 +59,7 @@ class CatalogMigration7To8Test {
     @After
     fun tearDown() {
         room?.close()
+        rawHelper?.close()
         context.deleteDatabase(dbName)
     }
 
@@ -195,12 +204,43 @@ class CatalogMigration7To8Test {
 
     private fun openWithRoom(): CacheDatabase {
         val opened = Room.databaseBuilder(context, CacheDatabase::class.java, dbName)
-            .addMigrations(CacheDatabase.MIGRATION_7_8)
+            .addMigrations(CacheDatabase.MIGRATION_7_8, CacheDatabase.MIGRATION_8_9)
             .allowMainThreadQueries()
             .build()
         room = opened
         return opened
     }
+
+    /** A raw handle on the version-7 file, so one migration step can be applied at a time. */
+    private fun rawDatabase(): SupportSQLiteDatabase {
+        val config = SupportSQLiteOpenHelper.Configuration.builder(context)
+            .name(dbName)
+            .callback(object : SupportSQLiteOpenHelper.Callback(7) {
+                override fun onCreate(db: SupportSQLiteDatabase) = Unit
+                override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+            })
+            .build()
+        val helper = FrameworkSQLiteOpenHelperFactory().create(config)
+        rawHelper = helper
+        return helper.writableDatabase
+    }
+
+    private fun SupportSQLiteDatabase.tableNames(): List<String> =
+        firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+
+    /**
+     * Every column of every node, as text, in a stable order. Equality of two snapshots is what "the
+     * drop changed no node" means: ids, parents, positions, types, titles, visibility, YouTube ids,
+     * playlist provenance, thumbnail configuration and both timestamps.
+     */
+    private fun SupportSQLiteDatabase.nodeSnapshot(): List<String> = firstColumnOf(
+        "SELECT `id` || '|' || COALESCE(`parent_id`, '-') || '|' || `node_type` || '|' || `title` || '|' || " +
+            "`position` || '|' || `enabled` || '|' || COALESCE(`youtube_video_id`, '-') || '|' || " +
+            "COALESCE(`youtube_playlist_id`, '-') || '|' || `thumbnail_mode` || '|' || " +
+            "COALESCE(`thumbnail_video_id`, '-') || '|' || COALESCE(`thumbnail_url`, '-') || '|' || " +
+            "`created_at` || '|' || `updated_at` " +
+            "FROM `catalog_nodes` ORDER BY `parent_id` IS NOT NULL, `parent_id`, `position`, `id`"
+    )
 
     private fun CacheDatabase.catalogNodeCount(): Int =
         openHelper.readableDatabase
@@ -212,21 +252,67 @@ class CatalogMigration7To8Test {
     // ------------------------------------------------------------------ structure
 
     @Test
-    fun version7DatabaseMigratesToVersion8() {
+    fun version7DatabaseMigratesToTheCurrentVersion() {
         createVersion7Database()
-        assertEquals(8, openWithRoom().openHelper.writableDatabase.version)
+        assertEquals(9, openWithRoom().openHelper.writableDatabase.version)
     }
 
     @Test
-    fun theMigrationIsAdditiveAndKeepsEveryPreExistingTable() {
+    fun thePreExistingTablesSurviveAndTheReplacedCatalogTablesAreDropped() {
         createVersion7Database()
         val writable = openWithRoom().openHelper.writableDatabase
 
         val tables = writable.firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'table'")
         listOf(
             "videos", "play_events", "channels", "time_limit_config", "kiosk_config", "app_whitelist",
-            "playback_positions", "categories", "content_items", "catalog_metadata", "catalog_nodes",
+            "playback_positions", "catalog_metadata", "catalog_nodes",
         ).forEach { assertTrue("$it missing, tables: $tables", tables.contains(it)) }
+
+        // The whole point of 8 -> 9: Room always migrates to the current version, so a database that
+        // opened at version 7 must come out of the chain with the replaced tables gone.
+        assertFalse("categories should not exist at version 9, tables: $tables", tables.contains("categories"))
+        assertFalse("content_items should not exist at version 9, tables: $tables", tables.contains("content_items"))
+    }
+
+    @Test
+    fun migration8To9DropsTheReplacedTablesAndLeavesEveryNodeUntouched() {
+        createVersion7Database()
+        val db = rawDatabase()
+
+        // Step 1, applied exactly as Room would: 7 -> 8 leaves both the tree and the tables it replaced.
+        CacheDatabase.MIGRATION_7_8.migrate(db)
+        db.version = 8
+
+        val version8Tables = db.tableNames()
+        listOf("categories", "content_items", "catalog_nodes", "catalog_metadata").forEach {
+            assertTrue("$it missing after 7 -> 8, tables: $version8Tables", version8Tables.contains(it))
+        }
+        val before = db.nodeSnapshot()
+        assertTrue("the 7 -> 8 conversion must have produced nodes", before.isNotEmpty())
+
+        // Step 2: the removal itself.
+        CacheDatabase.MIGRATION_8_9.migrate(db)
+        db.version = 9
+
+        val after = db.tableNames()
+        assertFalse("categories should have been dropped, tables: $after", after.contains("categories"))
+        assertFalse("content_items should have been dropped, tables: $after", after.contains("content_items"))
+        assertTrue("catalog_nodes must survive, tables: $after", after.contains("catalog_nodes"))
+        assertTrue("catalog_metadata must survive, tables: $after", after.contains("catalog_metadata"))
+
+        // Nothing was copied or rewritten: every node is byte-for-byte what 7 -> 8 produced.
+        assertEquals("8 -> 9 must not touch the tree", before, db.nodeSnapshot())
+
+        // And the dropped tables' indices went with them rather than lingering as orphans.
+        val indices = db.firstColumnOf("SELECT name FROM sqlite_master WHERE type = 'index'")
+        assertFalse(
+            "index_categories_sort_order outlived its table: $indices",
+            indices.contains("index_categories_sort_order"),
+        )
+        assertFalse(
+            "index_content_items_category_id_sort_order outlived its table: $indices",
+            indices.contains("index_content_items_category_id_sort_order"),
+        )
     }
 
     @Test
@@ -373,13 +459,13 @@ class CatalogMigration7To8Test {
     fun reOpeningTheMigratedDatabaseDoesNotMigrateAgain() {
         createVersion7Database()
         val first = openWithRoom()
-        assertEquals(8, first.openHelper.writableDatabase.version)
+        assertEquals(9, first.openHelper.writableDatabase.version)
         val nodesAfterMigration = first.catalogNodeCount()
         assertTrue("the conversion must have produced nodes", nodesAfterMigration > 0)
         room?.close()
 
         val reopened = openWithRoom()
-        assertEquals(8, reopened.openHelper.writableDatabase.version)
+        assertEquals(9, reopened.openHelper.writableDatabase.version)
         assertEquals(
             "reopening must not convert anything a second time",
             nodesAfterMigration,
