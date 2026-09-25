@@ -34,7 +34,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.timelimits.LockReason
+import tv.safetubeforkids.app.timelimits.LoopbackTimeLimitRequestSender
+import tv.safetubeforkids.app.timelimits.TimeLimitRequestState
 import tv.safetubeforkids.app.timelimits.TimeLimitStatus
+import tv.safetubeforkids.app.timelimits.toRequestState
 import tv.safetubeforkids.app.ui.theme.KidBackground
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
@@ -47,8 +50,9 @@ fun LockScreen(
 ) {
     val scope = rememberCoroutineScope()
     val requestButtonFocus = remember { FocusRequester() }
-    var requestSent by remember { mutableStateOf(false) }
-    var requestCooldown by remember { mutableStateOf(false) }
+    val requestSender = remember { LoopbackTimeLimitRequestSender() }
+    var requestState by remember { mutableStateOf(TimeLimitRequestState.IDLE) }
+    var requestInFlight by remember { mutableStateOf(false) }
 
     val lockReason = try {
         LockReason.valueOf(reason.uppercase())
@@ -136,29 +140,28 @@ fun LockScreen(
 
             Button(
                 onClick = {
-                    if (!requestCooldown) {
+                    // The server's own two-minute throttle stays authoritative; this only stops a second
+                    // tap while a request is in flight.
+                    if (!requestInFlight && requestState != TimeLimitRequestState.SENT) {
                         scope.launch {
-                            try {
-                                requestSent = true
-                                requestCooldown = true
-                                // Fire request to local server
-                                val client = java.net.URL("http://localhost:8080/time-limits/request")
-                                    .openConnection() as java.net.HttpURLConnection
-                                client.requestMethod = "POST"
-                                client.connectTimeout = 2000
-                                client.readTimeout = 2000
-                                try { client.responseCode } catch (_: Exception) { }
-                                client.disconnect()
-                            } catch (_: Exception) { }
+                            requestInFlight = true
+                            requestState = requestSender.requestMoreTime().toRequestState()
+                            requestInFlight = false
                         }
                     }
                 },
-                enabled = !requestCooldown,
+                // Disabled only once the server has actually taken the request: a failure leaves the
+                // button usable so the child can try again, and keeps focus where it was.
+                enabled = requestState != TimeLimitRequestState.SENT,
                 colors = ButtonDefaults.buttonColors(containerColor = ParentAccent),
                 modifier = Modifier.focusRequester(requestButtonFocus),
             ) {
                 Text(
-                    text = if (requestSent) "Request sent!" else "Request More Time",
+                    text = when (requestState) {
+                        TimeLimitRequestState.IDLE -> "Request More Time"
+                        TimeLimitRequestState.SENT -> "Request sent!"
+                        TimeLimitRequestState.FAILED -> "Request failed. Try again."
+                    },
                     color = KidText,
                 )
             }
