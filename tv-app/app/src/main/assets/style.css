@@ -610,3 +610,30 @@ section {
 .app-label input { accent-color: #22A559; width: 18px; height: 18px; }
 .app-name { font-weight: 500; }
 .app-pkg { color: #6B7280; font-size: 0.75em; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Catalog (read-only tree) */
+.catalog-card { background: #1F2937; border-radius: 12px; padding: 16px; }
+.catalog-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 6px; }
+.catalog-meta { color: #9CA3AF; font-size: 0.85em; }
+.catalog-hint { color: #6B7280; font-size: 0.8em; margin-bottom: 12px; }
+.catalog-tree-container { overflow-x: auto; }
+.catalog-tree, .catalog-children { list-style: none; margin: 0; padding: 0; }
+.catalog-children { margin-left: 18px; border-left: 2px solid #374151; padding-left: 10px; }
+.catalog-node { padding: 2px 0; }
+.catalog-node-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; color: #F3F4F6; font-size: 0.9em; }
+.catalog-node-row:hover { background: #374151; }
+.catalog-node-title { font-weight: 600; }
+.catalog-node-type { font-size: 0.75em; text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 6px; border-radius: 4px; background: #374151; color: #9CA3AF; }
+.catalog-type-category { background: #14532D; color: #86EFAC; }
+.catalog-type-subcategory { background: #1E3A8A; color: #BFDBFE; }
+.catalog-type-video { background: #4C1D95; color: #DDD6FE; }
+.catalog-node-position { color: #6B7280; font-size: 0.8em; }
+.catalog-node-enabled { font-size: 0.75em; padding: 2px 6px; border-radius: 4px; }
+.is-enabled { color: #86EFAC; }
+.is-disabled { color: #FCA5A5; background: #7F1D1D; }
+.catalog-node-disabled .catalog-node-title { opacity: 0.6; text-decoration: line-through; }
+.catalog-node-id { color: #6B7280; font-size: 0.75em; font-family: monospace; }
+.catalog-chip { font-size: 0.75em; color: #9CA3AF; background: #111827; border-radius: 4px; padding: 2px 6px; }
+.catalog-empty { color: #9CA3AF; font-size: 0.9em; }
+.catalog-unplaced { margin-top: 16px; }
+.catalog-unplaced h3 { color: #F59E0B; font-size: 0.9em; margin-bottom: 4px; }

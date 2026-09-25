@@ -1,8 +1,8 @@
 package tv.safetubeforkids.app.server
 
 import tv.safetubeforkids.app.data.catalog.CATALOG_SCHEMA_VERSION
-import tv.safetubeforkids.app.data.catalog.CatalogCategoryDto
 import tv.safetubeforkids.app.data.catalog.CatalogJson
+import tv.safetubeforkids.app.data.catalog.CatalogNodeDto
 import tv.safetubeforkids.app.data.catalog.CatalogSnapshot
 import tv.safetubeforkids.app.data.catalog.emptyCatalogSnapshot
 import tv.safetubeforkids.app.util.AppLogger
@@ -36,22 +36,27 @@ sealed class CatalogStoreResult {
  *
  * A file also survives what the requirement asks about: server restart, app restart and device
  * reboot, because it is in the app's private storage rather than in a singleton.
+ *
+ * **The browser is not part of this.** The dashboard reads the catalog from here; nothing about the
+ * catalog is ever written to browser storage.
  */
 interface CatalogStore {
 
-    /** The stored catalog. Never null: an unconfigured catalog is version 0 with no categories. */
+    /** The stored catalog. Never null: an unconfigured catalog is version 0 with no nodes. */
     fun read(): CatalogSnapshot
 
     /**
-     * Stores [categories] as the new catalog, assigning the next version.
+     * Stores [nodes] as the new catalog, assigning the next version.
      *
      * The payload is assumed to have been validated already - the route is the boundary and rejects
      * an invalid body with a precise 400 before calling this.
      *
      * A failed write must not invent a version: [CatalogStoreResult.VersionConflict] leaves the
-     * stored catalog and its version alone.
+     * stored catalog and its version alone, and a persistence failure throws, which the route turns
+     * into a 500 - in both cases the previously committed catalog and version are still the ones
+     * being read.
      */
-    fun write(categories: List<CatalogCategoryDto>, expectedVersion: Long? = null): CatalogStoreResult
+    fun write(nodes: List<CatalogNodeDto>, expectedVersion: Long? = null): CatalogStoreResult
 }
 
 /**
@@ -68,11 +73,13 @@ abstract class BaseCatalogStore : CatalogStore {
     final override fun read(): CatalogSnapshot = synchronized(lock) { load() }
 
     final override fun write(
-        categories: List<CatalogCategoryDto>,
+        nodes: List<CatalogNodeDto>,
         expectedVersion: Long?,
     ): CatalogStoreResult = synchronized(lock) {
         val current = load()
 
+        // Optimistic concurrency, checked before anything is built or written: a stale request must
+        // make zero catalog changes, not a change that is rolled back afterwards.
         if (expectedVersion != null && expectedVersion != current.catalogVersion) {
             return@synchronized CatalogStoreResult.VersionConflict(current.catalogVersion)
         }
@@ -87,12 +94,36 @@ abstract class BaseCatalogStore : CatalogStore {
 
         val snapshot = CatalogSnapshot(
             schemaVersion = CATALOG_SCHEMA_VERSION,
+            // The server owns this number. A client can ask for a version to match, never propose one.
             catalogVersion = base + 1,
-            categories = categories,
+            nodes = stamped(nodes),
         )
         save(snapshot)
         CatalogStoreResult.Stored(snapshot)
     }
+
+    /**
+     * The stored document is the whole catalog, version included, so the nodes keep whatever the
+     * parent's document said. The timestamps are the server's own bookkeeping, so a node that arrives
+     * without them is stamped rather than rejected - which is what makes a version-1 document, or a
+     * hand-written `curl`, produce a complete tree instead of a row of zeros.
+     */
+    private fun stamped(nodes: List<CatalogNodeDto>): List<CatalogNodeDto> {
+        val now = clock()
+        return nodes.map { node ->
+            if (node.createdAt == 0L || node.updatedAt == 0L) {
+                node.copy(
+                    createdAt = if (node.createdAt == 0L) now else node.createdAt,
+                    updatedAt = if (node.updatedAt == 0L) now else node.updatedAt,
+                )
+            } else {
+                node
+            }
+        }
+    }
+
+    /** Overridable so a test can pin the clock the way it pins everything else. */
+    protected open fun clock(): Long = System.currentTimeMillis()
 
     /**
      * A floor the next assigned version must stay above, independent of the stored document.
@@ -136,9 +167,25 @@ class FileCatalogStore(
             AppLogger.error("Catalog store unreadable: ${e.message}")
             return emptyCatalogSnapshot()
         }
-        return CatalogJson.decodeSnapshot(text) ?: run {
-            AppLogger.error("Catalog store is not a readable catalog document; treating as empty")
-            emptyCatalogSnapshot()
+        return when (val document = CatalogJson.decodeStoredDocument(text)) {
+            is CatalogJson.StoredDocument.Version2 -> document.snapshot
+
+            // The document on disk predates this build; it is still this server's committed catalog,
+            // so it is read (translated to the node tree, version kept) rather than discarded. It is
+            // written back as version 2 by the next successful publish, so nothing has to be rewritten
+            // on a read path.
+            is CatalogJson.StoredDocument.UpgradedFromVersion1 -> {
+                AppLogger.log(
+                    "Catalog store: read a version-1 document as version ${document.snapshot.catalogVersion} " +
+                        "(${document.snapshot.nodes.size} nodes); it will be stored as version 2 on the next publish"
+                )
+                document.snapshot
+            }
+
+            CatalogJson.StoredDocument.Unreadable -> {
+                AppLogger.error("Catalog store is not a readable catalog document; treating as empty")
+                emptyCatalogSnapshot()
+            }
         }
     }
 
@@ -153,7 +200,13 @@ class FileCatalogStore(
         0L
     }
 
-    /** Writes through a temporary file so a process death mid-write cannot truncate the catalog. */
+    /**
+     * Writes through a temporary file so a process death mid-write cannot truncate the catalog.
+     *
+     * A failure here propagates: the caller must not report success for a catalog that is not on
+     * disk, and the previous document - and therefore the previous version - is still what [load]
+     * reads.
+     */
     override fun save(snapshot: CatalogSnapshot) {
         file.parentFile?.mkdirs()
         val text = CatalogJson.encode(snapshot)
@@ -168,14 +221,15 @@ class FileCatalogStore(
             temp.delete()
         }
         // Mirror the counter out of the document so a later loss of the document cannot rewind it.
-        // A failure here costs only the extra protection, never correctness.
+        // A failure here costs only the extra protection, never correctness - and it happens after the
+        // document is committed, so it cannot report a stored catalog that is not there.
         try {
             versionFile.parentFile?.mkdirs()
             versionFile.writeText(snapshot.catalogVersion.toString())
         } catch (e: Exception) {
             AppLogger.warn("Catalog version counter could not be persisted: ${e.message}")
         }
-        AppLogger.log("Catalog stored: version ${snapshot.catalogVersion}, ${snapshot.categories.size} categories")
+        AppLogger.log("Catalog stored: version ${snapshot.catalogVersion}, ${snapshot.nodes.size} nodes")
     }
 
     companion object {
@@ -202,4 +256,3 @@ class InMemoryCatalogStore(initial: CatalogSnapshot = emptyCatalogSnapshot()) : 
         current = snapshot
     }
 }
-

@@ -55,8 +55,39 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
     suspend fun ingest(
         categories: List<CategoryEntity>,
         items: List<ContentItemEntity>,
-    ): Int = db.withTransaction {
-        val desired = buildTree(categories, items)
+    ): Int = db.withTransaction { applyTree(buildTree(categories, items)) }
+
+    /**
+     * Replaces the stored tree with [serverNodes] - the tree a version-2 document described - in one
+     * transaction.
+     *
+     * This is W2's authoritative write path. It writes **exactly** the nodes it is given (plus the
+     * episodes the TV has already cached for the containers those nodes import, which only the TV can
+     * know), and it writes **nothing** of the previous tree that the new one does not contain: a
+     * replacement is a replacement, which is what makes "the catalog is what the parent published"
+     * true rather than approximately true.
+     *
+     * The nodes may be listed in any order. A document describes a tree through `parentId`, so the
+     * write reorders them parent-first rather than requiring the server to serialise them that way.
+     */
+    suspend fun replaceTree(serverNodes: List<CatalogNodeEntity>): Int =
+        db.withTransaction { applyTree(materializeImports(serverNodes)) }
+
+    /**
+     * The tree as it will be stored, for callers that want to see it before it is written.
+     */
+    suspend fun planReplaceTree(serverNodes: List<CatalogNodeEntity>): List<CatalogNodeEntity> =
+        materializeImports(serverNodes)
+
+    /**
+     * The difference between the stored tree and [desired], applied. Must be called inside a
+     * transaction - both callers open one, and the deletes and inserts have to commit together.
+     *
+     * Unchanged nodes are not rewritten at all, which is what keeps their `created_at`: resume
+     * history, thumbnails and playlist provenance stay attached to the same item across syncs and
+     * across a migration. Changed nodes are updated in place and keep their `created_at`.
+     */
+    private suspend fun applyTree(desired: List<CatalogNodeEntity>): Int {
         val existing = dao.all().associateBy { it.id }
         val now = System.currentTimeMillis()
 
@@ -64,7 +95,7 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
         removed.forEach { dao.deleteById(it) }
 
         var written = 0
-        desired.forEach { node ->
+        inWriteOrder(desired).forEach { node ->
             val previous = existing[node.id]
             when {
                 previous == null -> {
@@ -83,7 +114,80 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
                 }
             }
         }
-        written
+        return written
+    }
+
+    /**
+     * Parents before their children, then the render order within each level.
+     *
+     * The inserts run behind the tree's self-referencing foreign key, so a child written before its
+     * parent is refused - and the document is allowed to list them in any order, because the tree is
+     * defined by `parentId`. The depth walk is bounded because a hand-built list could contain a
+     * cycle; a cycle is refused by the foreign key anyway, and this only has to not hang on one.
+     */
+    private fun inWriteOrder(nodes: List<CatalogNodeEntity>): List<CatalogNodeEntity> {
+        val byId = nodes.associateBy { it.id }
+
+        fun depthOf(node: CatalogNodeEntity): Int {
+            var depth = 0
+            var parentId = node.parentId
+            while (parentId != null && depth < MAX_WRITE_DEPTH) {
+                depth++
+                parentId = byId[parentId]?.parentId
+            }
+            return depth
+        }
+
+        return nodes.sortedWith(
+            compareBy({ depthOf(it) }, { it.parentId ?: "" }, { it.position }, { it.id })
+        )
+    }
+
+    /**
+     * The parent's tree, plus what a playlist import has already brought in.
+     *
+     * A `SUBCATEGORY` node that carries a `youtubePlaylistId` is an *import*: the parent configured
+     * "this playlist", and the videos it produced live in the TV's approved cache, not on the
+     * server, which is why the server's document cannot contain them. Without this the episodes
+     * would vanish from the tree the first time a TV synced a version-2 document - and with them the
+     * ordering, provenance and thumbnails that the container's children carry today.
+     *
+     * The rules, so that a document and a cache can never produce the same episode twice:
+     *  - children the document configured come first, in the document's order;
+     *  - an episode whose `youtubeVideoId` is already among them is not added again;
+     *  - the imported episodes follow, in cache order, numbered continuously from the last configured
+     *    child - so the sibling list stays canonical `0..n-1`.
+     */
+    private suspend fun materializeImports(desired: List<CatalogNodeEntity>): List<CatalogNodeEntity> {
+        val configuredChildren = desired.groupBy { it.parentId }
+        val imported = mutableListOf<CatalogNodeEntity>()
+
+        desired.filter { it.nodeType == CatalogNodeType.SUBCATEGORY }.forEach { container ->
+            val playlistId = container.youtubePlaylistId?.takeIf { it.isNotBlank() } ?: return@forEach
+            val videos = db.videoDao().getByPlaylist(playlistId)
+            if (videos.isEmpty()) return@forEach
+
+            val children = configuredChildren[container.id].orEmpty()
+            val alreadyThere = children.mapNotNull { it.youtubeVideoId }.toSet()
+
+            videos.filterNot { it.videoId in alreadyThere }
+                .forEachIndexed { index, video ->
+                    imported += CatalogNodeEntity(
+                        id = "${container.id}#${video.videoId}",
+                        parentId = container.id,
+                        nodeType = CatalogNodeType.VIDEO,
+                        title = video.title.ifBlank { video.videoId },
+                        position = children.size + index,
+                        enabled = true,
+                        youtubeVideoId = video.videoId,
+                        youtubePlaylistId = container.youtubePlaylistId,
+                        createdAt = container.createdAt,
+                        updatedAt = container.updatedAt,
+                    )
+                }
+        }
+
+        return desired + imported
     }
 
     /** Appends a node through the ordering service, which owns positions. */
@@ -284,8 +388,7 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
     }
 
     /** Everything that makes two nodes the same row, ignoring the timestamps. */
-    private fun CatalogNodeEntity.sameContentAs(other: CatalogNodeEntity): Boolean =
-        parentId == other.parentId &&
+    private fun CatalogNodeEntity.sameContentAs(other: CatalogNodeEntity): Boolean =        parentId == other.parentId &&
             nodeType == other.nodeType &&
             title == other.title &&
             position == other.position &&
@@ -295,4 +398,13 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
             thumbnailMode == other.thumbnailMode &&
             thumbnailVideoId == other.thumbnailVideoId &&
             thumbnailUrl == other.thumbnailUrl
+
+    private companion object {
+        /**
+         * How far the write-order walk follows parents before giving up. The tree's own rules bound
+         * the depth to three levels (ROOT -> CATEGORY -> SUBCATEGORY -> VIDEO); this only exists so a
+         * pathological list cannot make the walk run forever.
+         */
+        const val MAX_WRITE_DEPTH = 8
+    }
 }

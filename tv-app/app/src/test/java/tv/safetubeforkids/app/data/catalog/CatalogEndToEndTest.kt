@@ -9,6 +9,10 @@ import io.ktor.server.netty.Netty
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -88,24 +92,52 @@ class CatalogEndToEndTest {
 
     private fun catalogStore() = FileCatalogStore.inFilesDir(filesDir)
 
-    private fun category(id: String, name: String, sortOrder: Int) = CatalogCategoryDto(
-        id = id,
-        displayName = name,
-        sortOrder = sortOrder,
-        items = listOf(
-            CatalogItemDto(
-                id = "$id-item",
-                type = CATALOG_TYPE_PLAYLIST,
-                displayName = name,
-                sortOrder = 0,
-                youtubePlaylistId = "PL$id",
-            )
+    /**
+     * A shelf with one container on it, as a version-2 document holds it: a CATEGORY node at ROOT and
+     * a SUBCATEGORY node naming it as its parent.
+     */
+    private fun category(id: String, name: String, position: Int) = listOf(
+        CatalogNodeDto(
+            id = id,
+            parentId = null,
+            nodeType = CATALOG_NODE_TYPE_CATEGORY,
+            title = name,
+            position = position,
+        ),
+        CatalogNodeDto(
+            id = "$id-item",
+            parentId = id,
+            nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+            title = name,
+            position = 0,
+            youtubePlaylistId = "PL$id",
         ),
     )
 
-    private fun publish(port: Int, categories: List<CatalogCategoryDto>): Pair<Int, String> {
+    /**
+     * The shelves as one canonically numbered node list: `position` decides the order the fixtures
+     * asked for, and the numbers written to the document are `0..n-1`, which is the only numbering a
+     * version-2 tree has.
+     */
+    private fun canonical(shelves: List<List<CatalogNodeDto>>): List<CatalogNodeDto> {
+        val flat = shelves.flatten()
+        val roots = flat.filter { it.parentId == null }
+            .sortedWith(compareBy({ it.position }, { it.id }))
+            .mapIndexed { index, node -> node.copy(position = index) }
+        return roots + flat.filter { it.parentId != null }
+    }
+
+    private fun publish(
+        port: Int,
+        shelves: List<List<CatalogNodeDto>>,
+        expectedCatalogVersion: Long? = null,
+    ): Pair<Int, String> {
         val body = CatalogJson.encodePutRequest(
-            CatalogPutRequest(schemaVersion = CATALOG_SCHEMA_VERSION, categories = categories)
+            CatalogPutRequest(
+                schemaVersion = CATALOG_SCHEMA_VERSION,
+                expectedCatalogVersion = expectedCatalogVersion,
+                nodes = canonical(shelves),
+            )
         )
         val request = Request.Builder()
             .url("http://127.0.0.1:$port/catalog")
@@ -233,7 +265,7 @@ class CatalogEndToEndTest {
 
         val putRequest = Request.Builder()
             .url("http://127.0.0.1:$port/catalog")
-            .put("""{"schemaVersion":1,"categories":[]}""".toRequestBody("application/json".toMediaType()))
+            .put("""{"schemaVersion":2,"nodes":[]}""".toRequestBody("application/json".toMediaType()))
             .build()
         val putCode = http.newCall(putRequest).execute().use { it.code }
         assertEquals(401, putCode)
@@ -254,7 +286,7 @@ class CatalogEndToEndTest {
         // A server restored from an older backup offers version 1 again.
         val restored = catalogStore()
         val restoredFile = File(filesDir, FileCatalogStore.FILE_NAME)
-        val olderSnapshot = CatalogSnapshot(CATALOG_SCHEMA_VERSION, 1L, listOf(category("cartoon", "Cartoon", 0)))
+        val olderSnapshot = CatalogSnapshot(CATALOG_SCHEMA_VERSION, 1L, canonical(listOf(category("cartoon", "Cartoon", 0))))
         restoredFile.writeText(CatalogJson.encode(olderSnapshot))
         assertEquals(1L, restored.read().catalogVersion)
 
@@ -262,6 +294,45 @@ class CatalogEndToEndTest {
 
         assertTrue("expected a regression refusal, got $result", result is CatalogSyncResult.VersionRegression)
         assertEquals("the newer local catalog must survive", listOf("Cartoon Renamed", "Music"), localNames())
+        assertEquals(2L, repository.getMetadata()!!.catalogVersion)
+    }
+
+    @Test
+    fun aStaleParentSessionCannotOverwriteANewerCatalogOverHttp() = runBlocking {
+        val port = startServer(catalogStore())
+
+        // Two parent sessions both loaded version 1 and both edit from it.
+        val (firstCode, firstBody) = publish(port, listOf(category("music", "Music", 0)))
+        assertEquals(200, firstCode)
+        assertEquals(1L, CatalogJson.decodeSnapshot(firstBody)!!.catalogVersion)
+
+        val (staleCode, staleBody) = publish(
+            port,
+            listOf(category("wrong", "Written By The Stale Session", 0)),
+            expectedCatalogVersion = 0,
+        )
+
+        // The stale write is refused, and told which version to fetch so it can retry against it.
+        assertEquals(409, staleCode)
+        val staleError = Json.parseToJsonElement(staleBody).jsonObject
+        assertEquals(1L, staleError["catalogVersion"]!!.jsonPrimitive.long)
+        assertEquals("the stale write must not have touched the stored catalog", 1L, catalogStore().read().catalogVersion)
+        assertEquals(
+            listOf("Music", "Music"),
+            catalogStore().read().nodes.map { it.title },
+        )
+
+        // A write that names the version it saw is accepted, and the TV follows it.
+        val (secondCode, secondBody) = publish(
+            port,
+            listOf(category("wrong", "Actually Saved", 0)),
+            expectedCatalogVersion = 1,
+        )
+        assertEquals(200, secondCode)
+        assertEquals(2L, CatalogJson.decodeSnapshot(secondBody)!!.catalogVersion)
+
+        assertEquals(CatalogSyncResult.Updated(2L), sync(port))
+        assertEquals(listOf("Actually Saved"), localNames())
         assertEquals(2L, repository.getMetadata()!!.catalogVersion)
     }
 }

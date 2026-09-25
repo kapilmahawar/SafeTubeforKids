@@ -75,6 +75,20 @@ class DashboardRoutesTest {
     }
 
     @Test
+    fun rootRelative_catalogTreeJs_routeExists() = testApp {
+        // The read-only catalog tree is a separate script so that it can be a pure function of the
+        // catalog document - no DOM, no fetch, no storage - and therefore testable outside a browser.
+        val response = client.get("/catalog-tree.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun legacy_assetsCatalogTreeJs_routeExists() = testApp {
+        val response = client.get("/assets/catalog-tree.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
     fun legacy_assetsAppJs_routeExists() = testApp {
         val response = client.get("/assets/app.js")
         assertEquals(HttpStatusCode.NotFound, response.status)

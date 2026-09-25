@@ -28,6 +28,7 @@ fun Route.dashboardRoutes() {
     // Root-relative paths allow the same HTML to work on both local Ktor and the relay.
     val assetFiles = mapOf(
         "app.js" to ContentType("application", "javascript"),
+        "catalog-tree.js" to ContentType("application", "javascript"),
         "style.css" to ContentType.Text.CSS,
         "favicon.svg" to ContentType("image", "svg+xml"),
     )

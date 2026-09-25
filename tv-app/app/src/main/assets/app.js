@@ -776,6 +776,46 @@
         }
     };
 
+    // --- Catalog (read-only) ---
+    //
+    // The tree is fetched from the TV's own server on every load and on every refresh. Nothing about
+    // the catalog is written to localStorage or any other browser storage: the server's document is
+    // the authoritative catalog, and a browser that cached its own copy could show a parent a tree
+    // that is no longer the one the TV is showing.
+    async function loadCatalog() {
+        var container = document.getElementById('catalog-tree');
+        var meta = document.getElementById('catalog-meta');
+        var errorBox = document.getElementById('catalog-error');
+        if (!container) return;
+
+        var result = await apiCall('GET', '/catalog');
+        var catalog = result.data || {};
+
+        if (result.status !== 200 || !catalog.nodes) {
+            container.innerHTML = '';
+            if (errorBox) {
+                errorBox.textContent = 'Catalog unavailable' +
+                    (catalog.error ? ': ' + catalog.error : ' (status ' + result.status + ')');
+                errorBox.classList.remove('hidden');
+            }
+            if (meta) meta.textContent = 'Not available';
+            return;
+        }
+
+        if (errorBox) errorBox.classList.add('hidden');
+
+        var counts = CatalogTree.summary(catalog.nodes);
+        container.innerHTML = CatalogTree.render(catalog.nodes);
+        if (meta) {
+            meta.textContent = 'Version ' + catalog.catalogVersion + ' — ' + counts.total + ' nodes (' +
+                counts.categories + ' categories, ' + counts.subcategories + ' subcategories, ' +
+                counts.videos + ' videos' + (counts.disabled ? ', ' + counts.disabled + ' disabled' : '') + ')';
+        }
+    }
+
+    // Exposed for the Refresh button in index.html, like the other inline handlers on this page.
+    window.loadCatalog = loadCatalog;
+
     // --- Dashboard lifecycle ---
     async function loadDashboard() {
         await refreshToken();
@@ -787,6 +827,7 @@
         loadKioskConfig();
         checkVersion();
         loadCrashLog();
+        loadCatalog();
 
         // Set version footer from status
         try {

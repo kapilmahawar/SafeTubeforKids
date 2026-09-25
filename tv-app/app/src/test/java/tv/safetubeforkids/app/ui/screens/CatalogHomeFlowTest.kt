@@ -21,14 +21,14 @@ import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.cache.PlaybackPositionEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
-import tv.safetubeforkids.app.data.catalog.CatalogCategoryDto
-import tv.safetubeforkids.app.data.catalog.CatalogItemDto
-import tv.safetubeforkids.app.data.catalog.CatalogRepository
-import tv.safetubeforkids.app.data.catalog.CatalogWriteResult
-import tv.safetubeforkids.app.data.catalog.CATALOG_TYPE_PLAYLIST
-import tv.safetubeforkids.app.data.catalog.CATALOG_TYPE_VIDEO
+import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_CATEGORY
+import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_SUBCATEGORY
+import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_VIDEO
 import tv.safetubeforkids.app.data.catalog.CatalogMapper
 import tv.safetubeforkids.app.data.catalog.CatalogMetadataEntity
+import tv.safetubeforkids.app.data.catalog.CatalogNodeDto
+import tv.safetubeforkids.app.data.catalog.CatalogRepository
+import tv.safetubeforkids.app.data.catalog.CatalogWriteResult
 import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
 
@@ -61,38 +61,74 @@ class CatalogHomeFlowTest {
     }
 
     // ------------------------------------------------------------------ fixtures
+    //
+    // The fixtures build a version-2 document: a flat list of nodes, each naming its parent. A shelf
+    // is a CATEGORY node at ROOT, a playlist entry is a SUBCATEGORY container, and an individual video
+    // is a VIDEO node - the three shapes the tree can hold.
 
     private fun playlistItem(id: String, name: String, sortOrder: Int, playlistId: String) =
-        CatalogItemDto(
+        CatalogNodeDto(
             id = id,
-            type = CATALOG_TYPE_PLAYLIST,
-            displayName = name,
-            sortOrder = sortOrder,
+            parentId = null,
+            nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+            title = name,
+            position = sortOrder,
             youtubePlaylistId = playlistId,
         )
 
     private fun videoItem(id: String, name: String, sortOrder: Int, videoId: String) =
-        CatalogItemDto(
+        CatalogNodeDto(
             id = id,
-            type = CATALOG_TYPE_VIDEO,
-            displayName = name,
-            sortOrder = sortOrder,
+            parentId = null,
+            nodeType = CATALOG_NODE_TYPE_VIDEO,
+            title = name,
+            position = sortOrder,
             youtubeVideoId = videoId,
         )
 
-    private fun category(id: String, name: String, sortOrder: Int, items: List<CatalogItemDto>) =
-        CatalogCategoryDto(id = id, displayName = name, sortOrder = sortOrder, items = items)
+    /**
+     * A shelf and its entries. Entries are given parent links and canonical positions here, which is
+     * what the server does when it stores a document, so the fixtures stay readable at the call site.
+     */
+    private fun category(
+        id: String,
+        name: String,
+        sortOrder: Int,
+        items: List<CatalogNodeDto> = emptyList(),
+        enabled: Boolean = true,
+    ): List<CatalogNodeDto> = listOf(
+        CatalogNodeDto(
+            id = id,
+            parentId = null,
+            nodeType = CATALOG_NODE_TYPE_CATEGORY,
+            title = name,
+            position = sortOrder,
+            enabled = enabled,
+        )
+    ) + items.sortedWith(compareBy({ it.position }, { it.id }))
+        .mapIndexed { index, item -> item.copy(parentId = id, position = index) }
 
-    /** Installs a catalog the way a successful sync does, through the real replacement. */
+    /**
+     * Installs a catalog through W2's authoritative write path, the way a successful sync does:
+     * mapped nodes, one transactional replacement.
+     *
+     * Shelf positions are renumbered to the canonical `0..n-1` in the order the fixtures configured
+     * them, because that is the only numbering the tree stores - the *relative* order a test sets up
+     * is what survives.
+     */
     private fun installCatalog(
         version: Long,
-        categories: List<CatalogCategoryDto>,
+        shelves: List<List<CatalogNodeDto>>,
         syncedAt: Long = 1_000L,
     ) = runBlocking {
-        val mapped = CatalogMapper.toEntities(categories, syncedAt = syncedAt)
-        val result = repository.replaceCatalog(
-            categories = mapped.categories,
-            contentItems = mapped.items,
+        val flat = shelves.flatten()
+        val ordered = flat.filter { it.parentId == null }
+            .sortedWith(compareBy({ it.position }, { it.id }))
+            .mapIndexed { index, node -> node.copy(position = index) }
+        val nodes = ordered + flat.filter { it.parentId != null }
+
+        val result = repository.replaceTree(
+            serverNodes = CatalogMapper.toNodes(nodes, syncedAt = syncedAt),
             metadata = CatalogMetadataEntity(catalogVersion = version),
             syncedAt = syncedAt,
         )
@@ -410,7 +446,8 @@ class CatalogHomeFlowTest {
                 category(
                     "cat-a", "Hidden Shelf", 0,
                     listOf(playlistItem("i-a", "Hidden item", 0, "PL-a")),
-                ).copy(enabled = false),
+                    enabled = false,
+                ),
                 category("cat-b", "Shown Shelf", 1, listOf(playlistItem("i-b", "Visible", 0, "PL-b"))),
             ),
         )

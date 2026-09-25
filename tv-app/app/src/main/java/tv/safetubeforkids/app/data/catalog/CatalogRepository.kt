@@ -228,6 +228,39 @@ class CatalogRepository(private val db: CacheDatabase) {
         return CatalogWriteResult.Written
     }
 
+    /**
+     * Installs a **version-2 document's tree** as the local catalog: W2's authoritative write path.
+     *
+     * Same contract as [replaceCatalog] - everything is checked before any write, and the tree
+     * replacement and the metadata write run inside a single [withTransaction], so a failure leaves
+     * the previously installed catalog and its version exactly as they were.
+     *
+     * The one rule this layer enforces for itself is the position invariant: for every parent the
+     * children are numbered `0..n-1`. The wire validator already refuses a document that violates it,
+     * but the tree's single ordering rule is a property of the *storage*, so a future caller building
+     * nodes directly gets a refusal here rather than a tree that renders in an order nobody can
+     * explain.
+     */
+    suspend fun replaceTree(
+        serverNodes: List<CatalogNodeEntity>,
+        metadata: CatalogMetadataEntity,
+        syncedAt: Long = System.currentTimeMillis(),
+    ): CatalogWriteResult {
+        positionProblem(serverNodes)?.let { return CatalogWriteResult.Rejected(it) }
+
+        db.withTransaction {
+            nodes.replaceTree(serverNodes)
+            metadataDao.upsert(
+                metadata.copy(
+                    id = CatalogMetadataEntity.SINGLETON_ID,
+                    lastSuccessfulSyncAt = syncedAt,
+                    lastAttemptAt = syncedAt,
+                )
+            )
+        }
+        return CatalogWriteResult.Written
+    }
+
     // -------------------------------------------------------------- mapping
 
     private fun nodeFor(category: CategoryEntity, position: Int? = null) = CatalogNodeEntity(
@@ -310,6 +343,25 @@ class CatalogRepository(private val db: CacheDatabase) {
             if (item.id.isBlank()) return "a content item requires a non-blank id"
             if (item.categoryId.isBlank()) return "item '${item.id}' requires a non-blank categoryId"
             if (item.displayName.isBlank()) return "item '${item.id}' requires a non-blank displayName"
+        }
+        return null
+    }
+
+    /**
+     * The tree's ordering rule, checked over a whole replacement: for every parent, its children are
+     * numbered `0..n-1` with no gaps and no duplicates.
+     *
+     * A gap and a duplicate are the same defect from the reader's point of view - neither can be
+     * rendered in "the order the parent configured" - so both are refused with the positions that
+     * were found.
+     */
+    private fun positionProblem(nodes: List<CatalogNodeEntity>): String? {
+        nodes.groupBy { it.parentId }.forEach { (parentId, children) ->
+            val positions = children.map { it.position }.sorted()
+            if (positions != children.indices.toList()) {
+                val where = parentId?.let { "children of '$it'" } ?: "the shelves at ROOT"
+                return "positions under $where must be 0..${children.size - 1}, found ${positions.joinToString(",")}"
+            }
         }
         return null
     }

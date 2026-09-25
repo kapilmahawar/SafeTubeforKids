@@ -61,6 +61,11 @@ class CatalogSyncServiceTest {
     }
 
     // ------------------------------------------------------------------ fixtures
+    //
+    // The fixtures build a version-2 document: a flat list of nodes, each naming its parent. A shelf
+    // is a CATEGORY node, a playlist entry a SUBCATEGORY container and an individual video a VIDEO
+    // node. `category(...)` returns a shelf *and* its entries, so a call site still reads as one shelf
+    // with its contents.
 
     private fun playlistItem(
         id: String,
@@ -68,13 +73,14 @@ class CatalogSyncServiceTest {
         sortOrder: Int,
         playlistId: String,
         enabled: Boolean = true,
-    ) = CatalogItemDto(
+    ) = CatalogNodeDto(
         id = id,
-        type = CATALOG_TYPE_PLAYLIST,
-        displayName = name,
-        sortOrder = sortOrder,
-        youtubePlaylistId = playlistId,
+        parentId = null,
+        nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+        title = name,
+        position = sortOrder,
         enabled = enabled,
+        youtubePlaylistId = playlistId,
     )
 
     private fun videoItem(
@@ -83,25 +89,58 @@ class CatalogSyncServiceTest {
         sortOrder: Int,
         videoId: String,
         enabled: Boolean = true,
-    ) = CatalogItemDto(
+    ) = CatalogNodeDto(
         id = id,
-        type = CATALOG_TYPE_VIDEO,
-        displayName = name,
-        sortOrder = sortOrder,
-        youtubeVideoId = videoId,
+        parentId = null,
+        nodeType = CATALOG_NODE_TYPE_VIDEO,
+        title = name,
+        position = sortOrder,
         enabled = enabled,
+        youtubeVideoId = videoId,
     )
 
     private fun category(
         id: String,
         name: String,
         sortOrder: Int,
-        items: List<CatalogItemDto> = emptyList(),
+        items: List<CatalogNodeDto> = emptyList(),
         enabled: Boolean = true,
-    ) = CatalogCategoryDto(id, name, sortOrder, enabled, items)
+    ): List<CatalogNodeDto> = listOf(
+        CatalogNodeDto(
+            id = id,
+            parentId = null,
+            nodeType = CATALOG_NODE_TYPE_CATEGORY,
+            title = name,
+            position = sortOrder,
+            enabled = enabled,
+        )
+    ) + items.map { it.copy(parentId = id) }
 
-    private fun catalog(version: Long, categories: List<CatalogCategoryDto>) =
-        CatalogSnapshot(CATALOG_SCHEMA_VERSION, version, categories)
+    /**
+     * A shelf's entries, parented and numbered `0..n-1` in the order the fixture configured them.
+     *
+     * A version-2 document has to be canonically numbered, so the *numbers* a fixture passes in decide
+     * the order and are then normalised away - which is what the server does when it stores one.
+     */
+    private fun canonicalNodes(shelves: List<List<CatalogNodeDto>>): List<CatalogNodeDto> {
+        val flat = shelves.flatten()
+        val roots = flat.filter { it.parentId == null }
+            .sortedWith(compareBy({ it.position }, { it.id }))
+            .mapIndexed { index, node -> node.copy(position = index) }
+        val children = flat.filter { it.parentId != null }
+            .groupBy { it.parentId }
+            .flatMap { (parentId, nodes) ->
+                nodes.sortedWith(compareBy({ it.position }, { it.id }))
+                    .mapIndexed { index, node -> node.copy(parentId = parentId, position = index) }
+            }
+        return roots + children
+    }
+
+    private fun catalog(
+        version: Long,
+        shelves: List<List<CatalogNodeDto>>,
+        schemaVersion: Int = CATALOG_SCHEMA_VERSION,
+    ) = CatalogSnapshot(schemaVersion, version, canonicalNodes(shelves))
 
     private fun enqueueCatalog(snapshot: CatalogSnapshot, code: Int = 200) {
         server.enqueue(
@@ -137,13 +176,11 @@ class CatalogSyncServiceTest {
     /** Installs a local catalog the way a previous successful sync would have. */
     private fun installLocal(
         version: Long,
-        categories: List<CatalogCategoryDto>,
+        shelves: List<List<CatalogNodeDto>>,
         syncedAt: Long = 1_600_000_000_000L,
     ) = runBlocking {
-        val mapped = CatalogMapper.toEntities(categories, syncedAt = syncedAt)
-        val result = repository.replaceCatalog(
-            categories = mapped.categories,
-            contentItems = mapped.items,
+        val result = repository.replaceTree(
+            serverNodes = CatalogMapper.toNodes(canonicalNodes(shelves), syncedAt = syncedAt),
             metadata = CatalogMetadataEntity(catalogVersion = version),
             syncedAt = syncedAt,
         )
@@ -344,7 +381,7 @@ class CatalogSyncServiceTest {
         val problems = (result as CatalogSyncResult.InvalidCatalog).problems
         assertTrue(
             "the refusal should name the field, got $problems",
-            problems.any { it.location == "categories[1].items[0].youtubePlaylistId" },
+            problems.any { it.location == "nodes[3].youtubePlaylistId" },
         )
 
         assertEquals("no part of version 3 may appear", listOf("Cartoon", "Music"), localCategoryNames())
@@ -566,23 +603,25 @@ class CatalogSyncServiceTest {
     }
 
     @Test
-    fun itemSortOrderFromTheServerIsPreservedEvenWhenTheServerSendsItUnsorted() = runBlocking {
+    fun itemOrderFromTheServerIsWhatTheTvShowsEvenWhenTheNodesArriveOutOfOrder() = runBlocking {
+        // The nodes array is deliberately scrambled, and the positions are canonical: what decides the
+        // order the TV renders is the position the parent configured, never the order the document
+        // happened to list its nodes in.
         enqueueCatalog(
-            catalog(
-                1L,
-                listOf(
-                    category(
-                        "cat-music",
-                        "Music",
-                        0,
-                        listOf(
-                            videoItem("i-wheels", "Wheels on Bus", 30, "vidwheels"),
-                            playlistItem("i-abc", "ABC Songs", 10, "PLabc"),
-                            videoItem("i-twinkle", "Twinkle Twinkle", 20, "DuXwFlL8Usk"),
-                            playlistItem("i-nursery", "Nursery Songs", 0, "PLnursery"),
-                        ),
+            CatalogSnapshot(
+                schemaVersion = CATALOG_SCHEMA_VERSION,
+                catalogVersion = 1L,
+                nodes = listOf(
+                    CatalogNodeDto(
+                        id = "cat-music", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+                        title = "Music", position = 0,
                     ),
-                ),
+                ) + listOf(
+                    videoItem("i-wheels", "Wheels on Bus", 3, "vidwheels"),
+                    playlistItem("i-abc", "ABC Songs", 1, "PLabc"),
+                    videoItem("i-twinkle", "Twinkle Twinkle", 2, "DuXwFlL8Usk"),
+                    playlistItem("i-nursery", "Nursery Songs", 0, "PLnursery"),
+                ).map { it.copy(parentId = "cat-music") },
             )
         )
 
@@ -592,6 +631,7 @@ class CatalogSyncServiceTest {
             listOf("Nursery Songs", "ABC Songs", "Twinkle Twinkle", "Wheels on Bus"),
             localItems("cat-music").map { it.displayName },
         )
+        assertEquals(listOf(0, 1, 2, 3), localItems("cat-music").map { it.sortOrder })
     }
 
     @Test
@@ -703,12 +743,12 @@ class CatalogSyncServiceTest {
     @Test
     fun anUnsupportedSchemaVersionIsRefusedWithoutTouchingTheLocalCatalog() = runBlocking {
         installLocal(2L, listOf(category("cat-cartoon", "Cartoon", 0)))
-        enqueueCatalog(CatalogSnapshot(999, 3L, listOf(category("cat-new", "New", 0))))
+        enqueueCatalog(catalog(3L, listOf(category("cat-new", "New", 0)), schemaVersion = 999))
 
         val result = service().syncCatalog()
 
         assertEquals(
-            CatalogSyncResult.UnsupportedSchema(serverSchemaVersion = 999, supportedSchemaVersion = 1),
+            CatalogSyncResult.UnsupportedSchema(serverSchemaVersion = 999, supportedSchemaVersion = 2),
             result,
         )
         assertEquals(listOf("Cartoon"), localCategoryNames())
@@ -785,7 +825,7 @@ class CatalogSyncServiceTest {
     // ------------------------------------------------------------------ referential integrity
 
     @Test
-    fun everySyncedItemBelongsToASyncedCategory() = runBlocking {
+    fun everySyncedNodeBelongsToANodeThatWasStoredWithIt() = runBlocking {
         enqueueCatalog(
             catalog(
                 1L,
@@ -798,6 +838,16 @@ class CatalogSyncServiceTest {
 
         assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
 
+        val tree = repository.getTree()
+        val ids = tree.map { it.id }.toSet()
+        tree.filter { it.parentId != null }.forEach { node ->
+            assertTrue(
+                "'${node.id}' points at parent '${node.parentId}', which was not stored",
+                ids.contains(node.parentId),
+            )
+        }
+
+        // Referential integrity through the derived views too: every entry resolves to a stored shelf.
         val categoryIds = repository.getCategories().map { it.id }.toSet()
         val itemCategoryIds = localAllItems().map { it.categoryId }.toSet()
         assertEquals(2, itemCategoryIds.size)
@@ -805,6 +855,26 @@ class CatalogSyncServiceTest {
             "every stored item must point at a stored category",
             categoryIds.containsAll(itemCategoryIds),
         )
+    }
+
+    @Test
+    fun aVersion1ResponseIsRefusedRatherThanReadAsTheNodeTree() = runBlocking {
+        installLocal(2L, listOf(category("cat-cartoon", "Cartoon", 0)))
+
+        // A server that still speaks contract version 1: its document has no `nodes`, so it is not a
+        // version-2 catalog. Reading it as one would install a tree the parent never configured.
+        enqueueBody(
+            """
+            {"schemaVersion":1,"catalogVersion":9,"categories":[
+              {"id":"cat-new","displayName":"New","sortOrder":0,"enabled":true,"items":[]}]}
+            """.trimIndent()
+        )
+
+        val result = service().syncCatalog()
+
+        assertTrue("expected an unreadable response, got $result", result is CatalogSyncResult.InvalidResponse)
+        assertEquals(listOf("Cartoon"), localCategoryNames())
+        assertEquals(2L, repository.getMetadata()!!.catalogVersion)
     }
 
     // ------------------------------------------------------------------ §28 security boundary

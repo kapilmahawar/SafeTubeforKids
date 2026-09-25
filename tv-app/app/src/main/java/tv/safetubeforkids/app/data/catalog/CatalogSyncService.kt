@@ -10,13 +10,22 @@ import tv.safetubeforkids.app.util.AppLogger
  * The flow is fixed, and the order is the point:
  *
  * ```
- * fetch -> parse -> validate the COMPLETE payload -> compare versions -> map -> replaceCatalog (one transaction)
+ * fetch -> parse -> check the schema version -> validate the COMPLETE tree -> compare versions
+ *   -> map -> materialize playlist imports -> replace the tree (one transaction)
  * ```
  *
- * Nothing is written before the whole payload has been accepted. A single invalid item therefore
+ * Nothing is written before the whole document has been accepted. A single invalid node therefore
  * cannot half-replace the local catalog: the sync fails, and the TV keeps serving the catalog it
- * already had. The replacement itself is [CatalogRepository.replaceCatalog], Phase 2's single
- * transaction - there is no second replacement mechanism here.
+ * already had. The replacement itself is [CatalogRepository.replaceTree], W2's single transaction -
+ * there is no second replacement mechanism here.
+ *
+ * This is contract version 2, the node tree. A version-1 server is reported as
+ * [CatalogSyncResult.UnsupportedSchema] and changes nothing: the two documents describe different
+ * things, and reading one as the other would install a tree the parent never configured.
+ *
+ * A container that imports a playlist carries the playlist id, not its episodes - those live in the
+ * TV's approved cache - so the replacement materializes them locally, which is what keeps the
+ * episodes' ordering, provenance and thumbnails in the tree exactly as they were before the swap.
  *
  * Completely independent of Compose and of any UI: a caller can invoke [syncCatalog] from app
  * startup, from a background worker or from a parent's manual refresh, and the local catalog is
@@ -95,7 +104,7 @@ class CatalogSyncService(
         // "server is at N, this TV is at M" for whatever reports sync state.
         repository.markServerVersion(snapshot.catalogVersion)
 
-        val categories = when (val outcome = CatalogPayloadValidator.validate(snapshot.categories)) {
+        val nodes = when (val outcome = CatalogPayloadValidator.validate(snapshot.nodes)) {
             is CatalogPayloadValidator.Outcome.Invalid -> {
                 AppLogger.error(
                     "Catalog sync: invalid catalog - ${CatalogPayloadValidator.describe(outcome.problems)}"
@@ -103,7 +112,7 @@ class CatalogSyncService(
                 return@withLock CatalogSyncResult.InvalidCatalog(outcome.problems)
             }
 
-            is CatalogPayloadValidator.Outcome.Valid -> outcome.categories
+            is CatalogPayloadValidator.Outcome.Valid -> outcome.nodes
         }
 
         // A server that went backwards is not a reason to lose a newer local catalog. Rolling back
@@ -125,19 +134,18 @@ class CatalogSyncService(
             return@withLock CatalogSyncResult.AlreadyCurrent(localVersion)
         }
 
-        return@withLock replaceLocally(categories, snapshot.catalogVersion, attemptedAt)
+        return@withLock replaceLocally(nodes, snapshot.catalogVersion, attemptedAt)
     }
 
     private suspend fun replaceLocally(
-        categories: List<CatalogCategoryDto>,
+        nodes: List<CatalogNodeDto>,
         serverVersion: Long,
         syncedAt: Long,
     ): CatalogSyncResult = try {
-        val mapped = CatalogMapper.toEntities(categories, syncedAt = syncedAt)
+        val mapped = CatalogMapper.toNodes(nodes, syncedAt = syncedAt)
         when (
-            val written = repository.replaceCatalog(
-                categories = mapped.categories,
-                contentItems = mapped.items,
+            val written = repository.replaceTree(
+                serverNodes = mapped,
                 // The whole metadata row is replaced by this call, so the server version observed for
                 // this payload is carried across explicitly rather than dropped: right after a
                 // successful replacement the installed version and the observed server version are
@@ -151,8 +159,7 @@ class CatalogSyncService(
         ) {
             is CatalogWriteResult.Written -> {
                 AppLogger.success(
-                    "Catalog sync: installed version $serverVersion " +
-                        "(${mapped.categories.size} categories, ${mapped.items.size} items)"
+                    "Catalog sync: installed version $serverVersion (${mapped.size} nodes)"
                 )
                 CatalogSyncResult.Updated(serverVersion)
             }
