@@ -255,6 +255,17 @@
                         <p id="add-hint" class="catalog-hint"></p>
                     </div>
 
+                    <div class="catalog-add">
+                        <h3>Import a YouTube playlist</h3>
+                        <div class="catalog-add-row">
+                            <input type="text" id="import-url" placeholder="Playlist URL or id (PL…)" maxlength="300">
+                            <select id="import-parent"></select>
+                            <button type="button" id="import-btn" onclick="importPlaylistNow()">Import</button>
+                        </div>
+                        <p id="import-hint" class="catalog-hint"></p>
+                        <p id="import-status" class="catalog-import-status hidden"></p>
+                    </div>
+
                     <p id="catalog-error" class="error hidden"></p>
                 </div>
             </section>

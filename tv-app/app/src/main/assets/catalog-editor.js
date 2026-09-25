@@ -303,13 +303,20 @@ var CatalogEditor = (function () {
 
     /** A fresh id that is not already in the tree, whatever generator the caller supplied. */
     function freshId(session, type) {
+        return freshIdIn(session.nodes, session.newId, type);
+    }
+
+    function freshIdIn(nodes, newId, type) {
+        var taken = {};
+        nodes.forEach(function (node) { taken[node.id] = true; });
+
         for (var attempt = 0; attempt < 10; attempt++) {
-            var candidate = session.newId(type);
-            if (candidate && !nodeById(session, candidate)) return candidate;
+            var candidate = newId(type);
+            if (candidate && !taken[candidate]) return candidate;
         }
         // Last resort: a counter, so a pathological generator still cannot produce a duplicate.
         var n = 1;
-        while (nodeById(session, String(type).toLowerCase() + '-' + n)) n++;
+        while (taken[String(type).toLowerCase() + '-' + n]) n++;
         return String(type).toLowerCase() + '-' + n;
     }
 
@@ -512,6 +519,208 @@ var CatalogEditor = (function () {
         return copy;
     }
 
+    // --- importing a YouTube playlist ----------------------------------------------------------
+    //
+    // A playlist is a way videos *arrive*, never a tile of its own. Nothing here creates a node for
+    // the playlist: what is created is one ordinary VIDEO node per distinct video the playlist listed,
+    // under the parent the parent chose - so the child-facing catalog has videos, and there is no
+    // PLAYLIST node type to create in the first place.
+    //
+    // The identity of a video is its youtubeVideoId and nothing else: not its title, not its
+    // thumbnail, not its position, not where it was found. A video that is already under the target
+    // parent is the same node it was - same id, same position, same enabled state, same metadata - and
+    // an import never reorders, never resurrects and never duplicates.
+
+    /**
+     * Applies a resolved playlist to a working copy.
+     *
+     * Returns `{ ok, session, summary }`, where the summary counts what happened: `added` (new
+     * videos, appended in playlist order), `kept` (videos already under the target parent),
+     * `sourcesRecorded` (existing videos that had no source and now name this playlist), `hidden`
+     * (videos this playlist used to bring in and no longer lists - disabled, never deleted),
+     * `keptOtherSource` (videos another playlist already accounts for, whose source is left alone),
+     * and `skipped` (items the playlist listed that cannot become a video node).
+     */
+    function importPlaylist(session, input) {
+        var settings = input || {};
+        var parentId = settings.parentId || null;
+        var playlistId = typeof settings.playlistId === 'string' ? settings.playlistId.trim() : '';
+        if (!playlistId) return refuse('the playlist has no id');
+
+        var parent = parentId ? nodeById(session, parentId) : null;
+        if (!parent) return refuse('choose a shelf or subcategory to import into');
+        if (childTypesOf(parent.nodeType).indexOf(VIDEO) === -1) {
+            return refuse('a ' + parent.nodeType.toLowerCase() + ' cannot hold videos');
+        }
+
+        // Playlist order, with the same video listed twice counting once.
+        var incoming = [];
+        var incomingIds = {};
+        var skipped = 0;
+        (settings.videos || []).forEach(function (video) {
+            var videoId = video && typeof video.videoId === 'string' ? video.videoId.trim() : '';
+            if (!videoId) { skipped++; return; }
+            if (incomingIds[videoId]) return;
+            incomingIds[videoId] = true;
+            incoming.push({
+                videoId: videoId,
+                title: (video.title && String(video.title).trim()) || videoId,
+            });
+        });
+
+        var children = childrenOf(session, parentId);
+        var existingByVideoId = {};
+        children.forEach(function (node) {
+            if (node.nodeType === VIDEO && node.youtubeVideoId) existingByVideoId[node.youtubeVideoId] = node;
+        });
+
+        var nodes = session.nodes.slice();
+        var added = [];
+        var kept = [];
+        var sourcesRecorded = [];
+        var keptOtherSource = [];
+        var position = children.length;
+
+        incoming.forEach(function (video) {
+            var existing = existingByVideoId[video.videoId];
+
+            if (existing) {
+                kept.push(existing.id);
+                if (!existing.youtubePlaylistId) {
+                    // Provenance was missing, so this import supplies it. Nothing else is touched.
+                    nodes = nodes.map(function (node) {
+                        return node.id === existing.id ? copyWith(node, { youtubePlaylistId: playlistId }) : node;
+                    });
+                    sourcesRecorded.push(existing.id);
+                } else if (existing.youtubePlaylistId !== playlistId) {
+                    // The model records one source per node. An existing source is never overwritten:
+                    // losing it would lose the only record of where that video came from.
+                    keptOtherSource.push(existing.id);
+                }
+                return;
+            }
+
+            var created = baseNode(freshIdIn(nodes, session.newId, VIDEO), parentId, VIDEO, video.title, position++);
+            created.youtubeVideoId = video.videoId;
+            created.youtubePlaylistId = playlistId;
+            nodes.push(created);
+            added.push(created.id);
+        });
+
+        // Source removal is a *hide*, not a delete: a video this playlist no longer lists stops being
+        // shown and keeps its node, its position, its history and its resume point, so it can come back.
+        // Only nodes that name this playlist as their source are considered - a video the parent
+        // curated by hand, or that another playlist accounts for, is not this playlist's to hide.
+        var hidden = [];
+        nodes = nodes.map(function (node) {
+            if (node.parentId !== parentId) return node;
+            if (node.nodeType !== VIDEO) return node;
+            if (node.youtubePlaylistId !== playlistId) return node;
+            if (node.youtubeVideoId && incomingIds[node.youtubeVideoId]) return node;
+            if (node.enabled === false) return node;
+            hidden.push(node.id);
+            return copyWith(node, { enabled: false });
+        });
+
+        // A container under this parent that imports the same playlist: the parent is about to have
+        // the same videos twice, and is told so rather than left to find out on the TV.
+        var siblingContainer = children.find(function (node) {
+            return node.nodeType === SUBCATEGORY && node.youtubePlaylistId === playlistId;
+        });
+
+        return {
+            ok: true,
+            session: normalize(withNodes(session, nodes)),
+            summary: {
+                added: added,
+                kept: kept,
+                sourcesRecorded: sourcesRecorded,
+                keptOtherSource: keptOtherSource,
+                hidden: hidden,
+                skipped: skipped,
+                total: incoming.length,
+                existingContainerId: siblingContainer ? siblingContainer.id : null
+            }
+        };
+    }
+
+    /**
+     * Resolves a playlist through the server and applies it, as one durable operation.
+     *
+     * `resolve(url)` and `put(body)` are the caller's transports (the dashboard's `apiCall`), so the
+     * order that matters is testable here rather than in a page: **resolve everything first**, then
+     * compute the new catalog, then publish it as a single document at the version the working copy was
+     * read from. A playlist that cannot be resolved therefore changes nothing at all - not the catalog,
+     * not its version - and a catalog that cannot be published reports a conflict or an error instead
+     * of a half-applied import.
+     */
+    function importPlaylistFrom(session, input, resolve, put) {
+        var settings = input || {};
+        var url = typeof settings.url === 'string' ? settings.url.trim() : '';
+        if (!url) {
+            return Promise.resolve({ outcome: 'error', session: session, reason: 'Paste a YouTube playlist URL or id' });
+        }
+
+        return Promise.resolve(resolve(url)).then(function (response) {
+            var status = response && response.status;
+            var data = (response && response.data) || {};
+
+            if (status !== 200 || !Array.isArray(data.videos) || !data.sourceId) {
+                return {
+                    outcome: 'error',
+                    session: session,
+                    reason: data.error || ('the playlist could not be resolved (status ' + status + ')')
+                };
+            }
+
+            var applied = importPlaylist(session, {
+                parentId: settings.parentId,
+                playlistId: data.sourceId,
+                videos: data.videos
+            });
+            if (!applied.ok) {
+                return { outcome: 'error', session: session, reason: applied.reason };
+            }
+
+            var summary = applied.summary;
+            summary.playlistTitle = data.title || data.sourceId;
+            summary.truncated = data.truncated === true;
+            summary.unusableItems = data.unusableItems || 0;
+            summary.approved = data.approved === true;
+
+            // The playlist changed nothing about the catalog - every video was already here - so there
+            // is nothing to publish and the version must not move for nothing.
+            if (canonicalJson(applied.session.nodes) === canonicalJson(session.nodes)) {
+                return { outcome: 'no-changes', session: applied.session, summary: summary };
+            }
+
+            return save(applied.session, put).then(function (saved) {
+                if (saved.outcome === 'saved') {
+                    return { outcome: 'imported', session: saved.session, summary: summary };
+                }
+                if (saved.outcome === 'conflict') {
+                    return {
+                        outcome: 'conflict',
+                        session: saved.session,
+                        summary: summary,
+                        serverVersion: saved.serverVersion
+                    };
+                }
+                if (saved.outcome === 'rejected') {
+                    return {
+                        outcome: 'rejected',
+                        session: saved.session,
+                        summary: summary,
+                        reasons: saved.reasons
+                    };
+                }
+                return { outcome: 'failed', session: saved.session, summary: summary, reason: saved.reason };
+            });
+        }, function (error) {
+            return { outcome: 'error', session: session, reason: (error && error.message) || 'the request failed' };
+        });
+    }
+
     // --- video identifiers --------------------------------------------------------------------
 
     /**
@@ -667,6 +876,8 @@ var CatalogEditor = (function () {
         moveUp: moveUp,
         moveDown: moveDown,
         moveTo: moveTo,
+        importPlaylist: importPlaylist,
+        importPlaylistFrom: importPlaylistFrom,
         videoIdFrom: videoIdFrom,
         save: save,
         reload: reload

@@ -21,9 +21,11 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
+import tv.safetubeforkids.app.data.cache.PlaybackPositionEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
 import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
+import tv.safetubeforkids.app.ui.screens.CatalogUiProjection
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -899,8 +901,115 @@ class CatalogSyncServiceTest {
     }
 
     @Test
-    fun aVersion1ResponseIsRefusedRatherThanReadAsTheNodeTree() = runBlocking {
-        installLocal(2L, listOf(category("cat-cartoon", "Cartoon", 0)))
+    fun anImportedPlaylistArrivesAsOrdinaryVideosAndGrantsNothing() = runBlocking {
+        // What a W4 playlist import publishes: videos appended under a shelf, one of them hidden
+        // because its source playlist dropped it. No playlist node, no container invented for it.
+        enqueueCatalog(
+            CatalogSnapshot(
+                schemaVersion = CATALOG_SCHEMA_VERSION,
+                catalogVersion = 1L,
+                nodes = listOf(
+                    CatalogNodeDto(
+                        id = "cat-cartoon", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+                        title = "Cartoons", position = 0,
+                    ),
+                    videoItem("i-first", "First", 0, "vidFirst").copy(
+                        parentId = "cat-cartoon", youtubePlaylistId = "PLimported",
+                    ),
+                    videoItem("i-second", "Second", 1, "vidSecond").copy(
+                        parentId = "cat-cartoon", youtubePlaylistId = "PLimported", enabled = false,
+                    ),
+                ),
+            )
+        )
+
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        // The videos are ordinary catalog videos under the shelf - and the playlist is nowhere.
+        val tree = repository.getTree()
+        assertEquals(listOf("i-first", "i-second"), tree.filter { it.parentId == "cat-cartoon" }.map { it.id })
+        assertEquals(
+            listOf(CatalogNodeType.VIDEO, CatalogNodeType.VIDEO),
+            tree.filter { it.parentId == "cat-cartoon" }.map { it.nodeType },
+        )
+        assertTrue("no node was created for the playlist", tree.none { it.id == "PLimported" })
+
+        // The disabled one is stored but not shown to the child.
+        assertEquals(false, tree.single { it.id == "i-second" }.enabled)
+        assertEquals(1, CatalogUiProjection.build(
+            catalog = repository.observeCatalogWithItems().first(),
+            thumbnails = repository.observeVideoThumbnails().first(),
+            resumable = repository.observeResumableVideos(20_000, 95).first(),
+        ).shelves.single().cards.size)
+
+        // And being in the catalog is not permission: neither imported video can play, because
+        // neither is in the approved cache. A playlist import approves nothing.
+        assertTrue(PlaybackAuthorization.authorize(db, "vidFirst") is PlaybackApproval.Rejected)
+        assertTrue(PlaybackAuthorization.authorize(db, "vidSecond") is PlaybackApproval.Rejected)
+    }
+
+    @Test
+    fun importingMoreVideosDoesNotDisturbWhatIsAlreadyWatched() = runBlocking {
+        // An approved source with one approved video, half watched.
+        db.channelDao().insert(
+            ChannelEntity(
+                sourceType = "yt_playlist",
+                sourceId = "PLapproved",
+                sourceUrl = "https://www.youtube.com/playlist?list=PLapproved",
+                displayName = "Approved",
+            )
+        )
+        db.videoDao().insertAll(listOf(VideoEntity("vidKept", "PLapproved", "Kept", "thumb", 60, 0)))
+        db.playbackPositionDao().upsert(PlaybackPositionEntity("vidKept", 30_000, 60_000, 100))
+        db.playEventDao().insert(
+            tv.safetubeforkids.app.data.events.PlayEventEntity(
+                videoId = "vidKept", playlistId = "PLapproved", startedAt = 100,
+            )
+        )
+        installLocal(1L, listOf(category("cat-cartoon", "Cartoons", 0, listOf(videoItem("i-kept", "Kept", 0, "vidKept")))))
+        val keptNode = repository.getTree().single { it.id == "i-kept" }
+
+        // The parent imports a playlist into the same shelf: two more videos, in playlist order.
+        enqueueCatalog(
+            CatalogSnapshot(
+                schemaVersion = CATALOG_SCHEMA_VERSION,
+                catalogVersion = 2L,
+                nodes = listOf(
+                    CatalogNodeDto(
+                        id = "cat-cartoon", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+                        title = "Cartoons", position = 0,
+                    ),
+                    CatalogNodeDto(
+                        id = "i-kept", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_VIDEO,
+                        title = "Kept", position = 0, youtubeVideoId = "vidKept",
+                    ),
+                    videoItem("i-new-a", "New A", 1, "vidNewA").copy(parentId = "cat-cartoon"),
+                    videoItem("i-new-b", "New B", 2, "vidNewB").copy(parentId = "cat-cartoon"),
+                ),
+            )
+        )
+
+        assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
+
+        // The video that was already there is the same node it was: same id, same position, and its
+        // resume point untouched. An import is not a re-import of history.
+        val afterKept = repository.getTree().single { it.id == "i-kept" }
+        assertEquals(keptNode.id, afterKept.id)
+        assertEquals(keptNode.position, afterKept.position)
+        assertEquals(keptNode.createdAt, afterKept.createdAt)
+        assertEquals(30_000L, db.playbackPositionDao().get("vidKept")!!.positionMs)
+        assertEquals(1, db.playEventDao().count())
+
+        // And the two new videos are appended after it, with nothing else disturbed.
+        assertEquals(
+            listOf("i-kept", "i-new-a", "i-new-b"),
+            repository.getTree().filter { it.parentId == "cat-cartoon" }.sortedBy { it.position }.map { it.id },
+        )
+        assertEquals("no fake watch history appeared", 1, db.playEventDao().count())
+    }
+
+    @Test
+    fun aVersion1ResponseIsRefusedRatherThanReadAsTheNodeTree() = runBlocking {        installLocal(2L, listOf(category("cat-cartoon", "Cartoon", 0)))
 
         // A server that still speaks contract version 1: its document has no `nodes`, so it is not a
         // version-2 catalog. Reading it as one would install a tree the parent never configured.

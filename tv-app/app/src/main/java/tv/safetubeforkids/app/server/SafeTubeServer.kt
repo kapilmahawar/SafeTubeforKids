@@ -89,6 +89,9 @@ class SafeTubeServer(private val context: Context, private val port: Int = SAFE_
                     authRoutes(ServiceLocator.pinManager, ServiceLocator.sessionManager)
                     playlistRoutes(ServiceLocator.sessionManager, ServiceLocator.database)
                     catalogRoutes(ServiceLocator.sessionManager, ServiceLocator.catalogStore)
+                    // Resolving a playlist for the editor's import is read-only: it reads nothing but
+                    // YouTube and reports whether the source is already approved.
+                    catalogImportRoutes(ServiceLocator.sessionManager, ServiceLocator.database)
                     sourceTransferRoutes(ServiceLocator.sessionManager, ServiceLocator.database)
                     playbackRoutes(ServiceLocator.sessionManager)
                     statsRoutes(ServiceLocator.sessionManager, ServiceLocator.database)

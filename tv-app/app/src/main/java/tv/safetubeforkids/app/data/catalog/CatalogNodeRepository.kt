@@ -278,7 +278,12 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
         type = if (nodeType == CatalogNodeType.VIDEO) ContentItemType.VIDEO else ContentItemType.PLAYLIST,
         displayName = title,
         sortOrder = position,
-        youtubePlaylistId = youtubePlaylistId,
+        // The legacy value type is stricter than the tree: a VIDEO item must not carry a playlist id,
+        // and it refuses to be constructed while one is there. The tree *does* keep provenance on an
+        // imported video (which playlist brought it in), so the compatibility view drops it on videos
+        // and keeps it on the containers it means something for. Dropping it here loses nothing: the
+        // projection reads a video's identifier, not where it came from.
+        youtubePlaylistId = youtubePlaylistId.takeIf { nodeType == CatalogNodeType.SUBCATEGORY },
         youtubeVideoId = youtubeVideoId,
         enabled = enabled,
         createdAt = createdAt,

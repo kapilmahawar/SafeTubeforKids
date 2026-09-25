@@ -268,6 +268,9 @@
         try {
             var result = await apiCall('GET', '/playlists');
             if (result.status === 200) {
+                // Which sources are approved. The catalog editor reports this; it never changes it -
+                // importing a playlist into the catalog must not approve anything.
+                approvedSourceIds = result.data.map(function (pl) { return pl.sourceId; });
                 playlistList.innerHTML = '';
                 result.data.forEach(function(pl) {
                     var li = document.createElement('li');
@@ -791,6 +794,7 @@
     var editorConflict = null;   // {serverVersion} while a save is blocked by a stale working copy
     var selectedNodeId = null;
     var editorNewId = null;      // kept so a reload keeps generating ids the same way
+    var approvedSourceIds = [];  // the parent's approved Content Sources, for the import hint only
 
     function catalogError(message) {
         var box = document.getElementById('catalog-error');
@@ -858,6 +862,7 @@
         }
         renderCatalogPanel();
         refreshAddForm();
+        refreshImportForm();
         refreshCatalogNotices();
     }
 
@@ -1161,11 +1166,161 @@
         refreshCatalogNotices();
     }
 
+    // --- importing a YouTube playlist ---------------------------------------------------------
+    //
+    // The playlist is resolved by the TV's own server (the one piece of this app that can talk to
+    // YouTube) and the *catalog* is then changed by the same single document write every other edit
+    // uses. Resolving writes nothing: importing into the catalog never approves a source, so an
+    // imported video that has not been added as a Content Source becomes a visible entry that cannot
+    // play until the parent approves it - and the editor says so.
+
+    function importStatus(kind, message) {
+        var el = document.getElementById('import-status');
+        if (!el) return;
+        el.className = 'catalog-import-status status-' + kind;
+        el.textContent = message;
+        el.classList.remove('hidden');
+    }
+
+    function clearImportStatus() {
+        var el = document.getElementById('import-status');
+        if (el) el.classList.add('hidden');
+    }
+
+    /** Only a category or a subcategory may hold videos, so only those can be imported into. */
+    function refreshImportForm() {
+        var select = document.getElementById('import-parent');
+        var hint = document.getElementById('import-hint');
+        if (!select || !editorSession) return;
+
+        var targets = editorSession.nodes.filter(function (node) {
+            return CatalogEditor.childTypesOf(node.nodeType).indexOf('VIDEO') !== -1;
+        }).sort(function (a, b) {
+            if (a.parentId === b.parentId) return a.position - b.position;
+            return a.parentId === null ? -1 : (b.parentId === null ? 1 : (a.parentId < b.parentId ? -1 : 1));
+        });
+
+        var previous = select.value;
+        select.innerHTML = targets.map(function (node) {
+            var kind = node.nodeType === 'CATEGORY' ? 'category' : 'subcategory';
+            var parent = node.parentId ? CatalogEditor.nodeById(editorSession, node.parentId) : null;
+            var where = parent ? parent.title + ' › ' : '';
+            return '<option value="' + node.id + '">' + where + node.title + ' (' + kind + ')</option>';
+        }).join('');
+        if (targets.some(function (node) { return node.id === previous; })) select.value = previous;
+        select.disabled = targets.length === 0;
+
+        var button = document.getElementById('import-btn');
+        if (button) button.disabled = targets.length === 0;
+
+        if (hint) {
+            hint.textContent = targets.length === 0
+                ? 'Add a category or a subcategory first — that is what a playlist imports into.'
+                : 'The playlist\'s videos become normal videos under the target. The playlist itself is never shown to your child.';
+        }
+
+        // A raw playlist URL/id needs no approval; the videos are imported either way. If that
+        // playlist is already an approved Content Source, its videos can also play.
+        if (approvedSourceIds.length > 0) {
+            hint.textContent += ' Videos from an approved Content Source can play; the rest appear but stay blocked until you approve that source.';
+        }
+    }
+
+    function importSummaryText(summary) {
+        var parts = [];
+        if (summary.added.length) parts.push(summary.added.length + ' added');
+        if (summary.kept.length) parts.push(summary.kept.length + ' already there');
+        if (summary.sourcesRecorded.length) parts.push(summary.sourcesRecorded.length + ' source recorded');
+        if (summary.hidden.length) parts.push(summary.hidden.length + ' hidden (no longer in the playlist)');
+        if (summary.skipped) parts.push(summary.skipped + ' skipped');
+        if (summary.unusableItems) parts.push(summary.unusableItems + ' unavailable');
+        return parts.length ? parts.join(', ') : 'nothing to change';
+    }
+
+    async function importPlaylistNow() {
+        if (!editorSession) return;
+        if (editorConflict) {
+            importStatus('conflict', 'Reload the server version before importing.');
+            return;
+        }
+
+        var url = document.getElementById('import-url').value;
+        var parentId = document.getElementById('import-parent').value || null;
+        if (!url || !url.trim()) {
+            importStatus('error', 'Paste a YouTube playlist URL or id.');
+            return;
+        }
+
+        importStatus('saving', 'Importing…');
+        var result = await CatalogEditor.importPlaylistFrom(
+            editorSession,
+            { url: url, parentId: parentId },
+            function (target) { return apiCall('POST', '/catalog/import/resolve', { url: target }); },
+            function (body) { return apiCall('PUT', '/catalog', body); },
+        );
+
+        if (result.session) editorSession = result.session;
+
+        if (result.outcome === 'imported') {
+            editorConflict = null;
+            document.getElementById('catalog-conflict').classList.add('hidden');
+            catalogError('');
+            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
+            var text = 'Imported “' + result.summary.playlistTitle + '”: ' + importSummaryText(result.summary) +
+                ' — version ' + editorSession.catalogVersion + '.';
+            if (result.summary.existingContainerId) {
+                text += ' Note: this shelf already has a subcategory for that playlist, so those videos may now appear twice.';
+            }
+            if (result.summary.truncated) {
+                text += ' The playlist has more videos than one import takes; import it again to continue.';
+            }
+            if (!result.summary.approved) {
+                text += ' This playlist is not an approved Content Source yet, so these videos appear but cannot play until you add it under Content Sources.';
+            }
+            importStatus('saved', text);
+            document.getElementById('import-url').value = '';
+            renderCatalog();
+            return;
+        }
+
+        if (result.outcome === 'no-changes') {
+            catalogError('');
+            importStatus('saved', 'No changes: every video in “' + result.summary.playlistTitle +
+                '” is already under that target, so nothing was published and the version did not move.');
+            renderCatalog();
+            return;
+        }
+
+        if (result.outcome === 'conflict') {
+            editorConflict = { serverVersion: result.serverVersion };
+            setCatalogStatus('conflict', 'Conflict');
+            showCatalogConflict(result.serverVersion);
+            importStatus('conflict', 'The catalog changed on the server while the playlist was being resolved. ' +
+                'Nothing was imported. Reload the server version, then import again.');
+            renderCatalog();
+            return;
+        }
+
+        if (result.outcome === 'rejected') {
+            setCatalogStatus('error', 'Error');
+            var reasons = (result.reasons || []).join('; ');
+            catalogError('The server refused the catalog: ' + reasons);
+            importStatus('error', 'The import was refused: ' + reasons);
+            return;
+        }
+
+        setCatalogStatus('error', 'Error');
+        catalogError('Import not saved — ' + result.reason + '. Your changes are still here; press Save to try again.');
+        importStatus('error', 'Import failed: ' + result.reason);
+    }
+
     window.loadCatalog = loadCatalog;
     window.reloadCatalogFromServer = reloadCatalogFromServer;
     window.saveCatalog = saveCatalog;
     window.keepEditing = keepEditing;
     window.refreshAddForm = refreshAddForm;
+    window.refreshImportForm = refreshImportForm;
+    window.importPlaylistNow = importPlaylistNow;
     window.addNode = addNode;
     window.renameSelected = renameSelected;
     window.toggleSelectedEnabled = toggleSelectedEnabled;

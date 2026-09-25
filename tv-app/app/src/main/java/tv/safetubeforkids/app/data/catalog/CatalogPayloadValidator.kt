@@ -1,8 +1,6 @@
 package tv.safetubeforkids.app.data.catalog
 
 import tv.safetubeforkids.app.util.ContentSourceParser
-import tv.safetubeforkids.app.util.ParseResult
-import tv.safetubeforkids.app.util.SourceType
 
 /**
  * Everything a version-2 catalog payload must satisfy before anyone acts on it.
@@ -170,16 +168,16 @@ object CatalogPayloadValidator {
 
     /**
      * Structural validation of the YouTube identifiers is delegated to [ContentSourceParser], the
-     * parser that already guards the dashboard's "add source" flow: the id is turned into the
-     * canonical URL and must come back out unchanged, which rejects a blank id, a stray `&`, a
-     * channel handle used as a video, and an auto-generated `RD…`/`UU…` list. No length or character
-     * assumptions are added beyond that, so no valid id can be refused for being unusual.
+     * parser that already guards the dashboard's "add source" flow and, through
+     * [ContentSourceParser.videoIdProblem], the playlist resolver too: an id is turned into the
+     * canonical URL and must come back out unchanged. One rule, three callers - so an id the resolver
+     * accepts cannot be one the catalog then refuses, and the other way round.
      */
     private fun youtubeProblems(node: CatalogNodeDto, where: String, problems: MutableList<Problem>) {
         node.youtubeVideoId?.let { id ->
             when {
                 id.isBlank() -> problems += Problem("$where.youtubeVideoId", "a youtubeVideoId must not be blank")
-                else -> youtubeIdProblem(id, SourceType.YT_VIDEO)?.let {
+                else -> ContentSourceParser.videoIdProblem(id)?.let {
                     problems += Problem("$where.youtubeVideoId", it)
                 }
             }
@@ -191,7 +189,7 @@ object CatalogPayloadValidator {
                     "a youtubePlaylistId must not be blank; leave it out for a container with no import",
                 )
 
-                else -> youtubeIdProblem(id, SourceType.YT_PLAYLIST)?.let {
+                else -> ContentSourceParser.playlistIdProblem(id)?.let {
                     problems += Problem("$where.youtubePlaylistId", it)
                 }
             }
@@ -294,29 +292,6 @@ object CatalogPayloadValidator {
             }
     }
 
-    /**
-     * Null when [id] is a usable identifier of [expected] type.
-     *
-     * The canonical URL is rebuilt and re-parsed, and the id must survive the round trip unchanged;
-     * anything the existing parser would refuse on the dashboard is refused here too, with the same
-     * wording, and an id that only *looks* like one (an extra `&`, a handle, an `RD…` mix) cannot
-     * slip through by being embedded in a URL.
-     */
-    private fun youtubeIdProblem(id: String, expected: SourceType): String? {
-        val url = when (expected) {
-            SourceType.YT_PLAYLIST -> "https://www.youtube.com/playlist?list=$id"
-            else -> "https://www.youtube.com/watch?v=$id"
-        }
-        return when (val parsed = ContentSourceParser.parse(url)) {
-            is ParseResult.Rejected -> parsed.message
-            is ParseResult.Success ->
-                if (parsed.source.type == expected && parsed.source.id == id) {
-                    null
-                } else {
-                    "not a usable ${expected.name.lowercase().removePrefix("yt_")} id"
-                }
-        }
-    }
 
     /** Renders problems for a log line or an HTTP error body without leaking anything secret. */
     fun describe(problems: List<Problem>, limit: Int = 5): String =

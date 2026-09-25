@@ -326,7 +326,12 @@ class CatalogRepository(private val db: CacheDatabase) {
         type = if (nodeType == CatalogNodeType.VIDEO) ContentItemType.VIDEO else ContentItemType.PLAYLIST,
         displayName = title,
         sortOrder = position,
-        youtubePlaylistId = youtubePlaylistId,
+        // A playlist import creates VIDEO nodes that keep the playlist they came from, and the legacy
+        // value type refuses to exist as a VIDEO item carrying a playlist id. Provenance therefore
+        // stops at this compatibility view: it survives in the tree, where it is the record of where an
+        // imported video came from, and the projection - which reads identifiers, not origin - never
+        // needed it here.
+        youtubePlaylistId = youtubePlaylistId.takeIf { nodeType == CatalogNodeType.SUBCATEGORY },
         youtubeVideoId = youtubeVideoId,
         enabled = enabled,
         createdAt = createdAt,

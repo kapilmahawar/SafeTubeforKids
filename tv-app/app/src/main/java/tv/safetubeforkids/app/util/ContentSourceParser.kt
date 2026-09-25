@@ -203,6 +203,40 @@ object ContentSourceParser {
 
     private data class UrlParts(val host: String, val path: String, val query: String)
 
+    /**
+     * Null when [id] is a usable YouTube video id.
+     *
+     * The canonical URL is rebuilt and re-parsed, and the id must survive the round trip unchanged.
+     * This is the same rule the catalog validator applies to a node's `youtubeVideoId` and the
+     * resolver applies to a playlist item, so "a usable id" means one thing in this project rather
+     * than three approximations of it.
+     */
+    fun videoIdProblem(id: String): String? = idProblem(id, SourceType.YT_VIDEO)
+
+    /** Null when [id] is a usable YouTube playlist id. */
+    fun playlistIdProblem(id: String): String? = idProblem(id, SourceType.YT_PLAYLIST)
+
+    /**
+     * An id that only *looks* like one cannot slip through by being embedded in a URL: the URL is
+     * rebuilt from the id, parsed back, and the parsed id must equal what went in. That rejects a
+     * blank id, a stray `&`, a channel handle used as a video, and an auto-generated `RD…`/`UU…` list.
+     */
+    private fun idProblem(id: String, expected: SourceType): String? {
+        val url = when (expected) {
+            SourceType.YT_PLAYLIST -> "https://www.youtube.com/playlist?list=$id"
+            else -> "https://www.youtube.com/watch?v=$id"
+        }
+        return when (val parsed = parse(url)) {
+            is ParseResult.Rejected -> parsed.message
+            is ParseResult.Success ->
+                if (parsed.source.type == expected && parsed.source.id == id) {
+                    null
+                } else {
+                    "not a usable ${expected.name.lowercase().removePrefix("yt_")} id"
+                }
+        }
+    }
+
     private fun parseUrl(url: String): UrlParts? {
         return try {
             // Handle case-insensitive scheme

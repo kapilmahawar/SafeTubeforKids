@@ -675,3 +675,11 @@ section {
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .catalog-node-row.is-selected { background: #1E3A8A; }
 .catalog-node-row { cursor: pointer; }
+
+/* Catalog import */
+.catalog-add-row input#import-url { min-width: 260px; }
+.catalog-import-status { padding: 8px 10px; border-radius: 6px; font-size: 0.85em; margin-top: 8px; }
+.catalog-import-status.status-saved { background: #14532D; color: #86EFAC; }
+.catalog-import-status.status-saving { background: #1E3A8A; color: #BFDBFE; }
+.catalog-import-status.status-conflict { background: #7F1D1D; color: #FCA5A5; }
+.catalog-import-status.status-error { background: #7F1D1D; color: #FCA5A5; }
