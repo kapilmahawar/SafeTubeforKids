@@ -773,6 +773,378 @@ test('a conflict is not a reason to lose the catalog: the server keeps its versi
     assert.deepEqual(titles(saved.session, null), ['Cartoons', 'Music', 'Mine', 'After Reload']);
 });
 
+// --- the picture a container shows --------------------------------------------------------
+//
+// The rule the editor offers is the rule the TV applies: AUTO is the first video inside, in catalog
+// order, skipping anything hidden and everything inside it. These tests pin the *editor's* half of
+// that - what it offers, what it stores and what it refuses - against the resolver tests in the JVM
+// suite, which pin the same examples on the app's side.
+
+/** A tree of containers and videos, opened as a working copy. */
+function openTree(nodes, version) {
+    return CatalogEditor.open({ schemaVersion: 2, catalogVersion: version || 3, nodes: nodes });
+}
+
+/**
+ * A publishable tree to work on: a shelf holding a subcategory of two videos, a hidden subcategory
+ * with a video inside it, a direct video, an empty subcategory and a second subcategory - plus a
+ * second shelf, so a video outside the one being edited exists.
+ */
+function thumbnailTree() {
+    return [
+        node('cat', null, 'CATEGORY', 'Cat', 0),
+        node('sub1', 'cat', 'SUBCATEGORY', 'Sub One', 0),
+        node('v1', 'sub1', 'VIDEO', 'V1', 0, { youtubeVideoId: 'ytV1' }),
+        node('v2', 'sub1', 'VIDEO', 'V2', 1, { youtubeVideoId: 'ytV2' }),
+        node('hidden', 'cat', 'SUBCATEGORY', 'Hidden Sub', 1, { enabled: false }),
+        node('hv', 'hidden', 'VIDEO', 'HV', 0, { youtubeVideoId: 'ytHV' }),
+        node('direct', 'cat', 'VIDEO', 'Direct', 2, { youtubeVideoId: 'ytDirect' }),
+        node('empty', 'cat', 'SUBCATEGORY', 'Nothing Inside', 3),
+        node('sub2', 'cat', 'SUBCATEGORY', 'Sub Two', 4),
+        node('v3', 'sub2', 'VIDEO', 'V3', 0, { youtubeVideoId: 'ytV3' }),
+        node('cat2', null, 'CATEGORY', 'Cat Two', 1),
+        node('w1', 'cat2', 'VIDEO', 'W1', 0, { youtubeVideoId: 'ytW1' }),
+    ];
+}
+
+/**
+ * The same tree with one video whose identifier is blank - the state a hand-edited document can be in.
+ * A stored catalog cannot normally hold this, which is exactly why the resolver has to survive it.
+ */
+function corruptTree() {
+    return thumbnailTree().concat([
+        node('blank', 'sub2', 'VIDEO', 'No Video Id', 1, { youtubeVideoId: '   ' }),
+    ]);
+}
+
+test('a mode the editor cannot render is reported rather than guessed at', () => {
+    assert.equal(CatalogEditor.thumbnailModeOf(node('a', null, 'CATEGORY', 'A', 0)), 'AUTO');
+    assert.equal(CatalogEditor.thumbnailModeOf({ thumbnailMode: null }), 'AUTO');
+    assert.equal(CatalogEditor.thumbnailModeOf({ thumbnailMode: 'VIDEO' }), 'VIDEO');
+    assert.equal(CatalogEditor.thumbnailModeOf({ thumbnailMode: 'CUSTOM' }), null, 'CUSTOM is reserved, not renderable');
+    assert.equal(CatalogEditor.thumbnailModeOf({ thumbnailMode: 'SOMETHING' }), null);
+    assert.equal(CatalogEditor.thumbnailModeOf({ thumbnailMode: '   ' }), null);
+
+    // The editor offers exactly two answers, and CUSTOM is not one of them.
+    assert.deepEqual(CatalogEditor.THUMBNAIL_MODES, ['AUTO', 'VIDEO']);
+});
+
+test('automatic uses the first video inside, in catalog order', () => {
+    const session = openTree(thumbnailTree());
+    assert.equal(CatalogEditor.autoVideo(session, 'cat').id, 'v1', 'the first container comes first');
+    assert.equal(CatalogEditor.autoVideo(session, 'sub1').id, 'v1');
+    assert.equal(CatalogEditor.autoVideo(session, 'sub2').id, 'v3');
+    assert.equal(CatalogEditor.autoVideo(session, 'cat2').id, 'w1');
+    assert.equal(CatalogEditor.autoVideo(session, 'hidden').id, 'hv',
+        'a container being hidden does not decide what is inside it: unhiding it must bring its picture back');
+});
+
+test('a direct video before a container wins, and a container before a direct video wins', () => {
+    const directFirst = openTree([
+        node('cat', null, 'CATEGORY', 'Cat', 0),
+        node('d', 'cat', 'VIDEO', 'Direct', 0, { youtubeVideoId: 'ytD' }),
+        node('sub', 'cat', 'SUBCATEGORY', 'Sub', 1),
+        node('s', 'sub', 'VIDEO', 'Nested', 0, { youtubeVideoId: 'ytS' }),
+    ]);
+    assert.equal(CatalogEditor.autoVideo(directFirst, 'cat').id, 'd');
+
+    const containerFirst = openTree([
+        node('cat', null, 'CATEGORY', 'Cat', 0),
+        node('sub', 'cat', 'SUBCATEGORY', 'Sub', 0),
+        node('s', 'sub', 'VIDEO', 'Nested', 0, { youtubeVideoId: 'ytS' }),
+        node('d', 'cat', 'VIDEO', 'Direct', 1, { youtubeVideoId: 'ytD' }),
+    ]);
+    assert.equal(CatalogEditor.autoVideo(containerFirst, 'cat').id, 's',
+        'a container is descended into before the next sibling is looked at');
+});
+
+test('a hidden video is skipped, and a hidden container takes its subtree with it', () => {
+    const session = openTree([
+        node('cat', null, 'CATEGORY', 'Cat', 0),
+        node('off', 'cat', 'VIDEO', 'Hidden', 0, { youtubeVideoId: 'ytOff', enabled: false }),
+        node('hidden', 'cat', 'SUBCATEGORY', 'Hidden Sub', 1, { enabled: false }),
+        node('hv', 'hidden', 'VIDEO', 'Inside Hidden', 0, { youtubeVideoId: 'ytHV' }),
+        node('on', 'cat', 'VIDEO', 'Shown', 2, { youtubeVideoId: 'ytOn' }),
+    ]);
+
+    assert.equal(CatalogEditor.autoVideo(session, 'cat').id, 'on');
+
+    const videos = CatalogEditor.descendantVideos(session, 'cat');
+    assert.deepEqual(videos.map((v) => v.id), ['off', 'hv', 'on'], 'every video is listed, so the parent can decide');
+    assert.deepEqual(videos.map((v) => v.usable), [false, false, true]);
+    assert.equal(videos[1].reachable, false, 'a video inside a hidden container is out of reach');
+    assert.equal(videos[0].enabled, false);
+});
+
+test('a video with no usable YouTube id cannot be the picture', () => {
+    const session = openTree(corruptTree());
+    const videos = CatalogEditor.descendantVideos(session, 'cat');
+    const blank = videos.find((v) => v.id === 'blank');
+    assert.equal(blank.usable, false);
+    assert.equal(blank.youtubeVideoId, null, 'a blank id is no id');
+    assert.equal(CatalogEditor.autoVideo(session, 'cat').id, 'v1', 'so automatic looks further');
+
+    assert.equal(CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'blank' }).ok, false);
+});
+
+test('a container with nothing usable inside it has no automatic picture', () => {
+    const session = openTree(thumbnailTree());
+    assert.equal(CatalogEditor.autoVideo(session, 'empty'), null);
+    assert.deepEqual(CatalogEditor.descendantVideos(session, 'empty'), []);
+    assert.equal(CatalogEditor.autoVideo(session, 'nope'), null, 'an unknown container has none either');
+});
+
+test('the automatic picture does not depend on the order the nodes arrive in', () => {
+    const shuffled = thumbnailTree().slice().reverse();
+    assert.equal(
+        CatalogEditor.autoVideo(openTree(shuffled), 'cat').id,
+        CatalogEditor.autoVideo(openTree(thumbnailTree()), 'cat').id,
+        'only position and id decide, never the order of the array');
+});
+
+test('the videos offered for a choice are the ones inside, with a readable path', () => {
+    const session = openTree(thumbnailTree());
+    const videos = CatalogEditor.descendantVideos(session, 'cat');
+
+    assert.deepEqual(videos.map((v) => v.id), ['v1', 'v2', 'hv', 'direct', 'v3']);
+    assert.deepEqual(videos.map((v) => v.path), ['Sub One / V1', 'Sub One / V2', 'Hidden Sub / HV', 'Direct', 'Sub Two / V3']);
+    assert.deepEqual(videos.map((v) => v.usable), [true, true, false, true, true],
+        'a video inside a hidden container is listed but never usable');
+    assert.deepEqual(CatalogEditor.descendantVideos(session, 'v1'), [], 'a video has nothing inside it');
+    assert.deepEqual(CatalogEditor.descendantVideos(session, 'cat2').map((v) => v.id), ['w1'],
+        'a choice is only ever offered from inside the container itself');
+});
+
+test('choosing a video stores the node id inside the container, not a YouTube id', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, {
+        id: 'cat', mode: 'VIDEO', videoNodeId: 'v3',
+    }));
+
+    const cat = CatalogEditor.nodeById(chosen, 'cat');
+    assert.equal(cat.thumbnailMode, 'VIDEO');
+    assert.equal(cat.thumbnailVideoId, 'v3', 'a node id names exactly one node');
+    assert.notEqual(cat.thumbnailVideoId, 'ytV3');
+    assert.equal(CatalogEditor.isDirty(chosen), true);
+    assertCanonical(chosen);
+});
+
+test('automatic clears the choice, because a node carries one answer', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v3' }));
+    const back = apply(chosen, CatalogEditor.setThumbnail(chosen, { id: 'cat', mode: 'AUTO' }));
+
+    const cat = CatalogEditor.nodeById(back, 'cat');
+    assert.equal(cat.thumbnailMode, 'AUTO');
+    assert.equal(cat.thumbnailVideoId, null);
+});
+
+test('a picture choice that cannot be honoured is refused, and changes nothing', () => {
+    const session = openTree(corruptTree());
+
+    const refused = [
+        [{ id: 'nope', mode: 'VIDEO', videoNodeId: 'v1' }, 'that node no longer exists'],
+        [{ id: 'v1', mode: 'VIDEO', videoNodeId: 'v3' }, 'a video is its own picture; choose one for a shelf or subcategory instead'],
+        [{ id: 'cat', mode: 'CUSTOM' }, 'choose automatic, or one video inside this category'],
+        [{ id: 'cat', mode: 'VIDEO' }, 'choose a video to take the picture from'],
+        [{ id: 'cat', mode: 'VIDEO', videoNodeId: 'ghost' }, 'that video no longer exists'],
+        [{ id: 'cat', mode: 'VIDEO', videoNodeId: 'sub2' }, 'only a video can stand for a category'],
+        [{ id: 'sub2', mode: 'VIDEO', videoNodeId: 'v1' }, 'that video is not inside this subcategory'],
+        [{ id: 'cat', mode: 'VIDEO', videoNodeId: 'w1' }, 'that video is not inside this category'],
+        [{ id: 'direct', mode: 'VIDEO', videoNodeId: 'cat' }, 'a video is its own picture; choose one for a shelf or subcategory instead'],
+        [{ id: 'cat', mode: 'VIDEO', videoNodeId: 'blank' }, 'that video has no YouTube id to take a picture from'],
+        [{ id: 'cat', mode: 'VIDEO', videoNodeId: 'hv' }, 'that video is hidden from your child, and a hidden video cannot stand for this category'],
+    ];
+
+    refused.forEach(([input, reason]) => {
+        const result = CatalogEditor.setThumbnail(session, input);
+        assert.equal(result.ok, false, JSON.stringify(input) + ' must be refused');
+        assert.equal(result.reason, reason);
+        assert.equal(result.session, undefined, 'a refusal carries no session to apply');
+    });
+
+    assert.deepEqual(session.nodes, openTree(corruptTree()).nodes, 'and the working copy is untouched');
+});
+
+test('the picture rules the editor checks are the rules the server checks', () => {
+    const session = openTree(thumbnailTree());
+    const broken = (changes) => {
+        const nodes = session.nodes.map((n) => (n.id === 'cat' ? Object.assign({}, n, changes) : n));
+        return CatalogEditor.problems({ nodes: nodes, savedNodes: nodes });
+    };
+
+    assert.deepEqual(broken({}), [], 'the tree itself is fine');
+
+    assert.match(broken({ thumbnailMode: 'VIDEO', thumbnailVideoId: null }).join('; '),
+        /chooses a video as its picture but names none/);
+    assert.match(broken({ thumbnailMode: 'VIDEO', thumbnailVideoId: 'ghost' }).join('; '),
+        /names thumbnail video ghost, which is not in this catalog/);
+    assert.match(broken({ thumbnailMode: 'VIDEO', thumbnailVideoId: 'sub2' }).join('; '),
+        /names sub2 as its picture, and that is a SUBCATEGORY/);
+    assert.match(broken({ thumbnailMode: 'VIDEO', thumbnailVideoId: 'w1' }).join('; '),
+        /thumbnail video w1 is not inside cat/);
+    assert.match(broken({ thumbnailVideoId: 'v1' }).join('; '),
+        /names a thumbnail video while its mode is AUTO/);
+    assert.match(broken({ thumbnailMode: 'CUSTOM' }).join('; '),
+        /unsupported thumbnail mode "CUSTOM"/);
+    assert.match(broken({ thumbnailUrl: 'https://example.com/x.jpg' }).join('; '),
+        /names a picture URL; a picture comes from the app, not from a link/);
+    assert.deepEqual(broken({ thumbnailMode: 'VIDEO', thumbnailVideoId: 'v3' }), [],
+        'a video deeper inside the container is a valid choice');
+
+    // The same rules asked of a video, and of a video inside a hidden container.
+    const corrupt = openTree(corruptTree());
+    const withBlank = corrupt.nodes.map((n) => (n.id === 'cat'
+        ? Object.assign({}, n, { thumbnailMode: 'VIDEO', thumbnailVideoId: 'blank' })
+        : n));
+    assert.match(CatalogEditor.problems({ nodes: withBlank, savedNodes: withBlank }).join('; '),
+        /thumbnail video blank has no YouTube id to take a picture from/);
+
+    const withVideo = session.nodes.map((n) => (n.id === 'v1' ? Object.assign({}, n, { thumbnailVideoId: 'v2' }) : n));
+    assert.match(CatalogEditor.problems({ nodes: withVideo, savedNodes: withVideo }).join('; '),
+        /video v1 uses its own picture and must not choose one/);
+});
+
+test('a choice whose video is hidden later is kept as the parent made it, and the TV falls back to automatic', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v1' }));
+
+    // The choice stays exactly as the parent made it: hiding a video is not a reason to rewrite a
+    // configuration, and unhiding it brings the picture straight back.
+    const hidden = apply(chosen, CatalogEditor.setEnabled(chosen, { id: 'v1', enabled: false }));
+    assert.equal(CatalogEditor.nodeById(hidden, 'cat').thumbnailVideoId, 'v1');
+    assertCanonical(hidden);
+
+    const shown = apply(hidden, CatalogEditor.setEnabled(hidden, { id: 'v1', enabled: true }));
+    assert.equal(CatalogEditor.nodeById(shown, 'cat').thumbnailVideoId, 'v1');
+    assertCanonical(shown);
+});
+
+test('deleting a video takes the picture that named it with it', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v3' }));
+
+    const removed = apply(chosen, CatalogEditor.remove(chosen, { id: 'v3' }));
+    const cat = CatalogEditor.nodeById(removed, 'cat');
+    assert.equal(cat.thumbnailMode, 'AUTO', 'a selection that names nothing cannot be kept');
+    assert.equal(cat.thumbnailVideoId, null);
+    assertCanonical(removed);
+
+    const other = apply(chosen, CatalogEditor.remove(chosen, { id: 'v1' }));
+    assert.equal(CatalogEditor.nodeById(other, 'cat').thumbnailVideoId, 'v3', 'another video is not this video');
+});
+
+test('deleting a container clears the pictures chosen from inside it', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v3' }));
+    const removed = apply(chosen, CatalogEditor.remove(chosen, { id: 'sub2' }));
+
+    assert.equal(CatalogEditor.nodeById(removed, 'cat').thumbnailVideoId, null);
+    assertCanonical(removed);
+});
+
+test('moving the chosen video out of the container is reported rather than quietly rewritten', () => {
+    const session = openTree(thumbnailTree());
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v3' }));
+    const moved = apply(chosen, CatalogEditor.moveTo(chosen, { id: 'v3', parentId: 'cat2' }));
+
+    // A move is reversible, so the choice is kept rather than thrown away - but the document is not
+    // publishable in that state, and the editor says so instead of letting Save discover it.
+    assert.equal(CatalogEditor.nodeById(moved, 'cat').thumbnailVideoId, 'v3');
+    assert.match(CatalogEditor.problems(moved).join('; '), /thumbnail video v3 is not inside cat/);
+
+    const back = apply(moved, CatalogEditor.moveTo(moved, { id: 'v3', parentId: 'sub2' }));
+    assert.deepEqual(CatalogEditor.problems(back), [], 'moving it back makes the document publishable again');
+    assert.equal(CatalogEditor.nodeById(back, 'cat').thumbnailVideoId, 'v3');
+});
+
+test('the picture is published through the same working copy and the same Save', async () => {
+    const server = fakeServer(document(7));
+    const session = openEditor(7);
+    const chosen = apply(session, CatalogEditor.setThumbnail(session, {
+        id: 'cat-cartoon', mode: 'VIDEO', videoNodeId: 'i-bluey#d',
+    }));
+
+    let sent = null;
+    const result = await CatalogEditor.save(chosen, (body) => {
+        sent = body;
+        return server.put(body);
+    });
+
+    assert.equal(result.outcome, 'saved');
+    assert.equal(sent.expectedCatalogVersion, 7, 'the same optimistic version as any other edit');
+    assert.equal(sent.nodes.filter((n) => n.id === 'cat-cartoon')[0].thumbnailMode, 'VIDEO');
+    assert.equal(sent.nodes.filter((n) => n.id === 'cat-cartoon')[0].thumbnailVideoId, 'i-bluey#d');
+    assert.equal(result.session.catalogVersion, 8, 'and only the server says it is saved');
+    assert.equal(CatalogEditor.isDirty(result.session), false);
+});
+
+test('a picture edit made against a stale copy is a conflict like any other edit', async () => {
+    const server = fakeServer(document(7));
+    const session = openEditor(7);
+    await CatalogEditor.save(apply(session, CatalogEditor.addCategory(session, { title: 'First' })), server.put);
+
+    const stale = apply(session, CatalogEditor.setThumbnail(session, {
+        id: 'cat-cartoon', mode: 'VIDEO', videoNodeId: 'i-bluey#d',
+    }));
+    const result = await CatalogEditor.save(stale, server.put);
+
+    assert.equal(result.outcome, 'conflict');
+    assert.equal(result.serverVersion, 8);
+    assert.equal(CatalogEditor.nodeById(result.session, 'cat-cartoon').thumbnailVideoId, 'i-bluey#d',
+        'the unsaved choice survives the conflict');
+});
+
+test('no node ever carries a picture URL, however the picture was chosen', () => {
+    const session = openTree(thumbnailTree());
+    const auto = apply(session, CatalogEditor.setThumbnail(session, { id: 'cat', mode: 'AUTO' }));
+    const video = apply(auto, CatalogEditor.setThumbnail(auto, { id: 'cat', mode: 'VIDEO', videoNodeId: 'v3' }));
+
+    [session, auto, video].forEach((state) => {
+        CatalogEditor.toDocument(state).nodes.forEach((n) => {
+            assert.equal(n.thumbnailUrl, null, 'the TV has only the artwork its sources provided');
+        });
+    });
+
+    const source = fs.readFileSync(path.join(assets, 'catalog-editor.js'), 'utf8');
+    assert.ok(!/ytimg|img\.youtube|https?:\/\//.test(source.replace(/\/\*[\s\S]*?\*\//g, '')),
+        'the editor must not synthesise a thumbnail URL');
+});
+
+test('the page offers exactly two pictures, and the reserved mode is nowhere in the editor', () => {
+    const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
+    const app = code('app.js');
+
+    const modes = html.match(/<select id="panel-thumbnail-mode"[\s\S]*?<\/select>/);
+    assert.ok(modes, 'the panel must offer a picture for a container');
+    assert.deepEqual([...modes[0].matchAll(/value="([^"]+)"/g)].map((m) => m[1]), ['AUTO', 'VIDEO'],
+        'CUSTOM is reserved and is deliberately not offered');
+
+    assert.ok(html.includes('id="panel-thumbnail-video"'), 'the videos inside must be choosable');
+    assert.ok(!/CUSTOM/.test(app), 'app.js must never write the reserved mode either');
+
+    // The two controls are wired to the model, not to a second way of saving anything.
+    assert.match(app, /window\.changeThumbnailMode\s*=/);
+    assert.match(app, /window\.changeThumbnailVideo\s*=/);
+});
+
+test('a picture travels through the catalog document, so the editor opens no endpoint of its own', () => {
+    const app = code('app.js');
+    const model = code('catalog-editor.js');
+
+    [app, model].forEach((source) => {
+        assert.ok(!/['"`][^'"`]*\/thumbnail/i.test(source), 'there must be no separate thumbnail API');
+        [...source.matchAll(/thumbnailUrl\s*:\s*([^,\n}]+)/g)]
+            .forEach((write) => assert.equal(write[1].trim(), 'null', 'nothing writes a picture URL'));
+    });
+
+    const calls = [...app.matchAll(/apiCall\('([A-Z]+)',\s*'([^']+)'/g)];
+    assert.ok(calls.length > 0, 'the dashboard still talks to the server');
+    calls.forEach(([, method, target]) => {
+        assert.ok(!/thumbnail/i.test(target), method + ' ' + target + ' would be a thumbnail API of its own');
+    });
+});
+
 // --- the editor is a model, not a view ----------------------------------------------------
 
 test('the editor model touches no DOM, no network and no browser storage', () => {

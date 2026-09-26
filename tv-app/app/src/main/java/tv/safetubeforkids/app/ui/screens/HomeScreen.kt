@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -28,7 +29,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.PhoneAndroid
@@ -42,10 +42,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
 import tv.safetubeforkids.app.BuildConfig
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.timelimits.TimeLimitStatus
@@ -357,6 +360,13 @@ private fun CatalogShelfSection(
             modifier = Modifier.padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
+            // The shelf's own picture, when the parent configured a thumbnail for the category (or let
+            // AUTO pick one inside it). Absent is normal - a shelf whose videos are all unapproved, or
+            // an older catalog with no thumbnail configuration - and the header is then exactly what it
+            // always was: the title on its own. Nothing here is focusable, so D-pad navigation and the
+            // card order are untouched.
+            ShelfThumbnail(url = shelf.thumbnailUrl, title = shelf.title)
+
             Text(
                 text = shelf.title,
                 style = MaterialTheme.typography.titleMedium,
@@ -382,6 +392,32 @@ private fun CatalogShelfSection(
             }
         }
     }
+}
+
+/**
+ * The shelf header's own artwork, or nothing at all.
+ *
+ * Drawn only when the catalog resolved a picture for the shelf, and never focusable: it is a
+ * decoration beside the title, so it cannot take focus away from the cards or change the way the
+ * screen is navigated. Coil loads a URL the approved cache already holds; when there is none, the
+ * header keeps its previous appearance.
+ */
+@Composable
+private fun ShelfThumbnail(url: String?, title: String) {
+    if (url.isNullOrBlank()) return
+
+    AsyncImage(
+        model = url,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .width(72.dp)
+            .height(40.dp)
+            .clip(RoundedCornerShape(6.dp))
+            .background(KidSurface),
+    )
+
+    Spacer(modifier = Modifier.width(10.dp))
 }
 
 /**

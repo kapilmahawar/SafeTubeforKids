@@ -32,6 +32,8 @@ import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_CATEGORY
 import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_SUBCATEGORY
 import tv.safetubeforkids.app.data.catalog.CATALOG_NODE_TYPE_VIDEO
 import tv.safetubeforkids.app.data.catalog.CATALOG_SCHEMA_VERSION
+import tv.safetubeforkids.app.data.catalog.CATALOG_THUMBNAIL_MODE_AUTO
+import tv.safetubeforkids.app.data.catalog.CATALOG_THUMBNAIL_MODE_VIDEO
 import tv.safetubeforkids.app.data.catalog.CatalogJson
 import tv.safetubeforkids.app.data.catalog.CatalogNodeDto
 import tv.safetubeforkids.app.data.catalog.CatalogPutRequest
@@ -605,6 +607,120 @@ class CatalogEditorPersistenceTest {
             val served = read(token)
             assertEquals(stored, served.nodes)
             assertEquals(1L, served.catalogVersion)
+        }
+    }
+
+    // --- the picture a container shows ----------------------------------------------------------
+    //
+    // A picture is stored in the same document as everything else: no separate endpoint, no upload
+    // and no URL - the choice is either `AUTO` or the node id of a video inside that container.
+
+    @Test
+    fun choosingAPictureIsCommittedAndSurvivesARestart() {
+        val before = listOf(
+            shelf("cat-cartoon", "Cartoons", 0),
+            container("i-cocomelon", "cat-cartoon", "Cocomelon", 0),
+            video("i-cocomelon#a", "i-cocomelon", "Video A", 0, videoId = "vidA"),
+            video("i-cocomelon#b", "i-cocomelon", "Video B", 1, videoId = "vidB"),
+        )
+        val after = before.map {
+            if (it.id == "i-cocomelon") {
+                it.copy(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "i-cocomelon#b")
+            } else {
+                it
+            }
+        }
+
+        mutationIsCommittedAndSurvivesARestart("a chosen picture", before, after) { snapshot ->
+            val chosen = snapshot.nodes.single { it.id == "i-cocomelon" }
+            assertEquals(CATALOG_THUMBNAIL_MODE_VIDEO, chosen.thumbnailMode)
+            assertEquals("i-cocomelon#b", chosen.thumbnailVideoId)
+            assertEquals("and nothing else about the node moved", "Cocomelon", chosen.title)
+            assertTrue("no node carries a picture URL", snapshot.nodes.all { it.thumbnailUrl == null })
+        }
+    }
+
+    @Test
+    fun aPictureThatCouldNotBeHonouredIsRefusedAndChangesNothing() = runBlocking {
+        val stored = listOf(
+            shelf("cat-cartoon", "Cartoons", 0),
+            container("i-cocomelon", "cat-cartoon", "Cocomelon", 0),
+            video("i-cocomelon#a", "i-cocomelon", "Video A", 0, videoId = "vidA"),
+            container("i-other", "cat-cartoon", "Other", 1),
+            video("i-other#a", "i-other", "Elsewhere", 0, videoId = "vidElsewhere"),
+        )
+        val choosing = { chosen: String? ->
+            stored.map {
+                if (it.id == "i-cocomelon") {
+                    it.copy(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = chosen)
+                } else {
+                    it
+                }
+            }
+        }
+
+        testApp(store()) { store, token ->
+            assertEquals(HttpStatusCode.OK, publish(token, document(*stored.toTypedArray()), expectedVersion = 0).status)
+            val committed = store.read()
+
+            // A name that does not exist, a name that is not a video, and a video from another
+            // container: three ways of asking for a picture the app could not draw.
+            listOf("i-ghost", "i-other", "i-other#a").forEach { chosen ->
+                val response = publish(token, document(*choosing(chosen).toTypedArray()), expectedVersion = 1)
+
+                assertEquals("$chosen must be refused", HttpStatusCode.BadRequest, response.status)
+                assertTrue(
+                    "the refusal must be addressed to the thumbnail field, got ${response.bodyAsText()}",
+                    response.bodyAsText().contains("thumbnailVideoId"),
+                )
+                assertEquals("$chosen must not change the catalog", committed, store.read())
+                assertEquals("$chosen must not move the version", 1L, store.read().catalogVersion)
+            }
+
+            // And a choice that *can* be honoured still goes through afterwards, at the same version.
+            val accepted = publish(token, document(*choosing("i-cocomelon#a").toTypedArray()), expectedVersion = 1)
+            assertEquals(HttpStatusCode.OK, accepted.status)
+            assertEquals("i-cocomelon#a", read(token).nodes.single { it.id == "i-cocomelon" }.thumbnailVideoId)
+        }
+    }
+
+    @Test
+    fun aStaleEditorCannotOverwriteANewerPicture() = runBlocking {
+        val nodes = listOf(
+            shelf("cat-cartoon", "Cartoons", 0),
+            container("i-cocomelon", "cat-cartoon", "Cocomelon", 0),
+            video("i-cocomelon#a", "i-cocomelon", "Video A", 0, videoId = "vidA"),
+        )
+        val pictureOf = { mode: String, chosen: String? ->
+            nodes.map {
+                if (it.id == "i-cocomelon") it.copy(thumbnailMode = mode, thumbnailVideoId = chosen) else it
+            }
+        }
+
+        testApp(store()) { _, token ->
+            publish(token, document(*nodes.toTypedArray()), expectedVersion = 0)
+
+            // One editor chooses "Video A" and reaches version 2.
+            val theirs = publish(
+                token,
+                document(*pictureOf(CATALOG_THUMBNAIL_MODE_VIDEO, "i-cocomelon#a").toTypedArray()),
+                expectedVersion = 1,
+            )
+            assertEquals(HttpStatusCode.OK, theirs.status)
+
+            // Another still believes it is at version 1 and tries to go back to automatic.
+            val stale = publish(
+                token,
+                document(*pictureOf(CATALOG_THUMBNAIL_MODE_AUTO, null).toTypedArray()),
+                expectedVersion = 1,
+            )
+
+            assertEquals("a stale editor gets a conflict", HttpStatusCode.Conflict, stale.status)
+            val served = read(token)
+            val container = served.nodes.single { it.id == "i-cocomelon" }
+            assertEquals("the newer picture is intact", CATALOG_THUMBNAIL_MODE_VIDEO, container.thumbnailMode)
+            assertEquals("i-cocomelon#a", container.thumbnailVideoId)
+            assertEquals("and the version did not move", 2L, served.catalogVersion)
         }
     }
 

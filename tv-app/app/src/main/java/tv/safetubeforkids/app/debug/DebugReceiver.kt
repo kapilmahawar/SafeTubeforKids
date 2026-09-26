@@ -321,6 +321,9 @@ class DebugReceiver : BroadcastReceiver() {
                         CatalogUiProjection.RESUME_MIN_POSITION_MS,
                         CatalogUiProjection.RESUME_MAX_PERCENT,
                     ).first(),
+                    // The tree is what decides a container's picture, so a dump that left it out would
+                    // describe a home screen nobody is looking at.
+                    tree = repository.observeTree().first(),
                 )
                 val metadata = repository.getMetadata()
                 val json = buildJsonObject {
@@ -332,6 +335,10 @@ class DebugReceiver : BroadcastReceiver() {
                             add(buildJsonObject {
                                 put("id", shelf.id)
                                 put("title", shelf.title)
+                                put("hasArtwork", shelf.thumbnailUrl != null)
+                                // The exact artwork the shelf header draws. It comes from the approved
+                                // cache, so the URL names which video's picture was resolved.
+                                put("thumbnailUrl", shelf.thumbnailUrl ?: "")
                                 put("cards", buildJsonArray {
                                     shelf.cards.forEach { card ->
                                         add(buildJsonObject {
@@ -339,6 +346,7 @@ class DebugReceiver : BroadcastReceiver() {
                                             put("title", card.title)
                                             put("kind", card.kind.name)
                                             put("hasArtwork", card.thumbnailUrl != null)
+                                            put("thumbnailUrl", card.thumbnailUrl ?: "")
                                             card.badgeText?.let { put("badge", it) }
                                         })
                                     }
@@ -381,6 +389,9 @@ class DebugReceiver : BroadcastReceiver() {
                             put("videoId", node.youtubeVideoId ?: "")
                             put("playlistId", node.youtubePlaylistId ?: "")
                             put("thumbnailMode", node.thumbnailMode.name)
+                            // Which video stands for the container, when the parent chose one. The node
+                            // id, as stored - the resolver turns it into a YouTube id at render time.
+                            put("thumbnailVideoId", node.thumbnailVideoId ?: "")
                         })
                     }
                 }

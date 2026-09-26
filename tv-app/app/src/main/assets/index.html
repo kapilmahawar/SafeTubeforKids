@@ -220,6 +220,20 @@
                                         Shown to the child
                                     </label>
                                 </p>
+                                <div id="panel-thumbnail" class="catalog-thumbnail hidden">
+                                    <label class="catalog-field">
+                                        <span>Picture</span>
+                                        <select id="panel-thumbnail-mode" onchange="changeThumbnailMode()">
+                                            <option value="AUTO">Automatic — the first video inside</option>
+                                            <option value="VIDEO">A video I choose</option>
+                                        </select>
+                                    </label>
+                                    <label class="catalog-field" id="panel-thumbnail-video-field">
+                                        <span>Video for the picture</span>
+                                        <select id="panel-thumbnail-video" onchange="changeThumbnailVideo()"></select>
+                                    </label>
+                                    <p id="panel-thumbnail-hint" class="catalog-hint"></p>
+                                </div>
                                 <p class="catalog-panel-row">
                                     <button type="button" onclick="moveSelectedUp()">Move Up</button>
                                     <button type="button" onclick="moveSelectedDown()">Move Down</button>

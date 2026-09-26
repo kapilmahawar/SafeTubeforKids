@@ -3,6 +3,8 @@ package tv.safetubeforkids.app.ui.screens
 import androidx.compose.runtime.Immutable
 import tv.safetubeforkids.app.data.cache.ResumableVideoRow
 import tv.safetubeforkids.app.data.cache.VideoThumbnailRow
+import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
+import tv.safetubeforkids.app.data.catalog.CatalogThumbnails
 import tv.safetubeforkids.app.data.catalog.CategoryWithItems
 import tv.safetubeforkids.app.data.catalog.ContentItemEntity
 import tv.safetubeforkids.app.data.catalog.ContentItemType
@@ -39,6 +41,14 @@ data class CatalogShelfUi(
     val id: String,
     val title: String,
     val cards: List<CatalogCardUi>,
+    /**
+     * The picture that stands for the shelf itself, when one could be resolved.
+     *
+     * Null is a normal state - a shelf of nothing but unapproved videos, or a catalog with no eligible
+     * video at all - and the header simply draws no image, exactly as a card without artwork draws a
+     * placeholder.
+     */
+    val thumbnailUrl: String? = null,
 )
 
 /** Everything the home screen renders, projected from Room. */
@@ -70,6 +80,12 @@ data class CatalogUiState(
  * - **Artwork comes from the approved cache.** The catalog has no thumbnails; the video the parent
  *   already approved for that identifier supplies one. A missing thumbnail is null, and the card
  *   shows a placeholder of exactly the same size.
+ * - **Which video represents a container is the parent's configuration.** A shelf or a sub-category
+ *   resolves its picture through [CatalogThumbnails] - `AUTO` picks the first eligible video inside
+ *   it in catalog order, `VIDEO` the one the parent named - and the resolved video's artwork is then
+ *   looked up the same way a video card's is. A container that resolves to nothing keeps exactly the
+ *   artwork it had before this existed (its playlist's opening video, when it has one) and otherwise
+ *   shows the placeholder. Nothing here can fail to draw: every path ends in a url or in null.
  * - **Continue Watching is first** and contains only videos the child can still reach: the video
  *   must be half-watched *and* still approved (the query guarantees the latter) *and* still part of
  *   the currently published child-visible catalog. The catalog is what a parent curates, so removing
@@ -98,8 +114,15 @@ object CatalogUiProjection {
         catalog: List<CategoryWithItems>,
         thumbnails: List<VideoThumbnailRow>,
         resumable: List<ResumableVideoRow>,
+        /**
+         * The whole tree, so a container's picture can be resolved from the parent's thumbnail
+         * configuration. Empty is a legitimate value - every container then falls back to the artwork
+         * it had before thumbnails were configurable.
+         */
+        tree: List<CatalogNodeEntity> = emptyList(),
     ): CatalogUiState {
         val artwork = ArtworkIndex(thumbnails)
+        val representatives = CatalogThumbnails.representatives(tree)
         // Continue Watching is curated by the catalog like every other shelf, so it is filtered
         // against what the parent currently publishes before it is built.
         val visible = VisibleCatalog(catalog)
@@ -108,20 +131,24 @@ object CatalogUiProjection {
             continueWatchingShelf(resumable, visible)?.let { add(it) }
             catalog
                 .sortedWith(compareBy({ it.category.sortOrder }, { it.category.id }))
-                .forEach { row -> categoryShelf(row, artwork)?.let { add(it) } }
+                .forEach { row -> categoryShelf(row, artwork, representatives)?.let { add(it) } }
         }
 
         return CatalogUiState(shelves = shelves)
     }
 
-    private fun categoryShelf(row: CategoryWithItems, artwork: ArtworkIndex): CatalogShelfUi? {
+    private fun categoryShelf(
+        row: CategoryWithItems,
+        artwork: ArtworkIndex,
+        representatives: Map<String, String>,
+    ): CatalogShelfUi? {
         if (!row.category.enabled) return null
 
         val cards = row.items
             .asSequence()
             .filter { it.enabled }
             .sortedWith(compareBy({ it.sortOrder }, { it.id }))
-            .map { it.toCard(artwork) }
+            .map { it.toCard(artwork, representatives) }
             .toList()
 
         // A shelf with nothing to press is a heading over dead space.
@@ -131,6 +158,11 @@ object CatalogUiProjection {
             id = row.category.id,
             title = row.category.displayName,
             cards = cards,
+            // The shelf's own picture: the video the parent chose for the category, or what AUTO
+            // picked inside it. Null when there is nothing eligible, and the header then draws no
+            // image at all - there is no placeholder to preserve here, because a shelf header never
+            // had a picture before.
+            thumbnailUrl = representatives[row.category.id]?.let { artwork.forVideo(it) },
         )
     }
 
@@ -157,12 +189,19 @@ object CatalogUiProjection {
         )
     }
 
-    private fun ContentItemEntity.toCard(artwork: ArtworkIndex): CatalogCardUi = when (type) {
+    private fun ContentItemEntity.toCard(
+        artwork: ArtworkIndex,
+        representatives: Map<String, String>,
+    ): CatalogCardUi = when (type) {
+        // A container card: the picture is the video the parent chose (or AUTO picked) *inside* it.
+        // When the catalog resolves nothing - a legacy entry with no tree, a container whose videos
+        // are all hidden - the playlist's opening approved video is used, which is exactly what this
+        // card showed before thumbnails were configurable.
         ContentItemType.PLAYLIST -> CatalogCardUi(
             id = id,
             title = displayName,
             kind = CatalogCardKind.PLAYLIST,
-            thumbnailUrl = artwork.forPlaylist(youtubePlaylistId),
+            thumbnailUrl = artwork.forVideo(representatives[id]) ?: artwork.forPlaylist(youtubePlaylistId),
             playlistId = youtubePlaylistId,
         )
 

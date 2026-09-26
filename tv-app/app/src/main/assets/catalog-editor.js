@@ -266,6 +266,61 @@ var CatalogEditor = (function () {
             }
         });
 
+        // Thumbnails, once every node and parent is known: what a container says about its picture only
+        // means something in terms of the tree around it. These mirror what the server checks, so a
+        // document the browser lets through is not one the server is guaranteed to take - the server is
+        // still the authority - but the parent is told here rather than after pressing Save.
+        nodes.forEach(function (node) {
+            if (node.thumbnailUrl) {
+                found.push('node ' + node.id + ' names a picture URL; a picture comes from the app, not from a link');
+            }
+
+            var mode = thumbnailModeOf(node);
+            if (mode === null) {
+                found.push('node ' + node.id + ' has an unsupported thumbnail mode "' + node.thumbnailMode + '"');
+                return;
+            }
+
+            var selection = typeof node.thumbnailVideoId === 'string' && node.thumbnailVideoId.trim()
+                ? node.thumbnailVideoId.trim()
+                : null;
+
+            if (node.nodeType === VIDEO) {
+                if (mode !== THUMBNAIL_AUTO || selection) {
+                    found.push('video ' + node.id + ' uses its own picture and must not choose one');
+                }
+                return;
+            }
+            if (node.nodeType !== CATEGORY && node.nodeType !== SUBCATEGORY) return;
+
+            if (mode === THUMBNAIL_AUTO) {
+                if (selection) found.push('node ' + node.id + ' names a thumbnail video while its mode is AUTO');
+                return;
+            }
+
+            if (!selection) {
+                found.push('node ' + node.id + ' chooses a video as its picture but names none');
+                return;
+            }
+
+            var chosen = byId[selection];
+            if (!chosen) {
+                found.push('node ' + node.id + ' names thumbnail video ' + selection + ', which is not in this catalog');
+                return;
+            }
+            if (chosen.nodeType !== VIDEO) {
+                found.push('node ' + node.id + ' names ' + selection + ' as its picture, and that is a ' + chosen.nodeType);
+                return;
+            }
+            if (!isDescendantOf(session, selection, node.id)) {
+                found.push('thumbnail video ' + selection + ' is not inside ' + node.id);
+                return;
+            }
+            if (!thumbnailSourceOf(chosen)) {
+                found.push('thumbnail video ' + selection + ' has no YouTube id to take a picture from');
+            }
+        });
+
         return found;
     }
 
@@ -432,6 +487,14 @@ var CatalogEditor = (function () {
         var removed = subtreeIds(session, id);
         var nodes = session.nodes.filter(function (candidate) {
             return removed.indexOf(candidate.id) === -1;
+        }).map(function (candidate) {
+            // A picture chosen from the deleted subtree went with it. Clearing the choice is part of
+            // removing what the parent deleted: an id that names nothing would leave the catalog
+            // unpublishable until the parent found out why.
+            if (candidate.thumbnailVideoId && removed.indexOf(candidate.thumbnailVideoId) !== -1) {
+                return copyWith(candidate, { thumbnailMode: THUMBNAIL_AUTO, thumbnailVideoId: null });
+            }
+            return candidate;
         });
         return accept(withNodes(session, nodes));
     }
@@ -721,6 +784,178 @@ var CatalogEditor = (function () {
         });
     }
 
+    // --- the picture a container shows ---------------------------------------------------------
+    //
+    // A shelf or a subcategory is a group, not a video, so something has to stand for it in the grid.
+    // The parent either lets the app choose (`AUTO`) or names one of the videos *inside* it (`VIDEO`).
+    // There is no third option here: `CUSTOM` is a reserved value in the stored model and no screen
+    // can render one, so the editor neither offers it nor writes it - and it never stores a picture
+    // URL, because the only artwork the TV has is the artwork its own approved sources provided.
+    //
+    // What is stored is the **node id** of the chosen video, not its YouTube id: a node id names
+    // exactly one node, while the same video may legitimately sit under a shelf twice (curated onto
+    // two shelves, or imported twice), and "which of those two did the parent pick" has to have one
+    // answer. Everything below is expressed in node ids for that reason.
+    //
+    // `AUTO` is the same rule the TV applies, computed the same way - the first video inside, walking
+    // the tree in `position ASC, id ASC`, skipping anything hidden *and everything inside it* - so the
+    // editor can say truthfully which video a parent is about to get without asking the TV.
+
+    var THUMBNAIL_AUTO = 'AUTO';
+    var THUMBNAIL_VIDEO = 'VIDEO';
+    var THUMBNAIL_MODES = [THUMBNAIL_AUTO, THUMBNAIL_VIDEO];
+
+    /**
+     * A node's thumbnail mode, as one of the two the editor can render.
+     *
+     * A node stored before pictures existed carries no key at all, and the server reads that as `AUTO`
+     * - so this does too. An unknown or blank mode is reported as `null` rather than guessed at, which
+     * is what lets `problems` name it.
+     */
+    function thumbnailModeOf(node) {
+        var raw = node ? node.thumbnailMode : null;
+        if (raw === undefined || raw === null) return THUMBNAIL_AUTO;
+        return THUMBNAIL_MODES.indexOf(raw) === -1 ? null : raw;
+    }
+
+    /** Whether a video node can supply a picture at all: it has to name a video. */
+    function thumbnailSourceOf(node) {
+        var videoId = node && typeof node.youtubeVideoId === 'string' ? node.youtubeVideoId.trim() : '';
+        return videoId || null;
+    }
+
+    /**
+     * Every video inside a container, in the order `AUTO` considers them.
+     *
+     * Pre-order depth-first: a parent's children in `position ASC, id ASC`, each video taken where it
+     * stands and each nested container descended into before the next sibling. That is the order the
+     * resolver walks, so the first entry with `usable` true is exactly what `AUTO` would pick.
+     *
+     * Each entry says whether the child could actually reach that video: `reachable` is false when the
+     * video is hidden, or when anything between the container and it is - a hidden node takes its whole
+     * subtree with it. A video that is not reachable is still listed, because the parent is the one who
+     * should decide what to do about it, but it is never usable as a picture.
+     */
+    function descendantVideos(session, containerId) {
+        var container = nodeById(session, containerId);
+        if (!container || container.nodeType === VIDEO) return [];
+
+        var found = [];
+        var visited = {};
+
+        function walk(parentId, ancestorsShown, trail) {
+            childrenOf(session, parentId).forEach(function (child) {
+                // A hand-edited cycle must not loop forever, and a node is visited once.
+                if (visited[child.id]) return;
+                visited[child.id] = true;
+
+                var shown = ancestorsShown && child.enabled !== false;
+                var path = trail.concat([child.title]);
+
+                if (child.nodeType === VIDEO) {
+                    var source = thumbnailSourceOf(child);
+                    found.push({
+                        id: child.id,
+                        title: child.title,
+                        youtubeVideoId: source,
+                        enabled: child.enabled !== false,
+                        reachable: shown,
+                        usable: shown && !!source,
+                        path: path.join(' / ')
+                    });
+                    return;
+                }
+                walk(child.id, shown, path);
+            });
+        }
+
+        walk(containerId, true, []);
+        return found;
+    }
+
+    /** The video `AUTO` would use, or null when the container has nothing usable inside it. */
+    function autoVideo(session, containerId) {
+        var videos = descendantVideos(session, containerId);
+        for (var i = 0; i < videos.length; i++) {
+            if (videos[i].usable) return videos[i];
+        }
+        return null;
+    }
+
+    /** Whether [nodeId] sits anywhere below [containerId], by walking up its parents. */
+    function isDescendantOf(session, nodeId, containerId) {
+        var current = (nodeById(session, nodeId) || {}).parentId;
+        var guard = 0;
+        while (current && guard++ < 64) {
+            if (current === containerId) return true;
+            current = (nodeById(session, current) || {}).parentId;
+        }
+        return false;
+    }
+
+    /**
+     * Chooses how a container is represented: `{ id, mode, videoNodeId }`.
+     *
+     * `AUTO` clears the selection outright - "let the app choose" and "use that specific video" are
+     * two different answers and the node carries one. `VIDEO` requires a video that can actually take
+     * the part: it exists, it is a `VIDEO`, it is *inside this container*, it names a YouTube id, and
+     * it is not hidden. Anything less is refused with a reason rather than stored, because a stored
+     * choice that silently renders as something else is worse than a refusal the parent can read.
+     *
+     * A video node is refused entirely: its own picture is itself, and a second answer would be a
+     * contradiction the server refuses too.
+     */
+    function setThumbnail(session, input) {
+        var settings = input || {};
+        var node = settings.id ? nodeById(session, settings.id) : null;
+        if (!node) return refuse('that node no longer exists');
+        if (node.nodeType === VIDEO) {
+            return refuse('a video is its own picture; choose one for a shelf or subcategory instead');
+        }
+        if (node.nodeType !== CATEGORY && node.nodeType !== SUBCATEGORY) {
+            return refuse('a ' + node.nodeType + ' cannot choose a picture');
+        }
+
+        if (THUMBNAIL_MODES.indexOf(settings.mode) === -1) {
+            return refuse('choose automatic, or one video inside this ' + node.nodeType.toLowerCase());
+        }
+
+        if (settings.mode === THUMBNAIL_AUTO) {
+            var automatic = session.nodes.map(function (candidate) {
+                return candidate.id === node.id
+                    ? copyWith(candidate, { thumbnailMode: THUMBNAIL_AUTO, thumbnailVideoId: null })
+                    : candidate;
+            });
+            return accept(withNodes(session, automatic));
+        }
+
+        var chosenId = typeof settings.videoNodeId === 'string' ? settings.videoNodeId.trim() : '';
+        if (!chosenId) return refuse('choose a video to take the picture from');
+
+        var chosen = nodeById(session, chosenId);
+        if (!chosen) return refuse('that video no longer exists');
+        if (chosen.nodeType !== VIDEO) return refuse('only a video can stand for a ' + node.nodeType.toLowerCase());
+        if (chosen.id === node.id || !isDescendantOf(session, chosen.id, node.id)) {
+            return refuse('that video is not inside this ' + node.nodeType.toLowerCase());
+        }
+        if (!thumbnailSourceOf(chosen)) return refuse('that video has no YouTube id to take a picture from');
+
+        var listed = descendantVideos(session, node.id).filter(function (video) {
+            return video.id === chosen.id;
+        })[0];
+        if (!listed || !listed.usable) {
+            return refuse('that video is hidden from your child, and a hidden video cannot stand for this ' +
+                node.nodeType.toLowerCase());
+        }
+
+        var nodes = session.nodes.map(function (candidate) {
+            return candidate.id === node.id
+                ? copyWith(candidate, { thumbnailMode: THUMBNAIL_VIDEO, thumbnailVideoId: chosen.id })
+                : candidate;
+        });
+        return accept(withNodes(session, nodes));
+    }
+
     // --- video identifiers --------------------------------------------------------------------
 
     /**
@@ -854,6 +1089,9 @@ var CatalogEditor = (function () {
         SUBCATEGORY: SUBCATEGORY,
         VIDEO: VIDEO,
         SCHEMA_VERSION: SCHEMA_VERSION,
+        THUMBNAIL_AUTO: THUMBNAIL_AUTO,
+        THUMBNAIL_VIDEO: THUMBNAIL_VIDEO,
+        THUMBNAIL_MODES: THUMBNAIL_MODES,
         childTypesOf: childTypesOf,
         open: open,
         normalize: normalize,
@@ -878,6 +1116,10 @@ var CatalogEditor = (function () {
         moveTo: moveTo,
         importPlaylist: importPlaylist,
         importPlaylistFrom: importPlaylistFrom,
+        thumbnailModeOf: thumbnailModeOf,
+        descendantVideos: descendantVideos,
+        autoVideo: autoVideo,
+        setThumbnail: setThumbnail,
         videoIdFrom: videoIdFrom,
         save: save,
         reload: reload

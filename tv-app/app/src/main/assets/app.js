@@ -914,6 +914,110 @@
                 (parentId === (node.parentId || null) ? ' selected' : '') + '>' + label + '</option>';
         }).join('');
         select.disabled = options.length <= 1;
+
+        renderThumbnailControls(node);
+    }
+
+    /**
+     * The picture a shelf or subcategory shows in the grid on the TV.
+     *
+     * Only two answers exist, and neither is a URL: the app picks the first video inside (`AUTO`), or
+     * the parent names one of the videos inside it (`VIDEO`). The reserved `CUSTOM` mode is not offered
+     * at all, because no screen can render one - and the editor never sends a thumbnail URL, since the
+     * artwork the TV has is the artwork its own approved sources provided.
+     *
+     * Hidden videos are never offered as a choice: a hidden video cannot stand for a container, and
+     * offering one would store a picture that renders as something else.
+     */
+    function renderThumbnailControls(node) {
+        var block = document.getElementById('panel-thumbnail');
+        var modeSelect = document.getElementById('panel-thumbnail-mode');
+        var videoField = document.getElementById('panel-thumbnail-video-field');
+        var videoSelect = document.getElementById('panel-thumbnail-video');
+        var hint = document.getElementById('panel-thumbnail-hint');
+        if (!block || !modeSelect || !videoField || !videoSelect || !hint) return;
+
+        // A video is its own picture; only a container chooses one.
+        var container = node.nodeType === 'CATEGORY' || node.nodeType === 'SUBCATEGORY';
+        block.classList.toggle('hidden', !container);
+        if (!container) return;
+
+        var mode = CatalogEditor.thumbnailModeOf(node) || CatalogEditor.THUMBNAIL_AUTO;
+        modeSelect.value = mode;
+
+        var videos = CatalogEditor.descendantVideos(editorSession, node.id);
+        var usable = videos.filter(function (video) { return video.usable; });
+        var selected = mode === CatalogEditor.THUMBNAIL_VIDEO && node.thumbnailVideoId ? node.thumbnailVideoId : '';
+
+        // A choice that no longer qualifies is shown as itself rather than silently swapped: the parent
+        // is the one who decides which video it becomes.
+        var dangling = !!selected && !usable.some(function (video) { return video.id === selected; });
+
+        var html = usable.map(function (video) {
+            return '<option value="' + escapeHtml(video.id) + '">' + escapeHtml(video.path) + '</option>';
+        }).join('');
+        if (dangling) {
+            html += '<option value="' + escapeHtml(selected) + '">' + escapeHtml(selected) + ' — not available any more</option>';
+        }
+        videoSelect.innerHTML = html;
+        if (selected) videoSelect.value = selected;
+
+        videoField.classList.toggle('hidden', mode !== CatalogEditor.THUMBNAIL_VIDEO);
+        videoSelect.disabled = usable.length === 0 && !dangling;
+
+        hint.textContent = thumbnailHint(node, mode, usable.length, dangling);
+    }
+
+    function thumbnailHint(node, mode, usableCount, dangling) {
+        var kind = node.nodeType === 'CATEGORY' ? 'shelf' : 'subcategory';
+
+        if (mode !== CatalogEditor.THUMBNAIL_VIDEO) {
+            var auto = CatalogEditor.autoVideo(editorSession, node.id);
+            return auto
+                ? 'Automatic: the first video inside is used — currently "' + auto.title + '".'
+                : 'Automatic: this ' + kind + ' has no video inside yet, so its tile keeps the artwork its source provided.';
+        }
+        if (dangling) {
+            return 'The chosen video is not available any more, so this ' + kind +
+                ' falls back to Automatic until you choose another.';
+        }
+        if (usableCount === 0) {
+            return 'This ' + kind + ' has no video inside yet — add or import a video before choosing it as the picture.';
+        }
+        return 'The picture is taken from the video you choose. Hidden videos are not offered.';
+    }
+
+    function changeThumbnailMode() {
+        if (!editorSession || !selectedNodeId) return;
+        var mode = document.getElementById('panel-thumbnail-mode').value;
+
+        if (mode === CatalogEditor.THUMBNAIL_AUTO) {
+            applyEditorResult(CatalogEditor.setThumbnail(editorSession, { id: selectedNodeId, mode: mode }));
+            return;
+        }
+
+        // Choosing "a video I choose" selects the first video that qualifies, so the mode is never
+        // stored with an empty selection; the list beside it refines which one.
+        var node = selectedNode();
+        var usable = CatalogEditor.descendantVideos(editorSession, node.id).filter(function (video) {
+            return video.usable;
+        });
+        var keep = usable.some(function (video) { return video.id === node.thumbnailVideoId; });
+        var videoNodeId = keep ? node.thumbnailVideoId : (usable.length ? usable[0].id : '');
+        applyEditorResult(CatalogEditor.setThumbnail(editorSession, {
+            id: selectedNodeId,
+            mode: mode,
+            videoNodeId: videoNodeId,
+        }));
+    }
+
+    function changeThumbnailVideo() {
+        if (!editorSession || !selectedNodeId) return;
+        applyEditorResult(CatalogEditor.setThumbnail(editorSession, {
+            id: selectedNodeId,
+            mode: CatalogEditor.THUMBNAIL_VIDEO,
+            videoNodeId: document.getElementById('panel-thumbnail-video').value,
+        }));
     }
 
     function parentLabel(id) {
@@ -1328,6 +1432,8 @@
     window.moveSelectedDown = moveSelectedDown;
     window.moveSelectedTo = moveSelectedTo;
     window.deleteSelected = deleteSelected;
+    window.changeThumbnailMode = changeThumbnailMode;
+    window.changeThumbnailVideo = changeThumbnailVideo;
 
     // Selecting a row: delegated, so re-rendering the tree never leaves a stale handler behind.
     (function () {

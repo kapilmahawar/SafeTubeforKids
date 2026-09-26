@@ -59,6 +59,11 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
      * `WhileSubscribed` so the database work stops while the player is on screen and resumes on the
      * way back; the last value is retained, so returning from a video repaints the same shelves
      * immediately instead of flashing an empty state.
+     *
+     * The fourth flow is the tree itself, which is what a container's thumbnail is resolved from: a
+     * shelf or sub-category names (or lets the app pick) a video *inside* it, and only the tree knows
+     * what is inside. It is still Room and only Room - the thumbnail configuration arrives with the
+     * catalog the TV already synchronised, so a shelf keeps its picture with the server switched off.
      */
     val catalogState: StateFlow<CatalogUiState> = combine(
         catalogRepository.observeCatalogWithItems(),
@@ -67,8 +72,9 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
             CatalogUiProjection.RESUME_MIN_POSITION_MS,
             CatalogUiProjection.RESUME_MAX_PERCENT,
         ),
-    ) { catalog, thumbnails, resumable ->
-        CatalogUiProjection.build(catalog, thumbnails, resumable)
+        catalogRepository.observeTree(),
+    ) { catalog, thumbnails, resumable, tree ->
+        CatalogUiProjection.build(catalog, thumbnails, resumable, tree)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),

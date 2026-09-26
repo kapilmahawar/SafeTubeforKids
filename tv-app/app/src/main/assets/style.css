@@ -662,6 +662,9 @@ section {
 .catalog-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.8em; color: #9CA3AF; }
 .catalog-field input, .catalog-field select, .catalog-add input, .catalog-add select { padding: 6px 8px; border-radius: 4px; border: 1px solid #374151; background: #1F2937; color: #F3F4F6; font-size: 0.9em; }
 .catalog-field input:disabled { opacity: 0.6; }
+.catalog-field select:disabled { opacity: 0.6; }
+.catalog-thumbnail { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; margin-bottom: 8px; border-top: 1px solid #1F2937; }
+.catalog-thumbnail .catalog-hint { margin-bottom: 0; }
 .catalog-checkbox { display: flex; align-items: center; gap: 8px; font-size: 0.85em; color: #D1D5DB; cursor: pointer; }
 .catalog-checkbox input { accent-color: #22A559; }
 .catalog-add { margin-top: 16px; padding-top: 12px; border-top: 1px solid #374151; }

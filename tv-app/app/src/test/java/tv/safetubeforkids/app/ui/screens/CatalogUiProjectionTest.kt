@@ -9,8 +9,11 @@ import tv.safetubeforkids.app.data.cache.ResumableVideoRow
 import tv.safetubeforkids.app.data.cache.VideoThumbnailRow
 import tv.safetubeforkids.app.data.catalog.CategoryEntity
 import tv.safetubeforkids.app.data.catalog.CategoryWithItems
+import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
+import tv.safetubeforkids.app.data.catalog.CatalogNodeType
 import tv.safetubeforkids.app.data.catalog.ContentItemEntity
 import tv.safetubeforkids.app.data.catalog.ContentItemType
+import tv.safetubeforkids.app.data.catalog.ThumbnailMode
 
 /**
  * What the child sees, derived from rows alone.
@@ -73,7 +76,31 @@ class CatalogUiProjectionTest {
         catalog: List<CategoryWithItems> = emptyList(),
         thumbnails: List<VideoThumbnailRow> = emptyList(),
         resumable: List<ResumableVideoRow> = emptyList(),
-    ) = CatalogUiProjection.build(catalog, thumbnails, resumable)
+        tree: List<CatalogNodeEntity> = emptyList(),
+    ) = CatalogUiProjection.build(catalog, thumbnails, resumable, tree)
+
+    /** A catalog node of the tree that decides a shelf's picture. */
+    private fun node(
+        id: String,
+        parentId: String?,
+        nodeType: CatalogNodeType,
+        title: String = id,
+        position: Int = 0,
+        enabled: Boolean = true,
+        videoId: String? = null,
+        thumbnailMode: ThumbnailMode = ThumbnailMode.AUTO,
+        thumbnailVideoId: String? = null,
+    ) = CatalogNodeEntity(
+        id = id,
+        parentId = parentId,
+        nodeType = nodeType,
+        title = title,
+        position = position,
+        enabled = enabled,
+        youtubeVideoId = videoId,
+        thumbnailMode = thumbnailMode,
+        thumbnailVideoId = thumbnailVideoId,
+    )
 
     // ------------------------------------------------------------------ order
 
@@ -325,6 +352,186 @@ class CatalogUiProjectionTest {
         val card = state.shelves.single().cards.single()
         assertNull(card.thumbnailUrl)
         assertEquals("Twinkle", card.title)
+    }
+
+    // ------------------------------------------------------- the picture a container shows
+    // A shelf or a subcategory is a group, so one video inside it stands for it: the one the parent
+    // chose, or the first one the app finds. The lookup is by the container's own node id, and the
+    // artwork still comes from the approved cache and nowhere else.
+
+    private fun treeOfTheShelfItem() = listOf(
+        node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+        node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
+        node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
+        node("i-p#second", "i-p", CatalogNodeType.VIDEO, "Second", position = 1, videoId = "vid2"),
+    )
+
+    @Test
+    fun aShelfShowsThePictureOfAVideoInsideIt() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
+                VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
+            ),
+            tree = treeOfTheShelfItem(),
+        )
+
+        assertEquals("https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl)
+    }
+
+    @Test
+    fun aShelfShowsThePictureOfTheVideoTheParentChose() {
+        val tree = treeOfTheShelfItem().map {
+            if (it.id == "i-p") {
+                it.copy(thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-p#second")
+            } else {
+                it
+            }
+        }
+
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
+                VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
+            ),
+            tree = tree,
+        )
+
+        assertEquals("https://img/second.jpg", state.shelves.single().cards.single().thumbnailUrl)
+    }
+
+    @Test
+    fun aShelfFallsBackToItsPlaylistArtworkWhenTheChosenVideoIsNotCached() {
+        val tree = treeOfTheShelfItem().map {
+            if (it.id == "i-p") {
+                it.copy(thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-p#second")
+            } else {
+                it
+            }
+        }
+
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+            ),
+            // The approved cache knows the playlist's opening video but not the chosen one: a video
+            // whose source is not approved has no artwork, and none may be invented for it.
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
+            tree = tree,
+        )
+
+        assertEquals("https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl)
+    }
+
+    @Test
+    fun theShelfHeadingCarriesTheSamePictureAsTheShelf() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+            ),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
+            tree = listOf(
+                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
+                node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
+            ),
+        )
+
+        assertEquals("https://img/first.jpg", state.shelves.single().thumbnailUrl)
+        assertEquals(state.shelves.single().cards.single().thumbnailUrl, state.shelves.single().thumbnailUrl)
+    }
+
+    @Test
+    fun aShelfWithNothingToTakeAPictureFromHasNoShelfPicture() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+            ),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
+            tree = listOf(
+                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
+                node("i-p#off", "i-p", CatalogNodeType.VIDEO, "Hidden", position = 0, enabled = false, videoId = "vid1"),
+            ),
+        )
+
+        assertNull("a hidden video may not stand for the shelf", state.shelves.single().thumbnailUrl)
+        assertEquals(
+            "and the card keeps the artwork it had before thumbnails existed",
+            "https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl,
+        )
+    }
+
+    @Test
+    fun aLegacyCatalogWithoutATreeProjectsExactlyAsBefore() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-v", "Twinkle", 0, "vid1"))),
+            ),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLone", "https://img/vid1.jpg")),
+        )
+
+        assertEquals("https://img/vid1.jpg", state.shelves.single().cards.single().thumbnailUrl)
+        assertNull("there is no tree, so there is no shelf picture", state.shelves.single().thumbnailUrl)
+    }
+
+    @Test
+    fun theContinueWatchingShelfHasNoHeaderPictureBecauseItIsNotAContainer() {
+        // Continue Watching is a shelf the app builds, not a category a parent configured, so there is
+        // no node for a picture to come from and its header stays exactly what it has always been.
+        val state = build(
+            catalog = catalogPublishingApproved(),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLapproved", "https://img/vid1.jpg")),
+            resumable = listOf(resumable("vid1", "Half Watched")),
+            tree = listOf(
+                node("cat-approved", null, CatalogNodeType.CATEGORY, "Approved"),
+                node("i-approved", "cat-approved", CatalogNodeType.SUBCATEGORY, "Approved", position = 0),
+                node("i-approved#v", "i-approved", CatalogNodeType.VIDEO, "Half Watched", position = 0, videoId = "vid1"),
+            ),
+        )
+
+        val continueWatching = state.shelves.first { it.id.startsWith("shelf-continue-watching") }
+        assertNull("a built shelf has no category to take a picture from", continueWatching.thumbnailUrl)
+        assertEquals(1, continueWatching.cards.size)
+        assertEquals(
+            "the card keeps its own artwork",
+            "https://img/vid1.jpg", continueWatching.cards.single().thumbnailUrl,
+        )
+    }
+
+    @Test
+    fun aVideoCardIsUnaffectedByWhosePictureTheShelfIs() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-music", "Music", 0,
+                    items = listOf(
+                        playlist("i-p", "Nursery", 0, "PLn"),
+                        video("i-v", "Twinkle", 1, "vid2"),
+                    ),
+                ),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
+                VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
+            ),
+            tree = listOf(
+                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
+                node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
+                node("i-v", "cat-music", CatalogNodeType.VIDEO, "Twinkle", position = 1, videoId = "vid2"),
+            ),
+        )
+
+        val cards = state.shelves.single().cards
+        assertEquals("the container card uses its inside", "https://img/first.jpg", cards[0].thumbnailUrl)
+        assertEquals("a video card is still itself", "https://img/second.jpg", cards[1].thumbnailUrl)
     }
 
     // ------------------------------------------------------------------ continue watching

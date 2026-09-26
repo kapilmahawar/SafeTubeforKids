@@ -13,6 +13,11 @@ import org.robolectric.RuntimeEnvironment
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
+import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
+import tv.safetubeforkids.app.data.catalog.CatalogNodeRepository
+import tv.safetubeforkids.app.data.catalog.CatalogNodeType
+import tv.safetubeforkids.app.data.catalog.CatalogThumbnails
+import tv.safetubeforkids.app.data.catalog.ThumbnailMode
 
 /**
  * The playback gate, on its own.
@@ -191,5 +196,44 @@ class PlaybackAuthorizationTest {
                 authorize(item.videoId) is PlaybackApproval.Approved,
             )
         }
+    }
+
+    // --------------------------------------------- a picture is not a permission either
+
+    @Test
+    fun aVideoThatStandsForAShelfIsStillNotPlayable() {
+        // The catalog tree can say which video represents a shelf. That is a *picture*, and nothing
+        // else: the gate is asked about the very video the shelf points at, and it is still the only
+        // thing that decides whether anything plays.
+        val nodes = CatalogNodeRepository(db)
+        runBlocking {
+            nodes.add(
+                CatalogNodeEntity(
+                    id = "cat-cartoon", parentId = null, nodeType = CatalogNodeType.CATEGORY,
+                    title = "Cartoons", position = 0,
+                    thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-unapproved",
+                )
+            )
+            nodes.add(
+                CatalogNodeEntity(
+                    id = "i-unapproved", parentId = "cat-cartoon", nodeType = CatalogNodeType.VIDEO,
+                    title = "Unapproved", position = 0, youtubeVideoId = "vidUnapproved",
+                )
+            )
+        }
+
+        assertEquals(
+            "the shelf does take its picture from that video",
+            "vidUnapproved", CatalogThumbnails.representativeFor(runBlocking { nodes.tree() }, "cat-cartoon"),
+        )
+        assertTrue(
+            "and it still may not play",
+            authorize("vidUnapproved") is PlaybackApproval.Rejected,
+        )
+
+        // Approving the source is what makes it playable - never the catalog pointing at it.
+        approveSource("PLapproved")
+        cacheVideos("PLapproved", listOf("vidUnapproved"))
+        assertTrue(authorize("vidUnapproved") is PlaybackApproval.Approved)
     }
 }

@@ -466,30 +466,179 @@ class CatalogPayloadValidatorTest {
     }
 
     // ------------------------------------------------------------------ thumbnails
+    //
+    // A container's picture is either chosen by the app (`AUTO`) or named by the parent (`VIDEO`), and
+    // the name is the **node id** of a video inside that container - not a YouTube id, and not a URL.
+    // Everything about the choice that depends on the tree around it is checked here: the node exists,
+    // it is a video, it sits below the container, and it has a picture to give.
 
     @Test
     fun anAutoThumbnailIsTheDefaultAndNeedsNothing() {
         assertValid(listOf(category(position = 0), container(id = "i1", position = 0)))
     }
 
+    /** A shelf holding a subcategory, which holds one video: the shape every rule below is asked of. */
+    private fun shelfWithOneVideo(
+        thumbnailMode: String = CATALOG_THUMBNAIL_MODE_AUTO,
+        thumbnailVideoId: String? = null,
+        videoId: String? = "vidA",
+        videoEnabled: Boolean = true,
+        containerEnabled: Boolean = true,
+    ) = listOf(
+        category(id = "cat-music", position = 0),
+        container(id = "i1", position = 0, enabled = containerEnabled, thumbnailMode = thumbnailMode, thumbnailVideoId = thumbnailVideoId),
+        video(id = "v1", parentId = "i1", title = "Twinkle", position = 0, videoId = videoId, enabled = videoEnabled),
+    )
+
     @Test
-    fun aVideoThumbnailNeedsTheVideoItTakesItsPictureFrom() {
+    fun aVideoThumbnailNamesTheVideoInsideTheContainer() {
+        assertValid(shelfWithOneVideo(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v1"))
+    }
+
+    @Test
+    fun aVideoThumbnailNestedDeeperInsideIsStillInside() {
         assertValid(
             listOf(
-                category(position = 0),
-                container(
-                    id = "i1", position = 0,
-                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "vidA",
+                category(
+                    id = "cat-music", position = 0,
+                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v1",
                 ),
+                container(id = "i1", parentId = "cat-music", position = 0),
+                video(id = "v1", parentId = "i1", title = "Twinkle", position = 0, videoId = "vidA"),
             )
         )
+    }
+
+    @Test
+    fun aVideoThumbnailWithoutAChoiceIsRefused() {
+        assertTrue(
+            reasons(listOf(category(position = 0), container(id = "i1", position = 0, thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO)))
+                .any { it.contains("requires the node id of a video inside this container") }
+        )
+    }
+
+    @Test
+    fun aVideoThumbnailNamingSomethingThatIsNotThereIsRefused() {
+        assertTrue(
+            reasons(shelfWithOneVideo(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "ghost"))
+                .any { it.contains("thumbnail video 'ghost' does not exist in this catalog") }
+        )
+    }
+
+    @Test
+    fun aVideoThumbnailNamingSomethingThatIsNotAVideoIsRefused() {
+        assertTrue(
+            reasons(shelfWithOneVideo(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "i1"))
+                .any { it.contains("thumbnail video 'i1' is a SUBCATEGORY, not a VIDEO") }
+        )
+
+        // A shelf may not name another shelf either.
         assertTrue(
             reasons(
                 listOf(
-                    category(position = 0),
-                    container(id = "i1", position = 0, thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO),
+                    category(id = "cat-music", position = 0),
+                    category(id = "cat-other", title = "Other", position = 1),
+                    container(
+                        id = "i1", position = 0,
+                        thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "cat-other",
+                    ),
                 )
-            ).any { it.contains("requires the youtubeVideoId to take its picture from") }
+            ).any { it.contains("thumbnail video 'cat-other' is a CATEGORY, not a VIDEO") }
+        )
+    }
+
+    @Test
+    fun aVideoThumbnailNamingAVideoOutsideTheContainerIsRefused() {
+        val problems = reasons(
+            listOf(
+                category(id = "cat-music", position = 0),
+                container(
+                    id = "i1", position = 0,
+                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v2",
+                ),
+                video(id = "v1", parentId = "i1", title = "Inside", position = 0, videoId = "vidA"),
+                container(id = "i2", title = "Other", position = 1),
+                video(id = "v2", parentId = "i2", title = "Elsewhere", position = 0, videoId = "vidB"),
+            )
+        )
+
+        assertTrue(problems.any { it.contains("thumbnail video 'v2' is not inside 'i1'") })
+    }
+
+    @Test
+    fun aVideoThumbnailNamingAVideoWithNoYoutubeIdIsRefused() {
+        assertTrue(
+            reasons(
+                shelfWithOneVideo(
+                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO,
+                    thumbnailVideoId = "v1",
+                    videoId = null,
+                )
+            ).any { it.contains("has no YouTube video id to take a picture from") }
+        )
+    }
+
+    @Test
+    fun aVideoThumbnailNamingAHiddenVideoIsAcceptedBecauseHidingIsReversible() {
+        // Hiding a video must never make a catalog unpublishable: the choice is the parent's, the TV
+        // falls back to AUTO while the video is hidden, and unhiding it brings the picture back.
+        assertValid(
+            shelfWithOneVideo(
+                thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO,
+                thumbnailVideoId = "v1",
+                videoEnabled = false,
+            )
+        )
+    }
+
+    @Test
+    fun aVideoIsItsOwnThumbnailSoItChoosesNothing() {
+        assertValid(shelfWithOneVideo())
+
+        assertTrue(
+            reasons(
+                listOf(
+                    category(id = "cat-music", position = 0),
+                    video(id = "v1", parentId = "cat-music", position = 0, videoId = "vidA", thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO),
+                )
+            ).any { it.contains("a VIDEO node uses its own YouTube thumbnail") }
+        )
+
+        assertTrue(
+            reasons(
+                listOf(
+                    category(id = "cat-music", position = 0),
+                    video(
+                        id = "v1", parentId = "cat-music", position = 0, videoId = "vidA",
+                        thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v1",
+                    ),
+                )
+            ).any { it.contains("a VIDEO node must not name a thumbnail video") }
+        )
+    }
+
+    @Test
+    fun aShelfChoosesItsPictureFromInsideItselfToo() {
+        assertValid(
+            listOf(
+                category(
+                    id = "cat-music", position = 0,
+                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v1",
+                ),
+                video(id = "v1", parentId = "cat-music", position = 0, videoId = "vidA"),
+            )
+        )
+
+        assertTrue(
+            reasons(
+                listOf(
+                    category(
+                        id = "cat-music", position = 0,
+                        thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "v2",
+                    ),
+                    video(id = "v1", parentId = "cat-music", position = 0, videoId = "vidA"),
+                )
+            ).any { it.contains("thumbnail video 'v2' does not exist in this catalog") }
         )
     }
 

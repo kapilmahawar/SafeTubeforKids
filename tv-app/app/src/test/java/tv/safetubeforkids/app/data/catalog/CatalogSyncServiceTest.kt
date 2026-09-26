@@ -688,6 +688,203 @@ class CatalogSyncServiceTest {
         assertFalse(item.displayName.contains(item.youtubePlaylistId!!))
     }
 
+    // ---------------------------------------------------- §23 the picture a container shows
+    //
+    // A picture is configuration: it travels as part of the same document, is stored in the same rows
+    // as everything else, and decides nothing about playback. These tests sync documents and then read
+    // the *database* back, because the point is that the choice is stored rather than remembered.
+
+    /** A shelf holding a subcategory, which holds two videos: the shape a picture is chosen in. */
+    private fun shelfWithTwoVideos(
+        thumbnailMode: String = CATALOG_THUMBNAIL_MODE_AUTO,
+        thumbnailVideoId: String? = null,
+        secondEnabled: Boolean = true,
+    ) = listOf(
+        CatalogNodeDto(
+            id = "cat-cartoon", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+            title = "Cartoons", position = 0,
+        ),
+        CatalogNodeDto(
+            id = "i-nursery", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+            title = "Nursery", position = 0,
+            thumbnailMode = thumbnailMode, thumbnailVideoId = thumbnailVideoId,
+        ),
+        CatalogNodeDto(
+            id = "i-first", parentId = "i-nursery", nodeType = CATALOG_NODE_TYPE_VIDEO,
+            title = "First", position = 0, youtubeVideoId = "vidFirst",
+        ),
+        CatalogNodeDto(
+            id = "i-second", parentId = "i-nursery", nodeType = CATALOG_NODE_TYPE_VIDEO,
+            title = "Second", position = 1, youtubeVideoId = "vidSecond", enabled = secondEnabled,
+        ),
+    )
+
+    /** The stored tree, read the way the home screen reads it. */
+    private fun storedTree(): List<CatalogNodeEntity> = runBlocking { CatalogNodeRepository(db).tree() }
+
+    private fun enqueueShelf(version: Long, nodes: List<CatalogNodeDto>) {
+        enqueueCatalog(CatalogSnapshot(CATALOG_SCHEMA_VERSION, version, canonicalNodes(listOf(nodes))))
+    }
+
+    @Test
+    fun aPictureChosenByTheParentArrivesWithTheCatalogAndIsStoredWithIt() = runBlocking {
+        enqueueShelf(1L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-second"))
+
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        val stored = CatalogNodeRepository(db).node("i-nursery")!!
+        assertEquals(ThumbnailMode.VIDEO, stored.thumbnailMode)
+        assertEquals("i-second", stored.thumbnailVideoId)
+        assertNull("no URL is ever stored for a picture", stored.thumbnailUrl)
+
+        val rows = storedTree()
+        assertEquals("vidSecond", CatalogThumbnails.representativeFor(rows, "i-nursery"))
+        assertEquals(
+            "the shelf above it is a container in its own right, so it is still automatic for itself",
+            "vidFirst", CatalogThumbnails.representativeFor(rows, "cat-cartoon"),
+        )
+    }
+
+    @Test
+    fun theStoredPictureIsReadBackFromTheDatabaseAfterARestartRatherThanRemembered() = runBlocking {
+        enqueueShelf(1L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-second"))
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        // A restart: nothing of the sync is held in memory, so everything below comes from the rows.
+        val afterRestart = CatalogNodeRepository(db).tree()
+        val representatives = CatalogThumbnails.representatives(afterRestart)
+
+        assertEquals("vidSecond", representatives["i-nursery"])
+        assertEquals(
+            "and the shelf above answers automatic for itself rather than borrowing the nested choice",
+            "vidFirst", representatives["cat-cartoon"],
+        )
+    }
+
+    @Test
+    fun aPictureEditIsAppliedInPlaceAndChangesNothingElseAboutTheNode() = runBlocking {
+        enqueueShelf(1L, shelfWithTwoVideos())
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        val before = CatalogNodeRepository(db).node("i-nursery")!!
+        enqueueShelf(2L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-second"))
+
+        assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
+
+        val after = CatalogNodeRepository(db).node("i-nursery")!!
+        // Same row, same identity, same content - only the picture columns moved.
+        assertEquals(before.id, after.id)
+        assertEquals(before.parentId, after.parentId)
+        assertEquals(before.title, after.title)
+        assertEquals(before.position, after.position)
+        assertEquals(before.enabled, after.enabled)
+        assertEquals(before.youtubePlaylistId, after.youtubePlaylistId)
+        assertEquals(before.createdAt, after.createdAt)
+        assertEquals(ThumbnailMode.VIDEO, after.thumbnailMode)
+        assertEquals("i-second", after.thumbnailVideoId)
+    }
+
+    @Test
+    fun hidingTheChosenVideoKeepsTheChoiceAndFallsBackToTheNextPicture() = runBlocking {
+        enqueueShelf(1L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-second"))
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        enqueueShelf(2L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-second", secondEnabled = false))
+        assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
+
+        val stored = CatalogNodeRepository(db).node("i-nursery")!!
+        assertEquals("hiding is reversible, so the choice is kept", "i-second", stored.thumbnailVideoId)
+        assertEquals(
+            "and while it is hidden the first video still shown stands in",
+            "vidFirst", CatalogThumbnails.representativeFor(storedTree(), "i-nursery"),
+        )
+    }
+
+    @Test
+    fun aPictureNamingNothingIsRefusedWholesaleAndTheLocalCatalogIsUntouched() = runBlocking {
+        installLocal(1L, listOf(category("cat-cartoon", "Cartoon", 0)))
+        enqueueShelf(2L, shelfWithTwoVideos(CATALOG_THUMBNAIL_MODE_VIDEO, "i-ghost"))
+
+        val result = service().syncCatalog()
+
+        assertTrue("expected InvalidCatalog, got $result", result is CatalogSyncResult.InvalidCatalog)
+        assertTrue(
+            (result as CatalogSyncResult.InvalidCatalog).problems.any { it.location == "nodes[1].thumbnailVideoId" },
+        )
+        assertEquals("no part of version 2 may appear", listOf("Cartoon"), localCategoryNames())
+        assertNull(CatalogNodeRepository(db).node("i-nursery"))
+        assertEquals(1L, repository.getMetadata()!!.catalogVersion)
+    }
+
+    @Test
+    fun aPictureNamingAVideoOutsideItsContainerIsRefusedAsWell() = runBlocking {
+        installLocal(1L, listOf(category("cat-cartoon", "Cartoon", 0)))
+
+        enqueueShelf(
+            2L,
+            listOf(
+                CatalogNodeDto(
+                    id = "cat-cartoon", parentId = null, nodeType = CATALOG_NODE_TYPE_CATEGORY,
+                    title = "Cartoons", position = 0,
+                ),
+                CatalogNodeDto(
+                    id = "i-nursery", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+                    title = "Nursery", position = 0,
+                    thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "i-elsewhere",
+                ),
+                CatalogNodeDto(
+                    id = "i-elsewhere", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_VIDEO,
+                    title = "Elsewhere", position = 1, youtubeVideoId = "vidElsewhere",
+                ),
+            ),
+        )
+
+        assertTrue(service().syncCatalog() is CatalogSyncResult.InvalidCatalog)
+        assertNull("the container must not exist after a refusal", CatalogNodeRepository(db).node("i-nursery"))
+    }
+
+    @Test
+    fun changingAPictureDisturbsNoPlaylistMaterialisationAndNoItem() = runBlocking {
+        val curated = listOf(
+            CatalogNodeDto(
+                id = "i-curated", parentId = "cat-cartoon", nodeType = CATALOG_NODE_TYPE_SUBCATEGORY,
+                title = "Curated", position = 1,
+            ),
+            CatalogNodeDto(
+                id = "i-a", parentId = "i-curated", nodeType = CATALOG_NODE_TYPE_VIDEO,
+                title = "A", position = 0, youtubeVideoId = "vidA",
+            ),
+            CatalogNodeDto(
+                id = "i-b", parentId = "i-curated", nodeType = CATALOG_NODE_TYPE_VIDEO,
+                title = "B", position = 1, youtubeVideoId = "vidB",
+            ),
+        )
+        val imported = { category("cat-cartoon", "Cartoon", 0, listOf(playlistItem("i-cocomelon", "Cocomelon", 0, "PLcocomelon"))) }
+
+        enqueueShelf(1L, imported() + curated)
+        assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
+
+        val before = localAllItems().map { Triple(it.id, it.displayName, it.type) }
+        val beforeCount = localItemCount()
+
+        // Version 2 changes one thing: which video stands for the curated subcategory.
+        enqueueShelf(
+            2L,
+            imported() + curated.map {
+                if (it.id == "i-curated") {
+                    it.copy(thumbnailMode = CATALOG_THUMBNAIL_MODE_VIDEO, thumbnailVideoId = "i-b")
+                } else {
+                    it
+                }
+            },
+        )
+        assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
+
+        assertEquals("the entries the child sees are exactly the same", before, localAllItems().map { Triple(it.id, it.displayName, it.type) })
+        assertEquals(beforeCount, localItemCount())
+        assertEquals("vidB", CatalogThumbnails.representativeFor(storedTree(), "i-curated"))
+    }
+
     // ------------------------------------------------------------------ §34 last known good
 
     @Test

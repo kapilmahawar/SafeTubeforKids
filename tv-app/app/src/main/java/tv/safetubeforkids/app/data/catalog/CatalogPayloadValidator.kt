@@ -133,7 +133,109 @@ object CatalogPayloadValidator {
 
         siblingProblems(nodes, problems)
 
+        // Thumbnail configuration, once every node and parent is known: what a container says about
+        // its picture only means something in terms of the tree around it.
+        thumbnailProblems(nodes, byId, typeById, problems)
+
         return if (problems.isEmpty()) Outcome.Valid(nodes) else Outcome.Invalid(problems)
+    }
+
+    /**
+     * A container's picture is either chosen by the app (`AUTO`) or named by the parent (`VIDEO`).
+     *
+     * The named video is a **node id**, and every part of that claim is checked here rather than in
+     * whatever rendered it: the node exists in this document, it is a `VIDEO`, it sits *below* the
+     * container it is chosen for, and it carries a usable YouTube id - because that id is what
+     * artwork is looked up by. A `VIDEO` node may not carry a selection at all: its picture is itself.
+     *
+     * None of it grants anything. A video chosen as a shelf's picture is still an ordinary catalog
+     * entry, and still has to pass `PlaybackAuthorization` to play.
+     */
+    private fun thumbnailProblems(
+        nodes: List<CatalogNodeDto>,
+        byId: Map<String, CatalogNodeDto>,
+        typeById: Map<String, CatalogNodeType>,
+        problems: MutableList<Problem>,
+    ) {
+        nodes.forEachIndexed { index, node ->
+            val where = "nodes[$index]"
+            val type = CatalogNodeWire.nodeTypeOf(node.nodeType) ?: return@forEachIndexed
+            val mode = CatalogNodeWire.thumbnailModeOf(node.thumbnailMode) ?: return@forEachIndexed
+            val selection = node.thumbnailVideoId
+
+            if (type == CatalogNodeType.VIDEO) {
+                // A video is its own thumbnail; a selection on one would be a second, contradictory
+                // answer to "what picture represents this".
+                if (mode != ThumbnailMode.AUTO) {
+                    problems += Problem(
+                        "$where.thumbnailMode",
+                        "a VIDEO node uses its own YouTube thumbnail; only a CATEGORY or SUBCATEGORY chooses one",
+                    )
+                }
+                if (selection != null) {
+                    problems += Problem(
+                        "$where.thumbnailVideoId",
+                        "a VIDEO node must not name a thumbnail video; its picture is itself",
+                    )
+                }
+                return@forEachIndexed
+            }
+
+            if (mode != ThumbnailMode.VIDEO) return@forEachIndexed
+
+            val chosenId = selection?.takeIf { it.isNotBlank() }
+            if (chosenId == null) {
+                problems += Problem(
+                    "$where.thumbnailVideoId",
+                    "a VIDEO thumbnail requires the node id of a video inside this container",
+                )
+                return@forEachIndexed
+            }
+
+            val chosen = byId[chosenId]
+            if (chosen == null) {
+                problems += Problem(
+                    "$where.thumbnailVideoId",
+                    "thumbnail video '$chosenId' does not exist in this catalog",
+                )
+                return@forEachIndexed
+            }
+            if (typeById[chosenId] != CatalogNodeType.VIDEO) {
+                problems += Problem(
+                    "$where.thumbnailVideoId",
+                    "thumbnail video '$chosenId' is a ${chosen.nodeType}, not a VIDEO",
+                )
+                return@forEachIndexed
+            }
+            if (!isDescendant(chosenId, node.id, byId)) {
+                problems += Problem(
+                    "$where.thumbnailVideoId",
+                    "thumbnail video '$chosenId' is not inside '${node.id}'",
+                )
+                return@forEachIndexed
+            }
+            if (chosen.youtubeVideoId.isNullOrBlank()) {
+                problems += Problem(
+                    "$where.thumbnailVideoId",
+                    "thumbnail video '$chosenId' has no YouTube video id to take a picture from",
+                )
+            }
+        }
+    }
+
+    /** Whether [nodeId] sits anywhere below [containerId], by walking up its parents. */
+    private fun isDescendant(
+        nodeId: String,
+        containerId: String,
+        byId: Map<String, CatalogNodeDto>,
+    ): Boolean {
+        var current = byId[nodeId]?.parentId
+        var guard = 0
+        while (current != null && guard++ < 64) {
+            if (current == containerId) return true
+            current = byId[current]?.parentId
+        }
+        return false
     }
 
     /** An unknown `nodeType` is named, because that is the only actionable thing to say about it. */
@@ -197,9 +299,13 @@ object CatalogPayloadValidator {
     }
 
     /**
-     * Thumbnails: `AUTO` needs nothing, `VIDEO` needs the video it takes its picture from, and
-     * `CUSTOM` is refused because it is reserved rather than implemented - storing it would let a
-     * parent configure something no screen can render. A URL is refused for the same reason.
+     * The thumbnail rules that need nothing but the node itself: `AUTO` takes the first video's
+     * picture and must not name one, `CUSTOM` is refused because it is reserved rather than
+     * implemented, and a URL is refused for the same reason.
+     *
+     * Whether a `VIDEO` choice names something that can actually stand for the container is a
+     * question about the tree - the node has to exist, be a video, and sit *inside* this container -
+     * so it is asked in [thumbnailProblems] once every node and parent is known, not here.
      */
     private fun thumbnailProblems(node: CatalogNodeDto, where: String, problems: MutableList<Problem>) {
         val mode = CatalogNodeWire.thumbnailModeOf(node.thumbnailMode)
@@ -220,12 +326,7 @@ object CatalogPayloadValidator {
                 )
             }
 
-            ThumbnailMode.VIDEO -> if (node.thumbnailVideoId.isNullOrBlank()) {
-                problems += Problem(
-                    "$where.thumbnailVideoId",
-                    "a VIDEO thumbnail requires the youtubeVideoId to take its picture from",
-                )
-            }
+            ThumbnailMode.VIDEO -> Unit
 
             ThumbnailMode.CUSTOM -> problems += Problem(
                 "$where.thumbnailMode",
