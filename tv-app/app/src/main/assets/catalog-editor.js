@@ -455,10 +455,11 @@ var CatalogEditor = (function () {
         var node = id ? nodeById(session, id) : null;
         if (!node) return refuse('that node no longer exists');
         if (!title) return refuse('a name cannot be blank');
-        if (node.nodeType === VIDEO) {
-            return refuse('a video keeps the name it was added with; rename the shelf or subcategory instead');
-        }
 
+        // A name is a name for every kind of node, a video included: it is what the parent chose to
+        // call the thing, not the thing itself. Renaming touches that one string and nothing else -
+        // the node keeps its id, a video keeps its YouTube id and its provenance, and no position,
+        // enabled state or resume history moves.
         var nodes = session.nodes.map(function (candidate) {
             return candidate.id === id ? copyWith(candidate, { title: title }) : candidate;
         });

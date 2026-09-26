@@ -27,6 +27,7 @@
     --brand: #2f6df6;
     --brand-ink: #ffffff;
     --brand-soft: #e6eeff;
+    --brand-text: #1c4ed8;
     --ok: #117a4b;
     --ok-soft: #e2f5ea;
     --warn: #9a5b00;
@@ -61,6 +62,7 @@
     --brand: #6fa2ff;
     --brand-ink: #08111f;
     --brand-soft: #16273f;
+    --brand-text: #9dc0ff;
     --ok: #57d094;
     --ok-soft: #14291f;
     --warn: #ffc061;
@@ -298,7 +300,7 @@ button {
 }
 
 .tab.is-active {
-    color: var(--brand);
+    color: var(--brand-text);
     box-shadow: inset 0 3px 0 var(--brand);
 }
 
@@ -341,7 +343,7 @@ button {
     background: none;
     border: 0;
     padding: 4px 2px;
-    color: var(--brand);
+    color: var(--brand-text);
     font-size: var(--fs-sm);
     cursor: pointer;
 }
@@ -353,7 +355,7 @@ button {
 
 .screen__title {
     font-size: 26px;
-    font-weight: 750;
+    font-weight: 700;
     letter-spacing: -0.02em;
     line-height: 1.2;
 }
@@ -454,7 +456,7 @@ button {
 }
 
 .card__title {
-    font-weight: 650;
+    font-weight: 600;
     font-size: var(--fs);
     overflow-wrap: anywhere;
 }
@@ -537,6 +539,109 @@ button {
     line-height: 1;
 }
 
+/* --- categories: the cards the library is made of ---------------------------------------- */
+
+.tiles {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--gap);
+}
+
+.tile {
+    display: flex;
+    align-items: stretch;
+    gap: 4px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+
+.tile__main {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1 1 auto;
+    min-width: 0;
+    min-height: 76px;
+    padding: 14px 4px 14px 16px;
+    background: none;
+    border: 0;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tile__body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tile__title {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    overflow-wrap: anywhere;
+}
+
+.tile__meta {
+    color: var(--text-dim);
+    font-size: var(--fs-sm);
+}
+
+.tile__chevron {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--text-dim);
+    font-size: 24px;
+    line-height: 1;
+}
+
+.tile__actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding-right: 10px;
+    flex: 0 0 auto;
+}
+
+.tile .btn--icon {
+    align-self: center;
+}
+
+.tile--hidden {
+    background: repeating-linear-gradient(135deg, var(--surface), var(--surface) 10px, var(--surface-2) 10px, var(--surface-2) 20px);
+}
+
+/* --- settings: named groups of cards ------------------------------------------------------ */
+
+.settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.settings-group__title {
+    color: var(--text-dim);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.settings-group__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.screen__section-title {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+}
+
 .two-up {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -610,7 +715,7 @@ button {
 .btn--quiet {
     background: transparent;
     border-color: transparent;
-    color: var(--brand);
+    color: var(--brand-text);
 }
 
 .btn--block {
@@ -629,6 +734,14 @@ button {
     padding: 0;
     border-radius: 12px;
     font-size: 18px;
+}
+
+/* The two reorder arrows: a fingertip each, and quieter than the menu beside them. */
+.btn--icon--sm {
+    width: 40px;
+    min-width: 40px;
+    min-height: 40px;
+    font-size: 13px;
 }
 
 .btn:disabled,
@@ -667,7 +780,7 @@ button {
 }
 
 .field__label {
-    font-weight: 650;
+    font-weight: 600;
     font-size: var(--fs-sm);
 }
 
@@ -768,7 +881,7 @@ button {
 }
 
 .switch__title {
-    font-weight: 650;
+    font-weight: 600;
 }
 
 .segment {
@@ -787,7 +900,7 @@ button {
     border-radius: 999px;
     background: transparent;
     color: var(--text-dim);
-    font-weight: 650;
+    font-weight: 600;
     cursor: pointer;
 }
 
@@ -939,6 +1052,34 @@ button {
     animation: spin .7s linear infinite;
 }
 
+/* --- skeletons: what a loading screen is made of ------------------------------------------ */
+
+.skeletons {
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
+}
+
+.skeleton {
+    background: linear-gradient(90deg, var(--surface-2), var(--surface-3), var(--surface-2));
+    background-size: 200% 100%;
+    border-radius: var(--radius);
+    animation: shimmer 1.4s ease-in-out infinite;
+}
+
+.skeleton--row {
+    height: 76px;
+}
+
+@keyframes shimmer {
+    from {
+        background-position: 200% 0;
+    }
+    to {
+        background-position: -200% 0;
+    }
+}
+
 @keyframes spin {
     to {
         transform: rotate(360deg);
@@ -982,7 +1123,7 @@ button {
 
 .stat__value {
     font-size: 22px;
-    font-weight: 750;
+    font-weight: 700;
     line-height: 1.1;
 }
 
@@ -1141,6 +1282,10 @@ button {
 
     .cards {
         grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    }
+
+    .tiles {
+        grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
     }
 
     .cards--shelf {

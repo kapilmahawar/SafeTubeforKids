@@ -240,6 +240,41 @@
         }
     }
 
+    /**
+     * A message a parent can act on, from whatever the server or the network said.
+     *
+     * Server failures arrive in two flavours: the ones this project wrote on purpose ("Paste a
+     * YouTube playlist or video link", "A whole channel is not a shelf…") and the ones that are
+     * somebody else's words - an extractor exception, a socket timeout, a JSON parser complaint.
+     * The first kind is more useful than anything this page could invent, so it is passed through;
+     * the second is a sentence a parent cannot act on, so it becomes one they can.
+     */
+    var FRIENDLY_FAILURES = [
+        { match: /private|unavailable|not available|deleted|removed/i, says: 'That playlist is private or no longer on YouTube.' },
+        { match: /offline|simulated/i, says: 'The TV could not reach YouTube just now. Try again in a moment.' },
+        { match: /timeout|timed out|connect|socket|unreachable|503/i, says: 'The TV did not answer. Check that it is on and on the same wifi.' },
+        { match: /not found|no such|404/i, says: 'Nothing was found at that link.' },
+        { match: /list|playlist.*(empty|no videos)|no videos/i, says: 'That playlist has no videos that can be added.' },
+    ];
+
+    /** True when a server message is one the project wrote for a parent to read. */
+    function isParentReadable(message) {
+        if (!message || typeof message !== 'string') return false;
+        if (message.length > 160) return false;
+        return !/(exception|\bnull\b|undefined|\bat [a-z]+\.|\.kt:|\.java:|json|serializ|extract|url:|http[s]?:\/\/127|stack)/i
+            .test(message);
+    }
+
+    function humanError(data, fallback) {
+        var message = (data && data.error) || '';
+        if (isParentReadable(message)) return message;
+
+        for (var i = 0; i < FRIENDLY_FAILURES.length; i++) {
+            if (FRIENDLY_FAILURES[i].match.test(message)) return FRIENDLY_FAILURES[i].says;
+        }
+        return fallback || 'That did not work. Please try again.';
+    }
+
     async function refreshSession() {
         if (!state.token) return false;
         var result = await apiCall('POST', '/auth/refresh');
@@ -699,7 +734,7 @@
 
     // --- the parent's words ------------------------------------------------------------------
 
-    var TYPE_WORDS = { CATEGORY: 'Shelf', SUBCATEGORY: 'Folder', VIDEO: 'Video' };
+    var TYPE_WORDS = { CATEGORY: 'Category', SUBCATEGORY: 'Collection', VIDEO: 'Video' };
 
     function isContainer(node) {
         return node.nodeType === CatalogEditor.SUBCATEGORY;
@@ -739,12 +774,12 @@
         return count + ' ' + (count === 1 ? singular : (plural || singular + 's'));
     }
 
-    /** How many videos, folders and hidden things a shelf or folder holds. */
+    /** How many videos, collections and hidden things a category or collection holds. */
     function countsFor(nodeId) {
         var inside = descendantsOf(nodeId);
         var videos = inside.filter(function (child) { return child.nodeType === CatalogEditor.VIDEO; });
         return {
-            folders: inside.filter(function (child) { return child.nodeType === CatalogEditor.SUBCATEGORY; }).length,
+            collections: inside.filter(function (child) { return child.nodeType === CatalogEditor.SUBCATEGORY; }).length,
             videos: videos.length,
             hidden: inside.filter(function (child) { return child.enabled === false; }).length,
             videosList: videos
@@ -813,25 +848,25 @@
                 found = source.displayName || source.sourceId;
             }
         });
-        return found ? 'From ' + found : 'From a playlist you have not allowed yet';
+        return found ? 'From ' + found : 'From a YouTube source that is not allowed yet';
     }
 
     function nodeMeta(node, maps) {
         if (node.nodeType === CatalogEditor.VIDEO) {
             var parts = [sourceNameFor(node)];
             if (node.enabled === false) parts.push('hidden');
-            if (!canPlay(node, maps)) parts.push('cannot play yet');
+            if (!canPlay(node, maps)) parts.push('can\'t play yet');
             return parts.join(' · ');
         }
 
-        var videos = isContainer(node) ? containerVideoCount(node) : countsFor(node.id).videos;
-        var folders = isContainer(node) ? 0 : countsFor(node.id).folders;
-        var hidden = countsFor(node.id).hidden;
+        var counts = countsFor(node.id);
+        var videos = isContainer(node) ? containerVideoCount(node) : counts.videos;
+        var collections = isContainer(node) ? 0 : counts.collections;
 
         var pieces = [];
-        if (folders) pieces.push(words(folders, 'folder'));
+        if (collections) pieces.push(words(collections, 'collection'));
         pieces.push(words(videos, 'video'));
-        if (hidden) pieces.push(words(hidden, 'hidden item', 'hidden items'));
+        if (counts.hidden) pieces.push(words(counts.hidden, 'hidden item', 'hidden items'));
         return pieces.join(' · ');
     }
 
@@ -892,9 +927,9 @@
         } else if (state.route.name === 'add') {
             screen = screenAdd(state.route.id);
         } else if (state.route.name === 'shelf') {
-            screen = screenShelf(state.route.id);
+            screen = screenCategory(state.route.id);
         } else if (state.route.name === 'folder') {
-            screen = screenFolder(state.route.id);
+            screen = screenCollection(state.route.id);
         } else {
             screen = screenLibrary();
         }
@@ -943,7 +978,12 @@
 
     function screenNotLoaded() {
         return h('div', { class: 'screen' }, [
-            screenHead('Connecting to your TV', null, 'Reading your library…', []),
+            screenHead('Your library', null, 'Loading what your child can watch…', []),
+            h('div', { class: 'skeletons' }, [
+                h('div', { class: 'skeleton skeleton--row' }),
+                h('div', { class: 'skeleton skeleton--row' }),
+                h('div', { class: 'skeleton skeleton--row' })
+            ]),
             h('p', { class: 'inline-status' }, [h('span', { class: 'spinner' }), 'One moment…']),
             h('div', { class: 'btn-group' }, [
                 actionButton('Try again', 'reload-catalog', {}, 'btn--primary'),
@@ -1044,48 +1084,87 @@
 
     function artworkNode(node, className) {
         var url = artworkFor(node);
-        if (!url) {
+        var placeholder = function () {
             return h('div', {
                 class: className + ' ' + className + '--placeholder',
                 'aria-hidden': 'true',
                 text: node.nodeType === CatalogEditor.VIDEO ? '▶' : '🗂'
             });
-        }
-        return h('img', { class: className, src: url, alt: '', loading: 'lazy' });
+        };
+
+        if (!url) return placeholder();
+
+        // A card the parent recognises by sight: the picture carries the item's name for a screen
+        // reader, and a picture that stops resolving degrades to the same placeholder the rest of
+        // the interface uses rather than to a browser's broken-image glyph.
+        var image = h('img', {
+            class: className,
+            src: url,
+            alt: node.title,
+            loading: 'lazy',
+            decoding: 'async'
+        });
+        image.addEventListener('error', function () {
+            if (image.parentNode) image.parentNode.replaceChild(placeholder(), image);
+        });
+        return image;
     }
 
-    /** One shelf, as a line: a shelf is a row on the TV, and it has no picture of its own. */
-    function shelfRow(node) {
-        var main = withListener(h('button', { type: 'button', class: 'row__main' }, [
-            h('span', { class: 'row__body' }, [
-                h('span', { class: 'row__title', text: node.title }),
-                h('span', { class: 'row__meta', text: nodeMeta(node) })
+    /**
+     * The two reorder arrows, on whatever list the child's order comes from.
+     *
+     * One tap each, and visible without opening a menu - the difference between "order is yours to
+     * set" and "order is a feature you have to discover". The longer journeys (to the top, to the
+     * bottom, into another category) stay in the menu.
+     */
+    function orderButtons(node, order) {
+        return [
+            actionButton('▲', 'move-up', {
+                'data-id': node.id,
+                'aria-label': 'Move ' + node.title + ' up',
+                disabled: order.index <= 0
+            }, 'btn--icon btn--icon--sm'),
+            actionButton('▼', 'move-down', {
+                'data-id': node.id,
+                'aria-label': 'Move ' + node.title + ' down',
+                disabled: order.index >= order.last
+            }, 'btn--icon btn--icon--sm')
+        ];
+    }
+
+    /** One category, as a card: a titled row on the TV, with no picture of its own (W6.1). */
+    function categoryTile(node, order) {
+        var main = withListener(h('button', { type: 'button', class: 'tile__main' }, [
+            h('span', { class: 'tile__body' }, [
+                h('span', { class: 'tile__title', text: node.title }),
+                h('span', { class: 'tile__meta', text: nodeMeta(node) })
             ]),
-            h('span', { class: 'row__chevron', 'aria-hidden': 'true', text: '›' })
+            h('span', { class: 'tile__chevron', 'aria-hidden': 'true', text: '›' })
         ]), 'click', function () { go('#/shelf/' + encodeURIComponent(node.id)); });
         main.setAttribute('aria-label', 'Open ' + node.title);
 
-        return h('li', { class: 'row' + (node.enabled === false ? ' row--hidden' : '') }, [
+        return h('li', { class: 'tile' + (node.enabled === false ? ' tile--hidden' : '') }, [
             main,
-            menuButton(node)
+            h('span', { class: 'tile__actions' },
+                (order ? orderButtons(node, order) : []).concat([menuButton(node)]))
         ]);
     }
 
     function menuButton(node) {
         return withListener(h('button', {
             type: 'button',
-            class: 'btn btn--icon',
+            class: 'btn btn--icon btn--menu',
             'aria-label': 'More options for ' + node.title,
             text: '⋯'
         }), 'click', function () { openItemSheet(node.id); });
     }
 
-    /** One folder or video, as a line with its picture: parents recognise these by sight. */
-    function itemRow(node, maps) {
+    /** One collection or video, as a line with its picture: parents recognise these by sight. */
+    function itemRow(node, maps, order) {
         var badges = [];
         if (node.enabled === false) badges.push(h('span', { class: 'badge badge--hidden', text: 'Hidden' }));
         if (node.nodeType === CatalogEditor.VIDEO && !canPlay(node, maps)) {
-            badges.push(h('span', { class: 'badge badge--blocked', text: 'Cannot play yet' }));
+            badges.push(h('span', { class: 'badge badge--blocked', text: 'Can\'t play yet' }));
         }
 
         var main = withListener(h('button', { type: 'button', class: 'row__main' }, [
@@ -1101,9 +1180,13 @@
         });
         main.setAttribute('aria-label', 'Open ' + node.title);
 
+        var actions = [];
+        if (order) actions = orderButtons(node, order);
+        actions.push(menuButton(node));
+
         return h('li', { class: 'row' + (node.enabled === false ? ' row--hidden' : '') }, [
             main,
-            menuButton(node)
+            h('span', { class: 'row__actions' }, actions)
         ]);
     }
 
@@ -1124,17 +1207,21 @@
         ]);
     }
 
-    function addActions(parentId) {
-        return [
-            actionButton('Add from YouTube', 'add-from-youtube', { 'data-parent': parentId || '' }, 'btn--primary'),
-            parentId
-                ? actionButton('New folder', 'new-folder', { 'data-parent': parentId })
-                : actionButton('New shelf', 'new-shelf', {})
-        ];
+    function addActions(parent) {
+        // A collection holds videos, never other collections, so the only place a new collection can
+        // be made is a category. Offering it anywhere else would be a button that can only fail.
+        var actions = [actionButton('Add to library', 'add-from-youtube',
+            { 'data-parent': parent ? parent.id : '' }, 'btn--primary')];
+        if (!parent || parent.nodeType === CatalogEditor.CATEGORY) {
+            actions.push(parent
+                ? actionButton('New collection', 'new-folder', { 'data-parent': parent.id })
+                : actionButton('New category', 'new-shelf', {}));
+        }
+        return actions;
     }
 
-    /** Every video below these nodes that cannot play yet, and the sources that would fix it. */
-    function unplayableBanner(nodes) {
+    /** Videos that cannot play yet *and that the child can currently reach*. */
+    function unplayableHere(nodes) {
         var maps = allowedSourceMaps();
         var videos = [];
         nodes.forEach(function (node) {
@@ -1143,7 +1230,15 @@
             }));
         });
 
-        var stuck = videos.filter(function (video) { return !canPlay(video, maps); });
+        // A hidden video is not a problem to report: the child cannot see it, so it cannot
+        // disappoint them. It keeps its own badge on its own row, where the parent put it.
+        return videos.filter(function (video) {
+            return video.enabled !== false && !canPlay(video, maps);
+        });
+    }
+
+    function unplayableBanner(nodes) {
+        var stuck = unplayableHere(nodes);
         if (!stuck.length) return null;
 
         var sources = {};
@@ -1151,19 +1246,44 @@
             if (video.youtubePlaylistId) sources[video.youtubePlaylistId] = 'playlist';
             else if (video.youtubeVideoId) sources[video.youtubeVideoId] = 'video';
         });
+        var howMany = Object.keys(sources).length;
 
-        return banner('warn', words(stuck.length, 'video') + ' cannot play yet',
-            'Your child can see them, but nothing plays until you allow the playlist they came from.',
-            [actionButton('Allow ' + words(Object.keys(sources).length, 'source'),
+        return banner('warn', words(stuck.length, 'video') + ' can\'t play yet',
+            'They are in your library, but the YouTube source they came from is not allowed for your ' +
+            'child yet.',
+            [actionButton(howMany === 1 ? 'Allow this source' : 'Allow these ' + howMany + ' sources',
                 'allow-sources', { 'data-sources': JSON.stringify(sources) }, 'btn--primary')]);
     }
 
     // --- the library -------------------------------------------------------------------------
 
+    /** Everything inside a category, counted once, for the library summary. */
+    function libraryTotals(categories) {
+        var collections = 0;
+        var videos = 0;
+        var hidden = 0;
+        categories.forEach(function (category) {
+            var counts = countsFor(category.id);
+            collections += counts.collections;
+            videos += counts.videos;
+            hidden += counts.hidden;
+        });
+        return { collections: collections, videos: videos, hidden: hidden };
+    }
+
     function screenLibrary() {
-        var shelves = CatalogEditor.roots(state.session);
+        var categories = CatalogEditor.roots(state.session);
+        var totals = libraryTotals(categories);
+        var behind = state.session.catalogVersion > 0 &&
+            state.artwork.installedCatalogVersion < state.session.catalogVersion;
+
+        var summary = categories.length
+            ? words(categories.length, 'category', 'categories') + ' · ' +
+              words(totals.collections, 'collection') + ' · ' + words(totals.videos, 'video')
+            : 'Nothing here yet — this is where your child\'s videos live.';
+
         var children = [
-            screenHead('Library', null, 'This is what your child sees on the TV.', addActions(null))
+            screenHead('Your library', null, summary, addActions(null))
         ];
 
         if (state.versionMismatch) {
@@ -1171,22 +1291,28 @@
                 'Reload the page to get the version that matches your TV.', []));
         }
 
-        if (homescreenHintWanted()) children.push(homescreenBanner());
-        children.push(unplayableBanner(shelves));
+        children.push(unplayableBanner(categories));
 
-        if (!shelves.length) {
-            children.push(emptyState('🎬', 'Your library is empty',
-                'Start with a shelf — a row of videos on the TV, like “Cartoons” or “Bedtime”.',
-                [
-                    actionButton('Add from YouTube', 'add-from-youtube', {}, 'btn--primary'),
-                    actionButton('New shelf', 'new-shelf', {})
-                ]));
-        } else {
-            children.push(h('ul', { class: 'panel panel--flush' }, shelves.map(shelfRow)));
-            children.push(h('div', { class: 'screen__actions' }, [
-                actionButton('Send to TV now', 'send-to-tv', {}, 'btn--quiet')
-            ]));
+        if (behind) {
+            children.push(banner('info', 'Your TV does not have the latest yet',
+                'It will pick the change up on its own, or you can send it now.',
+                [actionButton('Update the TV now', 'send-to-tv', {}, 'btn--primary')]));
         }
+
+        if (!categories.length) {
+            children.push(emptyState('🎬', 'Your library is empty',
+                'Add a YouTube video or playlist to get started.',
+                [actionButton('Add to library', 'add-from-youtube', {}, 'btn--primary')]));
+        } else {
+            var many = categories.length > 1;
+            children.push(h('ul', { class: 'tiles' }, categories.map(function (node, index) {
+                return categoryTile(node, many ? { index: index, last: categories.length - 1 } : null);
+            })));
+        }
+
+        // The home-screen hint comes last: it is a convenience, and a convenience must never sit
+        // above the thing the parent opened the page for.
+        if (homescreenHintWanted()) children.push(homescreenBanner());
 
         return h('div', { class: 'screen' }, children);
     }
@@ -1219,55 +1345,57 @@
 
     // --- a shelf, and a folder ---------------------------------------------------------------
 
-    function screenShelf(shelfId) {
-        var shelf = nodeById(shelfId);
+    function screenCategory(categoryId) {
+        var category = nodeById(categoryId);
 
-        if (!shelf || shelf.nodeType !== CatalogEditor.CATEGORY) {
-            return goneScreen('That shelf is gone');
+        if (!category || category.nodeType !== CatalogEditor.CATEGORY) {
+            return goneScreen('That category is gone');
         }
 
         var children = [
-            screenHead(shelf.title, [crumb('Library', '#/library'), crumb(shelf.title, null)],
-                nodeMeta(shelf), addActions(shelf.id).concat([menuButton(shelf)]))
+            screenHead(category.title, [crumb('Your library', '#/library'), crumb(category.title, null)],
+                nodeMeta(category), addActions(category).concat([menuButton(category)]))
         ];
 
-        if (shelf.enabled === false) {
-            children.push(banner('warn', 'This shelf is hidden',
+        if (category.enabled === false) {
+            children.push(banner('warn', 'This category is hidden',
                 'Your child cannot see it on the TV until you show it again.',
-                [actionButton('Show this shelf', 'show-node', { 'data-id': shelf.id }, 'btn--primary')]));
+                [actionButton('Show this category', 'show-node',
+                    { 'data-id': category.id }, 'btn--primary')]));
         }
 
-        children.push(unplayableBanner([shelf]));
-        children.push(listOf(childrenOf(shelf.id), shelf));
+        children.push(unplayableBanner([category]));
+        children.push(listOf(childrenOf(category.id), category));
 
         return h('div', { class: 'screen' }, children);
     }
 
-    function screenFolder(folderId) {
-        var folder = nodeById(folderId);
+    function screenCollection(collectionId) {
+        var collection = nodeById(collectionId);
 
-        if (!folder || folder.nodeType !== CatalogEditor.SUBCATEGORY) {
-            return goneScreen('That folder is gone');
+        if (!collection || collection.nodeType !== CatalogEditor.SUBCATEGORY) {
+            return goneScreen('That collection is gone');
         }
 
-        var crumbs = [crumb('Library', '#/library')];
-        var parent = folder.parentId ? nodeById(folder.parentId) : null;
+        var crumbs = [crumb('Your library', '#/library')];
+        var parent = collection.parentId ? nodeById(collection.parentId) : null;
         if (parent) crumbs.push(crumb(parent.title, '#/shelf/' + encodeURIComponent(parent.id)));
-        crumbs.push(crumb(folder.title, null));
+        crumbs.push(crumb(collection.title, null));
 
         var children = [
-            screenHead(folder.title, crumbs, nodeMeta(folder),
-                addActions(folder.id).concat([menuButton(folder)]))
+            screenHead(collection.title, crumbs, nodeMeta(collection),
+                addActions(collection).concat([menuButton(collection)]))
         ];
 
-        if (folder.enabled === false) {
-            children.push(banner('warn', 'This folder is hidden',
+        if (collection.enabled === false) {
+            children.push(banner('warn', 'This collection is hidden',
                 'Your child cannot see it on the TV until you show it again.',
-                [actionButton('Show this folder', 'show-node', { 'data-id': folder.id }, 'btn--primary')]));
+                [actionButton('Show this collection', 'show-node',
+                    { 'data-id': collection.id }, 'btn--primary')]));
         }
 
-        children.push(unplayableBanner([folder]));
-        children.push(listOf(childrenOf(folder.id), folder));
+        children.push(unplayableBanner([collection]));
+        children.push(listOf(childrenOf(collection.id), collection));
 
         return h('div', { class: 'screen' }, children);
     }
@@ -1277,36 +1405,38 @@
             screenHead(title, [crumb('Library', '#/library')],
                 'It may have been deleted from another phone or browser.', [
                     actionButton('Back to the library', 'go-library', {}, 'btn--primary'),
-                    actionButton('Reload from the TV', 'reload-catalog', {})
+                    actionButton('Reload the library', 'reload-catalog', {})
                 ])
         ]);
     }
 
     function listOf(items, parent) {
         if (!items.length) {
-            // A folder can legitimately have nothing in the *document* while the TV shows a great
-            // many videos: episodes of a playlist the TV materialises itself. Saying "nothing here
-            // yet" over a folder whose own heading says how many videos it holds would be a lie, so
-            // that case is explained instead.
+            // A collection can legitimately have nothing in the *document* while the TV shows a great
+            // many videos: episodes of a playlist the TV keeps up to date itself. Saying "nothing
+            // here yet" over a collection whose own heading counts them would be a lie.
             var fromTv = state.artwork.containers[parent.id];
             if (fromTv && fromTv.videoCount > 0) {
                 return emptyState('📺', 'These videos come from the TV',
-                    'This folder plays ' + words(fromTv.videoCount, 'video') +
-                    ' that the TV keeps up to date from the playlist itself, so there is nothing to ' +
-                    'list here. Anything you add sits alongside them.',
-                    [actionButton('Add from YouTube', 'add-from-youtube',
+                    'This collection plays ' + words(fromTv.videoCount, 'video') + ' that the TV keeps up ' +
+                    'to date from the playlist itself, so there is nothing to list here. Anything you ' +
+                    'add sits alongside them.',
+                    [actionButton('Add to library', 'add-from-youtube',
                         { 'data-parent': parent.id }, 'btn--primary')]);
             }
 
             return emptyState('📼', 'Nothing here yet',
-                'Add videos from YouTube, or make a folder to group them.',
-                [actionButton('Add from YouTube', 'add-from-youtube',
+                parent.nodeType === CatalogEditor.SUBCATEGORY
+                    ? 'Add a YouTube video to this collection.'
+                    : 'Add a playlist or video to this category.',
+                [actionButton('Add to library', 'add-from-youtube',
                     { 'data-parent': parent.id }, 'btn--primary')]);
         }
 
         var maps = allowedSourceMaps();
-        return h('ul', { class: 'panel panel--flush' }, items.map(function (node) {
-            return itemRow(node, maps);
+        var many = items.length > 1;
+        return h('ul', { class: 'panel panel--flush' }, items.map(function (node, index) {
+            return itemRow(node, maps, many ? { index: index, last: items.length - 1 } : null);
         }));
     }
 
@@ -1337,23 +1467,23 @@
         var check = withListener(h('button', {
             type: 'button',
             class: 'btn btn--primary btn--block',
-            text: 'Check this link'
+            text: 'Continue'
         }), 'click', checkLink);
 
         urlInput.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') checkLink();
         });
 
-        var crumbs = [crumb('Library', '#/library')];
+        var crumbs = [crumb('Your library', '#/library')];
         var parent = parentId ? nodeById(parentId) : null;
         if (parent) crumbs.push(crumb(parent.title, routeFor(parent)));
-        crumbs.push(crumb('Add from YouTube', null));
+        crumbs.push(crumb('Add to library', null));
 
         setTimeout(function () { urlInput.focus(); }, 40);
 
         return h('div', { class: 'screen' }, [
-            screenHead('Add from YouTube', crumbs,
-                'Paste a link to a playlist or a single video, then choose where it goes.', null),
+            screenHead('Add to library', crumbs,
+                'Paste a YouTube link — a playlist, or one video — and choose where it goes.', null),
             h('div', { class: 'panel' }, [
                 h('label', { class: 'field' }, [
                     h('span', { class: 'field__label', text: 'YouTube link' }),
@@ -1387,7 +1517,7 @@
         clear(fields.addStatus);
 
         if (result.status !== 200 || !result.data || !result.data.kind) {
-            fields.addError.textContent = (result.data && result.data.error) || 'That link could not be read.';
+            fields.addError.textContent = humanError(result.data, 'That link could not be read.');
             fields.addError.hidden = false;
             return;
         }
@@ -1432,10 +1562,11 @@
         var confirm = withListener(h('button', {
             type: 'button',
             class: 'btn btn--primary btn--block',
-            text: isVideo ? 'Add this video' : 'Add ' + words(resolved.videos.length, 'video')
+            text: 'Add to library'
         }), 'click', confirmAdd);
 
         var children = [
+            h('h2', { class: 'screen__section-title', text: 'What did you find?' }),
             h('div', { class: 'panel' }, [
                 art,
                 h('div', { class: 'card__body' }, [
@@ -1444,6 +1575,14 @@
                 ])
             ])
         ];
+
+        if (!isVideo && !resolved.videos.length) {
+            children.push(banner('warn', 'This playlist has no videos that can be added',
+                'It may be empty, or every video in it may be private or unavailable.', [
+                    actionButton('Try another link', 'add-from-youtube', {}, 'btn--primary')
+                ]));
+            return h('div', { class: 'screen' }, children);
+        }
 
         if (resolved.truncated) {
             children.push(banner('warn', 'A long playlist',
@@ -1459,13 +1598,13 @@
 
         if (destinations.length) {
             form.push(h('label', { class: 'field' }, [
-                h('span', { class: 'field__label', text: 'Add to' }),
+                h('span', { class: 'field__label', text: 'Where should it go?' }),
                 destinationSelect
             ]));
         } else {
-            form.push(banner('warn', 'Make a shelf first',
-                'A video has to go inside a shelf or a folder. Make one, then come back to this link.', [
-                    actionButton('New shelf', 'new-shelf', {}, 'btn--primary')
+            form.push(banner('warn', 'Make a category first',
+                'A video has to go inside a category or a collection. Make one, then come back to this link.', [
+                    actionButton('New category', 'new-shelf', {}, 'btn--primary')
                 ]));
         }
 
@@ -1533,7 +1672,7 @@
         if (fields.addAllow && fields.addAllow.checked) {
             var allowed = await apiCall('POST', '/playlists', { url: url });
             if (allowed.status !== 200 && allowed.status !== 409) {
-                toast((allowed.data && allowed.data.error) || 'That source could not be allowed', 'error');
+                toast(humanError(allowed.data, 'That source could not be allowed'), 'error');
                 return;
             }
             await loadPlaylists();
@@ -1582,33 +1721,49 @@
 
     // --- the item menu -----------------------------------------------------------------------
 
+    /** The one-line state a parent cares about: can my child watch this, or not? */
+    function stateLine(node) {
+        if (node.nodeType !== CatalogEditor.VIDEO) {
+            return TYPE_WORDS[node.nodeType] + ' · ' + nodeMeta(node);
+        }
+        if (canPlay(node)) return 'Video · Ready to watch';
+        return 'Video · Can\'t play yet — its YouTube source is not allowed for your child';
+    }
+
     async function openItemSheet(nodeId) {
         var node = nodeById(nodeId);
         if (!node) return;
 
         var siblings = childrenOf(node.parentId);
         var index = siblings.findIndex(function (candidate) { return candidate.id === node.id; });
+        var last = siblings.length - 1;
         var options = [];
 
-        if (node.nodeType !== CatalogEditor.VIDEO) {
-            options.push({ id: 'rename', title: 'Rename', meta: 'Change what it is called on the TV' });
-        }
+        options.push({
+            id: 'rename',
+            title: 'Edit name',
+            meta: 'What this is called on the TV'
+        });
 
         options.push({
             id: 'toggle',
-            title: node.enabled === false ? 'Show it to my child again' : 'Hide it from my child',
+            title: node.enabled === false ? 'Show to my child again' : 'Hide from my child',
             meta: node.enabled === false
                 ? 'It will appear on the TV again'
                 : 'It stays in your library, but the TV stops showing it'
         });
 
+        // Four ways to move, in the order a parent reaches for them: the two neighbours, then the
+        // two ends. Nothing here needs a drag, and every one of them is one decision.
         options.push({ id: 'up', title: 'Move up', disabled: index <= 0 });
-        options.push({ id: 'down', title: 'Move down', disabled: index < 0 || index >= siblings.length - 1 });
+        options.push({ id: 'down', title: 'Move down', disabled: index < 0 || index >= last });
+        options.push({ id: 'top', title: 'Move to the top', disabled: index <= 0 });
+        options.push({ id: 'bottom', title: 'Move to the bottom', disabled: index < 0 || index >= last });
 
         if (node.nodeType !== CatalogEditor.CATEGORY) {
             options.push({
                 id: 'move',
-                title: 'Move to another shelf…',
+                title: 'Move to another category…',
                 meta: 'Keeps the video and everything inside it'
             });
         }
@@ -1629,16 +1784,16 @@
 
         options.push({
             id: 'delete',
-            title: 'Delete',
+            title: 'Remove from library',
             meta: node.nodeType === CatalogEditor.VIDEO
-                ? 'Removes it from your library and from the TV'
-                : 'Deletes this and everything inside it',
+                ? 'It disappears from your child\'s library; nothing is deleted from YouTube'
+                : 'Removes this and the ' + words(descendantsOf(node.id).length, 'item') + ' inside it',
             danger: true
         });
 
         var choice = await chooseFrom({
             title: node.title,
-            body: TYPE_WORDS[node.nodeType] + ' · ' + nodeMeta(node),
+            body: stateLine(node),
             image: artworkFor(node) || null,
             options: options
         });
@@ -1648,12 +1803,19 @@
 
     async function runItemAction(choice, node) {
         if (choice === 'rename') {
-            var title = await askForText({ title: 'Rename', label: 'Name', value: node.title });
-            if (title === null) return;
-            var renamed = CatalogEditor.rename(state.session, { id: node.id, title: title });
+            var name = await askForText({
+                title: 'Edit name',
+                body: node.nodeType === CatalogEditor.VIDEO
+                    ? 'The video itself is unchanged; only the name your child sees.'
+                    : null,
+                label: 'Name',
+                value: node.title
+            });
+            if (name === null) return;
+            var renamed = CatalogEditor.rename(state.session, { id: node.id, title: name });
             if (!renamed.ok) return void toast(renamed.reason, 'error');
             state.session = renamed.session;
-            return void publish('Renamed');
+            return void publish('Name changed');
         }
 
         if (choice === 'toggle') {
@@ -1661,16 +1823,25 @@
             var toggled = CatalogEditor.setEnabled(state.session, { id: node.id, enabled: shown });
             if (!toggled.ok) return void toast(toggled.reason, 'error');
             state.session = toggled.session;
-            return void publish(shown ? 'Shown again' : 'Hidden');
+            return void publish(shown ? 'Shown again' : 'Hidden from your child');
         }
 
         if (choice === 'up' || choice === 'down') {
-            var moved = choice === 'up'
-                ? CatalogEditor.moveUp(state.session, { id: node.id })
-                : CatalogEditor.moveDown(state.session, { id: node.id });
+            return void moveNode(node.id, choice === 'up' ? -1 : 1);
+        }
+
+        if (choice === 'top' || choice === 'bottom') {
+            var siblings = childrenOf(node.parentId).filter(function (candidate) {
+                return candidate.id !== node.id;
+            });
+            var moved = CatalogEditor.moveTo(state.session, {
+                id: node.id,
+                parentId: node.parentId || null,
+                position: choice === 'top' ? 0 : siblings.length
+            });
             if (!moved.ok) return void toast(moved.reason, 'error');
             state.session = moved.session;
-            return void publish('Reordered');
+            return void publish('Moved');
         }
 
         if (choice === 'move') return void moveToOtherParent(node);
@@ -1757,12 +1928,11 @@
     async function askDelete(node) {
         var inside = descendantsOf(node.id).length;
         var confirmed = await confirmDialog({
-            title: 'Delete “' + node.title + '”?',
-            body: inside
-                ? 'This deletes it and the ' + words(inside, 'thing') + ' inside it, from your library and from the TV. ' +
-                  'You can add them again later.'
-                : 'This removes it from your library and from the TV. You can add it again later.',
-            confirmLabel: 'Delete',
+            title: 'Remove “' + node.title + '” from your library?',
+            body: 'This removes it' + (inside ? ' and the ' + words(inside, 'item') + ' inside it' : '') +
+                ' from your child\'s SafeTube library, on this phone and on the TV. ' +
+                'It does not delete anything from YouTube.',
+            confirmLabel: 'Remove',
             danger: true
         });
 
@@ -1773,7 +1943,7 @@
         if (!removed.ok) return void toast(removed.reason, 'error');
         state.session = removed.session;
 
-        var saved = await publish('Deleted');
+        var saved = await publish('Removed from your library');
         if (saved && !parentId) go('#/library');
     }
 
@@ -1782,7 +1952,7 @@
     function panel(title, note, body, actions) {
         return h('section', { class: 'panel' }, [
             h('div', { class: 'panel__head' }, [
-                h('h2', { class: 'panel__title', text: title }),
+                h('h3', { class: 'panel__title', text: title }),
                 actions && actions.length ? h('div', { class: 'btn-group' }, actions) : null
             ]),
             note ? h('p', { class: 'panel__note', text: note }) : null,
@@ -1790,22 +1960,29 @@
         ]);
     }
 
+    /** A named group of cards. Grouping is what turns a list of panels into settings. */
+    function settingsGroup(title, panels) {
+        return h('section', { class: 'settings-group' }, [
+            h('h2', { class: 'settings-group__title', text: title }),
+            h('div', { class: 'settings-group__body' }, panels)
+        ]);
+    }
+
     function screenSettings() {
         var children = [
-            screenHead('Settings', null, 'The TV itself, screen time, and what your child is allowed to watch.', [])
+            screenHead('Settings', null, 'Your TV, what your child may watch, and how this page looks.', [])
         ];
 
-        children.push(tvPanel());
-        children.push(screenTimePanel());
+        children.push(settingsGroup('TV', [tvPanel()]));
+        children.push(settingsGroup('Time limits', [screenTimePanel()]));
 
         if (state.session) {
-            children.push(allowedSourcesPanel());
-            children.push(libraryPanel());
+            children.push(settingsGroup('Content', [allowedSourcesPanel()]));
         }
 
-        children.push(watchHistoryPanel());
-        children.push(lookPanel());
-        children.push(helpPanel());
+        children.push(settingsGroup('What has been watched', [watchHistoryPanel()]));
+        children.push(settingsGroup('Appearance', [lookPanel()]));
+        children.push(settingsGroup('Troubleshooting', [libraryPanel(), helpPanel()]));
 
         return h('div', { class: 'screen' }, children);
     }
@@ -1834,7 +2011,7 @@
         }
 
         body.push(h('div', { class: 'btn-group' }, [
-            actionButton('Send my library to the TV now', 'send-to-tv', {}, 'btn--primary')
+            actionButton('Update the TV now', 'send-to-tv', {}, 'btn--primary')
         ]));
 
         if (status && status.version) {
@@ -1987,7 +2164,7 @@
         });
 
         if (result.status !== 200) {
-            toast((result.data && result.data.error) || 'The limits could not be saved', 'error');
+            toast(humanError(result.data, 'The limits could not be saved'), 'error');
             return;
         }
 
@@ -2055,7 +2232,7 @@
             ])
         ];
 
-        return panel('Allowed sources', null, h('div', {}, body));
+        return panel('Allowed YouTube sources', null, h('div', {}, body));
     }
 
     function describeSource(source) {
@@ -2076,7 +2253,7 @@
 
         var result = await apiCall('POST', '/playlists', { url: url });
         if (result.status !== 200 && result.status !== 409) {
-            toast((result.data && result.data.error) || 'That link could not be allowed', 'error');
+            toast(humanError(result.data, 'That link could not be allowed'), 'error');
             return;
         }
 
@@ -2103,7 +2280,7 @@
 
         var result = await apiCall('DELETE', '/playlists/' + encodeURIComponent(id));
         if (result.status !== 200) {
-            toast((result.data && result.data.error) || 'That could not be removed', 'error');
+            toast(humanError(result.data, 'That could not be removed'), 'error');
             return;
         }
 
@@ -2124,16 +2301,16 @@
                 text: words(count, 'item') + ' in your library. ' +
                     (upToDate
                         ? 'Your TV has this version.'
-                        : 'Your TV is on an older version — send it now.')
+                        : 'Your TV is on an older version — update it now.')
             }),
             h('div', { class: 'btn-group' }, [
-                actionButton('Send to TV now', 'send-to-tv', {}, 'btn--primary'),
-                actionButton('Check my library', 'check-library', {}),
-                actionButton('Reload from the TV', 'reload-catalog', {})
+                actionButton('Update the TV now', 'send-to-tv', {}, 'btn--primary'),
+                actionButton('Check for problems', 'check-library', {}),
+                actionButton('Reload the library', 'reload-catalog', {})
             ])
         ];
 
-        return panel('Your library', 'The shelves, folders and videos you have made.', h('div', {}, body));
+        return panel('Your library', 'The categories, collections and videos you have made.', h('div', {}, body));
     }
 
     function watchHistoryPanel() {
@@ -2251,6 +2428,8 @@
 
         'new-shelf': function () { createNode('CATEGORY', null); },
         'new-folder': function (element) { createNode('SUBCATEGORY', element.getAttribute('data-parent')); },
+        'move-up': function (element) { moveNode(element.getAttribute('data-id'), -1); },
+        'move-down': function (element) { moveNode(element.getAttribute('data-id'), 1); },
         'add-from-youtube': function (element) {
             var parent = element.getAttribute('data-parent');
             go('#/add' + (parent ? '/' + encodeURIComponent(parent) : ''));
@@ -2298,25 +2477,36 @@
     // --- the actions themselves --------------------------------------------------------------
 
     async function createNode(type, parentId) {
-        var shelf = type === 'CATEGORY';
+        var isCategory = type === 'CATEGORY';
         var title = await askForText({
-            title: shelf ? 'New shelf' : 'New folder',
-            body: shelf
-                ? 'A shelf is a row of videos on the TV, like “Cartoons”.'
-                : 'A folder groups videos together inside a shelf, like “Songs”.',
+            title: isCategory ? 'New category' : 'New collection',
+            body: isCategory
+                ? 'A category is a row of videos on the TV, like “Cartoons” or “Bedtime”.'
+                : 'A collection is a group of videos inside a category, like “Songs”.',
             label: 'Name',
             confirmLabel: 'Create'
         });
 
         if (title === null) return;
 
-        var applied = shelf
+        var applied = isCategory
             ? CatalogEditor.addCategory(state.session, { title: title })
             : CatalogEditor.addSubcategory(state.session, { title: title, parentId: parentId });
 
         if (!applied.ok) return void toast(applied.reason, 'error');
         state.session = applied.session;
-        publish(shelf ? 'New shelf' : 'New folder');
+        publish(isCategory ? 'New category' : 'New collection');
+    }
+
+    /** One tap of ▲ or ▼: the sibling order is the only thing that changes. */
+    async function moveNode(id, offset) {
+        if (!nodeById(id)) return;
+        var moved = offset < 0
+            ? CatalogEditor.moveUp(state.session, { id: id })
+            : CatalogEditor.moveDown(state.session, { id: id });
+        if (!moved.ok) return void toast(moved.reason, 'error');
+        state.session = moved.session;
+        publish('Moved');
     }
 
     async function showNode(id) {
@@ -2391,7 +2581,7 @@
             url: 'https://www.youtube.com/watch?v=' + videoId
         });
         if (resolved.status !== 200) {
-            toast((resolved.data && resolved.data.error) || 'That video could not be read', 'error');
+            toast(humanError(resolved.data, 'That video could not be read'), 'error');
             return;
         }
 
@@ -2431,7 +2621,7 @@
     async function grantBonus(minutes) {
         var result = await apiCall('POST', '/time-limits/bonus', { minutes: parseInt(minutes, 10) });
         if (result.status !== 200) {
-            toast((result.data && result.data.error) || 'That did not work', 'error');
+            toast(humanError(result.data, 'That did not work'), 'error');
             return;
         }
         await loadLimits();
@@ -2472,7 +2662,7 @@
 
             var result = await apiCall('POST', '/sources/import', payload);
             if (result.status !== 200) {
-                toast((result.data && result.data.error) || 'That file could not be read', 'error');
+                toast(humanError(result.data, 'That file could not be read'), 'error');
                 return;
             }
 
@@ -2562,6 +2752,10 @@
         // The theme is already on the document - `theme.js` ran in the head, before anything painted -
         // so all that is left is to say on the control which way round it is.
         paintThemeControl();
+
+        // The shell is painted before the first request, so the parent never looks at a blank page:
+        // either the PIN screen, or the library with its loading state already in it.
+        render();
 
         // The public status answers without a session, which is how the page can tell a parent that
         // the TV is unreachable - or that this page is too old - before they hunt for the PIN.

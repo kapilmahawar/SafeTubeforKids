@@ -225,6 +225,149 @@ test('the script publishes nothing onto window', () => {
         'the page has no inline handlers, so the script has no reason to publish globals');
 });
 
+// --- W8: the product polish, as guards ------------------------------------------------------
+
+test('the shell is painted before the first request, so a cold load is never blank', () => {
+    const app = code('app.js');
+    const boot = app.slice(app.indexOf('async function boot()'), app.indexOf('boot();'));
+
+    const firstRender = boot.indexOf('render();');
+    const firstAwait = boot.indexOf('await ');
+
+    assert.ok(firstRender !== -1, 'boot has to paint the shell');
+    assert.ok(firstAwait !== -1, 'boot still has to load things');
+    assert.ok(firstRender < firstAwait,
+        'the loading state must be on screen before the first request is awaited');
+    assert.match(boot, /await loadStatus\(\)/);
+});
+
+test('a loading screen says what it is doing and shows the shape of what is coming', () => {
+    const app = code('app.js');
+
+    assert.match(app, /function screenNotLoaded\(/);
+    assert.match(app, /skeleton skeleton--row/, 'a loading library shows the rows it is waiting for');
+    assert.match(app, /Loading what your child can read|Loading what your child can watch/);
+    assert.match(app, /class: 'spinner'/);
+});
+
+test('the words a parent reads are the product’s, not the project’s', () => {
+    const app = code('app.js');
+    const html = raw('index.html');
+
+    // The vocabulary W8 settled on: category, collection, allowed source, update the TV.
+    ['Your library', 'New category', 'New collection', 'Add to library', 'Allowed YouTube sources',
+        'Update the TV now', 'Reload the library', 'Check for problems', 'Remove from library',
+        'Hide from my child', 'Edit name', 'Move to the top', 'Move to the bottom']
+        .forEach((phrase) => {
+            assert.ok(app.includes(phrase) || html.includes(phrase),
+                'the interface should say "' + phrase + '"');
+        });
+
+    // And the words W8 replaced are gone from anything a parent reads.
+    [/New shelf/, /New folder/, /Send to TV now/, /Add from YouTube/, /Delete “/, /Delete '/,
+        /Check my library/, /Reload from the TV/, /cannot play yet/]
+        .forEach((pattern) => {
+            assert.doesNotMatch(app, pattern, 'the interface still says ' + pattern);
+        });
+});
+
+test('“cannot play yet” warns only about what the child can actually see', () => {
+    const app = code('app.js');
+    const helper = app.slice(app.indexOf('function unplayableHere'), app.indexOf('function unplayableBanner'));
+
+    assert.match(helper, /video\.enabled !== false && !canPlay\(video, maps\)/,
+        'a hidden video is not a problem to report');
+});
+
+test('a collection never offers to hold another collection', () => {
+    const app = code('app.js');
+    const builder = app.slice(app.indexOf('function addActions(parent)'), app.indexOf('function unplayableHere'));
+
+    assert.match(builder, /parent\.nodeType === CatalogEditor\.CATEGORY/,
+        'only a category can hold a collection');
+    assert.match(builder, /Add to library/);
+});
+
+test('reordering is one tap on the row and still reachable from the menu', () => {
+    const app = code('app.js');
+
+    assert.match(app, /actionButton\('▲', 'move-up'/);
+    assert.match(app, /actionButton\('▼', 'move-down'/);
+    assert.match(app, /'move-up': function \(element\) \{ moveNode\(/);
+    assert.match(app, /'move-down': function \(element\) \{ moveNode\(/);
+
+    // The four journeys a parent asked for, and no drag-and-drop anywhere.
+    ['Move up', 'Move down', 'Move to the top', 'Move to the bottom', 'Move to another category…']
+        .forEach((option) => assert.ok(app.includes(option), 'the menu should offer ' + option));
+    assert.doesNotMatch(app, /draggable|dragstart|pointerdown/,
+        'reordering stays deterministic: no drag, so nothing depends on a steady hand');
+});
+
+test('removing something says exactly what it does, and what it does not', () => {
+    const app = code('app.js');
+    const confirm = app.slice(app.indexOf('async function askDelete'), app.indexOf('// --- settings'));
+
+    assert.match(confirm, /Remove “' \+ node\.title \+ '” from your library\?/);
+    assert.match(confirm, /It does not delete anything from YouTube\./);
+    assert.match(confirm, /confirmLabel: 'Remove'/);
+    assert.doesNotMatch(confirm, /Deleted|deletes it/);
+});
+
+test('a video can be renamed, and the video itself is untouched', () => {
+    const app = code('app.js');
+    const sheet = app.slice(app.indexOf('async function openItemSheet'), app.indexOf('async function runItemAction'));
+
+    // The rename option is offered before any type test, so it is offered for every kind of node.
+    const renameAt = sheet.indexOf("id: 'rename'");
+    const firstTypeTest = sheet.indexOf('node.nodeType');
+    assert.ok(renameAt !== -1 && renameAt < firstTypeTest,
+        'renaming is offered for videos too');
+    assert.match(sheet, /title: 'Edit name'/);
+    assert.match(app, /The video itself is unchanged; only the name your child sees\./);
+});
+
+test('a failure the parent cannot act on never reaches the screen raw', () => {
+    const app = code('app.js');
+
+    assert.match(app, /function humanError\(/, 'server failures are translated');
+    assert.match(app, /function isParentReadable\(/);
+
+    // No screen prints a server message without passing it through the translation.
+    assert.doesNotMatch(app, /textContent = [^;]*\.error\b/,
+        'an error message must go through humanError first');
+    assert.doesNotMatch(app, /toast\(\([a-z]+\.data && [a-z]+\.data\.error\)/,
+        'a toast must go through humanError first');
+
+    // And the translations do not leak implementation words either.
+    const friendly = app.slice(app.indexOf('var FRIENDLY_FAILURES'), app.indexOf('function isParentReadable'));
+    assert.doesNotMatch(friendly, /exception|extractor|json|null/);
+});
+
+test('settings are grouped, and every group holds real controls', () => {
+    const app = code('app.js');
+
+    ['TV', 'Time limits', 'Content', 'What has been watched', 'Appearance', 'Troubleshooting']
+        .forEach((group) => assert.ok(app.includes("settingsGroup('" + group + "'"),
+            'settings should have a ' + group + ' group'));
+
+    assert.match(app, /function settingsGroup\(/);
+    // Every panel still exists inside a group: nothing was dropped for being awkward to place.
+    ['tvPanel', 'screenTimePanel', 'allowedSourcesPanel', 'watchHistoryPanel', 'lookPanel',
+        'libraryPanel', 'helpPanel']
+        .forEach((builder) => assert.match(app, new RegExp(builder + '\\(\\)'),
+            builder + ' must still be rendered'));
+});
+
+test('a picture carries the item’s name and degrades to the placeholder', () => {
+    const app = code('app.js');
+    const artwork = app.slice(app.indexOf('function artworkNode'), app.indexOf('/** One category'));
+
+    assert.match(artwork, /alt: node\.title/, 'the picture is the item, so it has a name');
+    assert.match(artwork, /addEventListener\('error'/, 'a picture that stops resolving is replaced');
+    assert.match(artwork, /loading: 'lazy'/);
+    assert.match(artwork, /decoding: 'async'/);
+});
+
 // --- W7's removal, guaranteed ---------------------------------------------------------------
 
 test('the Apps, Kiosk and Installed-Apps surface is gone from the dashboard', () => {

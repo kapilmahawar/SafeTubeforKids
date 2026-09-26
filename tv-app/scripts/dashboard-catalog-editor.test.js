@@ -256,12 +256,27 @@ test('a subcategory can be renamed and keeps its playlist provenance', () => {
     assertCanonical(session);
 });
 
-test('a video title is not parent-editable in this phase, and the editor says so', () => {
+test('a video can be renamed, and renaming it touches nothing but its name (W8)', () => {
     const before = openEditor();
     const result = CatalogEditor.rename(before, { id: 'i-cocomelon#a', title: 'Renamed By Hand' });
 
-    assert.equal(result.ok, false);
-    assert.match(result.reason, /video keeps the name it was added with/);
+    assert.equal(result.ok, true, 'a name is a name for every kind of node');
+
+    const video = CatalogEditor.nodeById(result.session, 'i-cocomelon#a');
+    const was = CatalogEditor.nodeById(before, 'i-cocomelon#a');
+
+    assert.equal(video.title, 'Renamed By Hand');
+    // Identity, provenance, position and the enabled state are untouched: a rename is one string.
+    assert.equal(video.id, was.id);
+    assert.equal(video.youtubeVideoId, was.youtubeVideoId);
+    assert.equal(video.youtubePlaylistId, was.youtubePlaylistId);
+    assert.equal(video.position, was.position);
+    assert.equal(video.enabled, was.enabled);
+    assert.equal(video.parentId, was.parentId);
+    assert.equal(video.thumbnailMode, was.thumbnailMode);
+
+    // And the document it produces is still one the server accepts: the rename changes no rule.
+    assert.deepEqual(CatalogEditor.problems(result.session), []);
 });
 
 test('renaming is refused for a blank name or an unknown node', () => {
