@@ -1311,12 +1311,15 @@ if ($opened) {
         if ($autoDuration -gt 20 -and $autoDuration -le 900) {
             $autoPresses = [Math]::Max(1, [int](($autoDuration - 12) / 10))
             for ($i = 1; $i -le $autoPresses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
-            # Wait for the queue to actually advance rather than sleeping a fixed window: the seeks
-            # above consume most of any fixed window, so a 45s sleep once measured this video at
-            # "228s of 229s" - one second short of the end it was waiting for. The deadline is
-            # derived from the time still to play, so it also covers the case where the seek presses
-            # did not land and the video plays out from wherever it actually is.
-            $autoRemaining = [Math]::Max(30, $autoDuration - [int]$beforeAuto.positionSec)
+            # The autoplay budget starts *after* the seeks, because it is a budget for observing
+            # autoplay and not for reaching the end of the video. Sampling the position before the
+            # presses made the deadline cover the seeking too, so a run whose seeks did not land
+            # expired one second before a 229s video ended (measured: "reached 228s of 229s"). The
+            # assertion is unchanged - the queue still has to advance to the next approved item -
+            # only the arithmetic now starts from where the video actually is.
+            $seekedAuto = PlayingNow
+            $seekedPosition = if ($seekedAuto) { [int]$seekedAuto.positionSec } else { [int]$beforeAuto.positionSec }
+            $autoRemaining = [Math]::Max(30, $autoDuration - $seekedPosition)
             $afterAuto = Wait-QueueAdvance $beforeAuto ($autoRemaining + 90)
             $autoReached = if ($null -eq $afterAuto) { 'playback stopped' } else { "$($afterAuto.videoId) (reached $($afterAuto.positionSec)s of $($beforeAuto.durationSec)s)" }
             Log "  autoplay: queue $($beforeAuto.videoId) -> $autoReached"

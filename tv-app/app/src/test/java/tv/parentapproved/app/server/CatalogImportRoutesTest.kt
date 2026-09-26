@@ -273,6 +273,34 @@ class CatalogImportRoutesTest {
         assertEquals(false, body["approved"]!!.jsonPrimitive.content.toBoolean())
     }
 
+    @Test
+    fun aPlaylistThatResolvesToItsOwnIdIsNothingFound() = testApp({ _, _ ->
+        // What the extractor answers for a playlist that does not exist: no name, so the repository's
+        // own fallback (`extractor.name ?: playlistId`) hands the id back as the title, and there is
+        // nothing to import.
+        ResolvedSource(title = "PLzzzzzzzzzzzzzzzzzzzzzzzzzzzz", videos = emptyList())
+    }) { token ->
+        val response = resolvePlaylist(token, "PLzzzzzzzzzzzzzzzzzzzzzzzzzzzz")
+
+        assertEquals(HttpStatusCode.BadGateway, response.status)
+        assertTrue(response.bodyAsText().contains("Nothing was found at that link."))
+        assertEquals("a link with nothing behind it approves nothing either", 0 to 0, approvalState())
+    }
+
+    @Test
+    fun aPlaylistWithNoNameButWithVideosIsStillImported() = testApp({ _, _ ->
+        // A nameless playlist that does have videos is legitimate: the missing name is YouTube's
+        // omission, not a failure, and refusing it would break a real import.
+        ResolvedSource(title = "PLnoname", videos = listOf(video("vidX", "Video X")))
+    }) { token ->
+        val response = resolvePlaylist(token, "PLnoname")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("playlist", body["kind"]!!.jsonPrimitive.content)
+        assertEquals(1, body["videos"]!!.jsonArray.size)
+    }
+
     // --- failure --------------------------------------------------------------------------------
 
     @Test

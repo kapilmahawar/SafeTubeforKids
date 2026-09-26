@@ -150,6 +150,23 @@ fun Route.catalogImportRoutes(
             return@post
         }
 
+        // A link that resolved to nothing.
+        //
+        // The extractor names a playlist it cannot read with the playlist's own id - the same
+        // fallback `NewPipePlaylistSource.title` uses when YouTube gives no name - so a title equal to
+        // the source id means "no name was available". With an empty list as well, this is not a
+        // playlist with a strange name: it is a link with nothing behind it, and saying so is more
+        // use to a parent than offering them a shelf called "PLzzzz…". A playlist that has no name but
+        // *does* have videos is left alone: it is legitimate, and the fallback name is YouTube's
+        // omission rather than a failure.
+        if (kind == "playlist" && resolved.videos.isEmpty() && resolved.title.trim() == source.id) {
+            call.respond(
+                HttpStatusCode.BadGateway,
+                mapOf("error" to "Nothing was found at that link."),
+            )
+            return@post
+        }
+
         call.respond(
             ResolvedLinkResponse(
                 kind = kind,
