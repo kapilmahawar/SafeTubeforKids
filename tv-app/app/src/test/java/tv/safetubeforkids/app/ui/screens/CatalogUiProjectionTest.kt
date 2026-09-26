@@ -16,45 +16,55 @@ import tv.safetubeforkids.app.data.catalog.ContentItemType
 import tv.safetubeforkids.app.data.catalog.ThumbnailMode
 
 /**
- * What the child sees, derived from rows alone.
+ * What the child sees, derived from the tree alone.
  *
  * These are the rendering rules: the parent's order, hidden-but-not-deleted disabled content, empty
- * shelves, parent names, artwork lookup and the Continue Watching shelf. No database and no device
- * are involved, so a failure here is unambiguous about which rule broke.
+ * shelves, the container/category distinction, artwork lookup and the Continue Watching shelf. No
+ * database and no device are involved, so a failure here is unambiguous about which rule broke.
+ *
+ * The fixtures are the *tree*, because that is what the catalog is: a category node with its children
+ * parented to it and numbered in the order the test configured. A helper therefore returns a shelf
+ * **and** its children, which is why the catalog is a list of lists.
  */
 class CatalogUiProjectionTest {
 
+    /** A shelf: the category node, plus its children re-parented to it, keeping their own positions. */
     private fun category(
         id: String,
         name: String,
         sortOrder: Int,
         enabled: Boolean = true,
-        items: List<ContentItemEntity> = emptyList(),
-    ) = CategoryWithItems(
-        category = CategoryEntity(
-            id = id,
-            displayName = name,
-            sortOrder = sortOrder,
-            enabled = enabled,
-        ),
-        items = items,
+        items: List<CatalogNodeEntity> = emptyList(),
+    ): List<CatalogNodeEntity> =
+        listOf(node(id, null, CatalogNodeType.CATEGORY, name, sortOrder, enabled)) +
+            items.map { child -> child.copy(parentId = id) }
+
+    /** A sub-category: one container card on its shelf, whether or not it imports a playlist. */
+    private fun container(
+        id: String,
+        name: String,
+        sortOrder: Int,
+        playlistId: String? = null,
+        enabled: Boolean = true,
+    ) = node(
+        id = id,
+        // A sub-category is never at ROOT; the shelf that holds it re-parents it.
+        parentId = "unplaced",
+        nodeType = CatalogNodeType.SUBCATEGORY,
+        title = name,
+        position = sortOrder,
+        enabled = enabled,
+        playlistId = playlistId,
     )
 
+    /** A container that imports a playlist. */
     private fun playlist(
         id: String,
         name: String,
         sortOrder: Int,
         playlistId: String,
         enabled: Boolean = true,
-    ) = ContentItemEntity(
-        id = id,
-        categoryId = "ignored",
-        type = ContentItemType.PLAYLIST,
-        displayName = name,
-        sortOrder = sortOrder,
-        youtubePlaylistId = playlistId,
-        enabled = enabled,
-    )
+    ) = container(id, name, sortOrder, playlistId, enabled)
 
     private fun video(
         id: String,
@@ -62,22 +72,21 @@ class CatalogUiProjectionTest {
         sortOrder: Int,
         videoId: String,
         enabled: Boolean = true,
-    ) = ContentItemEntity(
+    ) = node(
         id = id,
-        categoryId = "ignored",
-        type = ContentItemType.VIDEO,
-        displayName = name,
-        sortOrder = sortOrder,
-        youtubeVideoId = videoId,
+        parentId = "unplaced",
+        nodeType = CatalogNodeType.VIDEO,
+        title = name,
+        position = sortOrder,
         enabled = enabled,
+        videoId = videoId,
     )
 
     private fun build(
-        catalog: List<CategoryWithItems> = emptyList(),
+        catalog: List<List<CatalogNodeEntity>> = emptyList(),
         thumbnails: List<VideoThumbnailRow> = emptyList(),
         resumable: List<ResumableVideoRow> = emptyList(),
-        tree: List<CatalogNodeEntity> = emptyList(),
-    ) = CatalogUiProjection.build(catalog, thumbnails, resumable, tree)
+    ) = CatalogUiProjection.build(catalog.flatten(), thumbnails, resumable)
 
     /** A catalog node of the tree that decides a shelf's picture. */
     private fun node(
@@ -88,6 +97,7 @@ class CatalogUiProjectionTest {
         position: Int = 0,
         enabled: Boolean = true,
         videoId: String? = null,
+        playlistId: String? = null,
         thumbnailMode: ThumbnailMode = ThumbnailMode.AUTO,
         thumbnailVideoId: String? = null,
     ) = CatalogNodeEntity(
@@ -98,6 +108,7 @@ class CatalogUiProjectionTest {
         position = position,
         enabled = enabled,
         youtubeVideoId = videoId,
+        youtubePlaylistId = playlistId,
         thumbnailMode = thumbnailMode,
         thumbnailVideoId = thumbnailVideoId,
     )
@@ -196,7 +207,7 @@ class CatalogUiProjectionTest {
         assertEquals(4, cards.size)
         assertEquals(
             listOf(
-                CatalogCardKind.PLAYLIST, CatalogCardKind.PLAYLIST,
+                CatalogCardKind.CONTAINER, CatalogCardKind.CONTAINER,
                 CatalogCardKind.VIDEO, CatalogCardKind.VIDEO,
             ),
             cards.map { it.kind },
@@ -311,6 +322,227 @@ class CatalogUiProjectionTest {
         assertEquals(listOf("Cartoon"), state.shelves.map { it.title })
     }
 
+    // -------------------------------------------------- the hierarchy the child navigates (W6)
+    //
+    // A category is a shelf *title*: it is never a card, never focusable and never a destination. A
+    // sub-category is a card that opens the sub-category, and it is never replaced by its first video -
+    // that flattening is exactly what W6 removed.
+
+    @Test
+    fun aCategoryBecomesAShelfTitleAndNoCardOfItsOwn() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-cartoon", "Cartoons", 0,
+                    items = listOf(
+                        container("i-cocomelon", "CoComelon", 0),
+                        video("i-direct", "Direct Video", 1, "vidDirect"),
+                    ),
+                ),
+            ),
+        )
+
+        val shelf = state.shelves.single()
+        assertEquals("Cartoons", shelf.title)
+        assertEquals(
+            "the category's own id is a shelf, not a card",
+            listOf("i-cocomelon", "i-direct"),
+            shelf.cards.map { it.id },
+        )
+        assertTrue(
+            "no card may stand for the category itself",
+            shelf.cards.none { it.id == "cat-cartoon" },
+        )
+    }
+
+    @Test
+    fun aHandBuiltSubcategoryIsAContainerCardAndNeverItsFirstVideo() {
+        // The W6 acceptance criterion, in miniature: the shelf shows the container, not the first thing
+        // inside it. This container has no import source at all - the parent built it by hand, which is
+        // exactly the case that used to be flattened into "Video A".
+        val shelf = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video A", position = 0, videoId = "vidA"),
+            node("i-cocomelon#b", "i-cocomelon", CatalogNodeType.VIDEO, "Video B", position = 1, videoId = "vidB"),
+            node("i-direct", "cat-cartoon", CatalogNodeType.VIDEO, "Direct Video", position = 1, videoId = "vidDirect"),
+        )
+
+        val cards = build(catalog = listOf(shelf)).shelves.single().cards
+
+        assertEquals(listOf("CoComelon", "Direct Video"), cards.map { it.title })
+        assertEquals(
+            listOf(CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO),
+            cards.map { it.kind },
+        )
+
+        val container = cards.first()
+        assertEquals("i-cocomelon", container.containerId)
+        assertNull("a container card is never a video", container.videoId)
+        assertNull("and it names no playlist it does not import", container.playlistId)
+
+        // Its own screen is where the videos are.
+        val opened = CatalogUiProjection.container("i-cocomelon", shelf, emptyList())
+        assertEquals(listOf("Video A", "Video B"), opened!!.cards.map { it.title })
+    }
+
+    @Test
+    fun mixedChildrenKeepTheParentsExactOrder() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-cartoon", "Cartoons", 0,
+                    items = listOf(
+                        container("i-cocomelon", "CoComelon", 0),
+                        video("i-a", "Direct Video A", 1, "vidA"),
+                        container("i-peppa", "Peppa Pig", 2),
+                        video("i-b", "Direct Video B", 3, "vidB"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf("CoComelon", "Direct Video A", "Peppa Pig", "Direct Video B"),
+            state.shelves.single().cards.map { it.title },
+        )
+        assertEquals(
+            listOf(
+                CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO,
+                CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO,
+            ),
+            state.shelves.single().cards.map { it.kind },
+        )
+    }
+
+    @Test
+    fun equalPositionsAmongMixedChildrenBreakOnId() {
+        val state = build(
+            catalog = listOf(
+                category(
+                    "cat-cartoon", "Cartoons", 0,
+                    items = listOf(
+                        video("i-b", "B", 0, "vidB"),
+                        container("i-a", "A", 0),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(listOf("i-a", "i-b"), state.shelves.single().cards.map { it.id })
+    }
+
+    @Test
+    fun aDisabledContainerIsNotACardAndCannotBeOpened() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-shown", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "Shown", position = 0),
+            node("i-hidden", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "Hidden", position = 1, enabled = false),
+            node("i-hidden#v", "i-hidden", CatalogNodeType.VIDEO, "Hidden Video", position = 0, videoId = "vidHidden"),
+        )
+
+        val state = CatalogUiProjection.build(tree, emptyList(), emptyList())
+
+        assertEquals(listOf("Shown"), state.shelves.single().cards.map { it.title })
+        assertFalse(
+            "a hidden container is not projected at all",
+            state.shelves.single().cards.any { it.containerId == "i-hidden" },
+        )
+    }
+
+    @Test
+    fun openingAContainerShowsItsOwnEnabledChildrenInOrder() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+            node("i-cocomelon#b", "i-cocomelon", CatalogNodeType.VIDEO, "Video B", position = 1, videoId = "vidB"),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video A", position = 0, videoId = "vidA"),
+            node("i-cocomelon#off", "i-cocomelon", CatalogNodeType.VIDEO, "Hidden", position = 2, enabled = false, videoId = "vidOff"),
+        )
+
+        val opened = CatalogUiProjection.container("i-cocomelon", tree, emptyList())!!
+
+        assertEquals("CoComelon", opened.title)
+        assertEquals(
+            "position decides, and a disabled child is not offered",
+            listOf("Video A", "Video B"),
+            opened.cards.map { it.title },
+        )
+        assertEquals(listOf("vidA", "vidB"), opened.cards.map { it.videoId })
+        assertFalse(opened.isEmpty)
+    }
+
+    @Test
+    fun anEmptyContainerOpensWithNoCardsAndNoCrash() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-empty", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "Empty", position = 0),
+        )
+
+        val opened = CatalogUiProjection.container("i-empty", tree, emptyList())!!
+
+        assertEquals("Empty", opened.title)
+        assertTrue(opened.isEmpty)
+        assertEquals(emptyList<CatalogCardUi>(), opened.cards)
+        assertEquals(emptyList<CatalogCardUi>(), opened.asShelf().cards)
+    }
+
+    @Test
+    fun aNestedContainerOpensItselfRatherThanTheVideosBelowIt() {
+        // The schema keeps a sub-category to videos only, so this shape cannot be produced by the
+        // editor today. If a catalog ever holds one - a hand-edited document, a future schema - the
+        // projection still shows the inner container as a card instead of flattening it.
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-disney", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "Disney", position = 0),
+            node("i-mickey", "i-disney", CatalogNodeType.SUBCATEGORY, "Mickey Mouse", position = 0),
+            node("i-mickey#v", "i-mickey", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vid1"),
+        )
+
+        val outer = CatalogUiProjection.container("i-disney", tree, emptyList())!!
+        assertEquals(listOf("Mickey Mouse"), outer.cards.map { it.title })
+        assertEquals(CatalogCardKind.CONTAINER, outer.cards.single().kind)
+        assertEquals("i-mickey", outer.cards.single().containerId)
+
+        val inner = CatalogUiProjection.container("i-mickey", tree, emptyList())!!
+        assertEquals(listOf("Video 1"), inner.cards.map { it.title })
+    }
+
+    @Test
+    fun aCategoryIsNotADestinationAndNeitherIsAnUnknownId() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video A", position = 0, videoId = "vidA"),
+        )
+
+        assertNull("a category is a heading, not a screen", CatalogUiProjection.container("cat-cartoon", tree, emptyList()))
+        assertNull("a video is not a container", CatalogUiProjection.container("i-cocomelon#a", tree, emptyList()))
+        assertNull("an id that is not in the catalog opens nothing", CatalogUiProjection.container("i-gone", tree, emptyList()))
+    }
+
+    @Test
+    fun continueWatchingContainsVideosOnlyNeverAContainer() {
+        val state = build(
+            catalog = catalogPublishingApproved(),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLapproved", "https://img/vid1.jpg")),
+            resumable = listOf(resumable("vid1", "Half Watched")),
+        )
+
+        val continueWatching = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }
+        assertTrue(
+            "a container must never appear in Continue Watching",
+            continueWatching.cards.none { it.kind == CatalogCardKind.CONTAINER },
+        )
+        assertEquals(
+            listOf(CatalogCardKind.CONTINUE_WATCHING),
+            continueWatching.cards.map { it.kind },
+        )
+        assertEquals(listOf("vid1"), continueWatching.cards.map { it.videoId })
+        assertNull(continueWatching.cards.single().containerId)
+    }
+
+
     // ------------------------------------------------------------------ artwork
 
     @Test
@@ -361,7 +593,7 @@ class CatalogUiProjectionTest {
 
     private fun treeOfTheShelfItem() = listOf(
         node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
-        node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
+        node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0, playlistId = "PLn"),
         node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
         node("i-p#second", "i-p", CatalogNodeType.VIDEO, "Second", position = 1, videoId = "vid2"),
     )
@@ -369,14 +601,11 @@ class CatalogUiProjectionTest {
     @Test
     fun aShelfShowsThePictureOfAVideoInsideIt() {
         val state = build(
-            catalog = listOf(
-                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
-            ),
+            catalog = listOf(treeOfTheShelfItem()),
             thumbnails = listOf(
                 VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
                 VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
             ),
-            tree = treeOfTheShelfItem(),
         )
 
         assertEquals("https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl)
@@ -393,14 +622,11 @@ class CatalogUiProjectionTest {
         }
 
         val state = build(
-            catalog = listOf(
-                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
-            ),
+            catalog = listOf(tree),
             thumbnails = listOf(
                 VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
                 VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
             ),
-            tree = tree,
         )
 
         assertEquals("https://img/second.jpg", state.shelves.single().cards.single().thumbnailUrl)
@@ -417,13 +643,10 @@ class CatalogUiProjectionTest {
         }
 
         val state = build(
-            catalog = listOf(
-                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
-            ),
+            catalog = listOf(tree),
             // The approved cache knows the playlist's opening video but not the chosen one: a video
             // whose source is not approved has no artwork, and none may be invented for it.
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
-            tree = tree,
         )
 
         assertEquals("https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl)
@@ -432,15 +655,8 @@ class CatalogUiProjectionTest {
     @Test
     fun theShelfHeadingCarriesTheSamePictureAsTheShelf() {
         val state = build(
-            catalog = listOf(
-                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
-            ),
+            catalog = listOf(treeOfTheShelfItem()),
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
-            tree = listOf(
-                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
-                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
-                node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
-            ),
         )
 
         assertEquals("https://img/first.jpg", state.shelves.single().thumbnailUrl)
@@ -451,25 +667,27 @@ class CatalogUiProjectionTest {
     fun aShelfWithNothingToTakeAPictureFromHasNoShelfPicture() {
         val state = build(
             catalog = listOf(
-                category("cat-music", "Music", 0, items = listOf(playlist("i-p", "Nursery", 0, "PLn"))),
+                listOf(
+                    node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+                    node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0, playlistId = "PLn"),
+                    node(
+                        "i-p#off", "i-p", CatalogNodeType.VIDEO, "Hidden",
+                        position = 0, enabled = false, videoId = "vid1",
+                    ),
+                ),
             ),
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
-            tree = listOf(
-                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
-                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
-                node("i-p#off", "i-p", CatalogNodeType.VIDEO, "Hidden", position = 0, enabled = false, videoId = "vid1"),
-            ),
         )
 
         assertNull("a hidden video may not stand for the shelf", state.shelves.single().thumbnailUrl)
         assertEquals(
-            "and the card keeps the artwork it had before thumbnails existed",
+            "and the container card keeps the playlist artwork it had before thumbnails existed",
             "https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl,
         )
     }
 
     @Test
-    fun aLegacyCatalogWithoutATreeProjectsExactlyAsBefore() {
+    fun aCatalogOfPlainVideosProjectsExactlyAsItAlwaysDid() {
         val state = build(
             catalog = listOf(
                 category("cat-music", "Music", 0, items = listOf(video("i-v", "Twinkle", 0, "vid1"))),
@@ -478,7 +696,11 @@ class CatalogUiProjectionTest {
         )
 
         assertEquals("https://img/vid1.jpg", state.shelves.single().cards.single().thumbnailUrl)
-        assertNull("there is no tree, so there is no shelf picture", state.shelves.single().thumbnailUrl)
+        assertEquals(CatalogCardKind.VIDEO, state.shelves.single().cards.single().kind)
+        assertEquals(
+            "and the shelf header shows the video the app picked inside it",
+            "https://img/vid1.jpg", state.shelves.single().thumbnailUrl,
+        )
     }
 
     @Test
@@ -489,11 +711,6 @@ class CatalogUiProjectionTest {
             catalog = catalogPublishingApproved(),
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLapproved", "https://img/vid1.jpg")),
             resumable = listOf(resumable("vid1", "Half Watched")),
-            tree = listOf(
-                node("cat-approved", null, CatalogNodeType.CATEGORY, "Approved"),
-                node("i-approved", "cat-approved", CatalogNodeType.SUBCATEGORY, "Approved", position = 0),
-                node("i-approved#v", "i-approved", CatalogNodeType.VIDEO, "Half Watched", position = 0, videoId = "vid1"),
-            ),
         )
 
         val continueWatching = state.shelves.first { it.id.startsWith("shelf-continue-watching") }
@@ -509,23 +726,16 @@ class CatalogUiProjectionTest {
     fun aVideoCardIsUnaffectedByWhosePictureTheShelfIs() {
         val state = build(
             catalog = listOf(
-                category(
-                    "cat-music", "Music", 0,
-                    items = listOf(
-                        playlist("i-p", "Nursery", 0, "PLn"),
-                        video("i-v", "Twinkle", 1, "vid2"),
-                    ),
+                listOf(
+                    node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
+                    node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0, playlistId = "PLn"),
+                    node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
+                    node("i-v", "cat-music", CatalogNodeType.VIDEO, "Twinkle", position = 1, videoId = "vid2"),
                 ),
             ),
             thumbnails = listOf(
                 VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg"),
                 VideoThumbnailRow("vid2", "PLn", "https://img/second.jpg"),
-            ),
-            tree = listOf(
-                node("cat-music", null, CatalogNodeType.CATEGORY, "Music"),
-                node("i-p", "cat-music", CatalogNodeType.SUBCATEGORY, "Nursery", position = 0),
-                node("i-p#first", "i-p", CatalogNodeType.VIDEO, "First", position = 0, videoId = "vid1"),
-                node("i-v", "cat-music", CatalogNodeType.VIDEO, "Twinkle", position = 1, videoId = "vid2"),
             ),
         )
 
@@ -642,17 +852,22 @@ class CatalogUiProjectionTest {
         assertEquals("Video 1-1", state.shelves.first().cards.first().title)
         assertEquals("Playlist 1-30", state.shelves.first().cards.last().title)
         assertEquals(
-            List(15) { CatalogCardKind.VIDEO } .zip(List(15) { CatalogCardKind.PLAYLIST })
+            List(15) { CatalogCardKind.VIDEO }.zip(List(15) { CatalogCardKind.CONTAINER })
                 .flatMap { listOf(it.first, it.second) },
             state.shelves.first().cards.map { it.kind },
         )
     }
 
-    private fun withOneItem(category: CategoryWithItems) = category.copy(
-        items = listOf(
-            playlist("item-${category.category.id}", category.category.displayName, 0, "PL${category.category.id}"),
-        ),
-    )
+    /** The same shelf with one imported container under it. */
+    private fun withOneItem(shelf: List<CatalogNodeEntity>): List<CatalogNodeEntity> {
+        val category = shelf.first()
+        return shelf + container(
+            id = "item-${category.id}",
+            name = category.title,
+            sortOrder = 0,
+            playlistId = "PL${category.id}",
+        ).copy(parentId = category.id)
+    }
 
     /**
      * A catalog that publishes the playlist the resumable fixtures below belong to.

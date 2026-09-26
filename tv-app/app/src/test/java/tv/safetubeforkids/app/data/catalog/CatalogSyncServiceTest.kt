@@ -25,6 +25,7 @@ import tv.safetubeforkids.app.data.cache.PlaybackPositionEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
 import tv.safetubeforkids.app.playback.PlaybackApproval
 import tv.safetubeforkids.app.playback.PlaybackAuthorization
+import tv.safetubeforkids.app.ui.screens.CatalogCardKind
 import tv.safetubeforkids.app.ui.screens.CatalogUiProjection
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -864,7 +865,7 @@ class CatalogSyncServiceTest {
         enqueueShelf(1L, imported() + curated)
         assertEquals(CatalogSyncResult.Updated(1L), service().syncCatalog())
 
-        val before = localAllItems().map { Triple(it.id, it.displayName, it.type) }
+        val before = storedTree().map { Triple(it.id, it.title, it.nodeType) }
         val beforeCount = localItemCount()
 
         // Version 2 changes one thing: which video stands for the curated subcategory.
@@ -880,7 +881,7 @@ class CatalogSyncServiceTest {
         )
         assertEquals(CatalogSyncResult.Updated(2L), service().syncCatalog())
 
-        assertEquals("the entries the child sees are exactly the same", before, localAllItems().map { Triple(it.id, it.displayName, it.type) })
+        assertEquals("the tree the child browses is exactly the same", before, storedTree().map { Triple(it.id, it.title, it.nodeType) })
         assertEquals(beforeCount, localItemCount())
         assertEquals("vidB", CatalogThumbnails.representativeFor(storedTree(), "i-curated"))
     }
@@ -1095,6 +1096,32 @@ class CatalogSyncServiceTest {
         )
         assertEquals(listOf("Cartoons"), localCategoryNames())
         assertEquals("the direct video is a card of its own", 2, localItems("cat-cartoon").size)
+
+        // And the child sees exactly that hierarchy: the shelf holds a *container* card called
+        // Cocomelon and a video card called Direct Video - never "Video A" in the container's place.
+        val home = CatalogUiProjection.build(
+            tree = tree,
+            thumbnails = repository.observeVideoThumbnails().first(),
+            resumable = emptyList(),
+        )
+        val shelf = home.shelves.single()
+        assertEquals("Cartoons", shelf.title)
+        assertEquals(listOf("Cocomelon", "Direct Video"), shelf.cards.map { it.title })
+        assertEquals(
+            listOf(CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO),
+            shelf.cards.map { it.kind },
+        )
+        assertEquals("i-cocomelon", shelf.cards[0].containerId)
+        assertNull("a container card names no video to play", shelf.cards[0].videoId)
+        assertEquals("vidDirect", shelf.cards[1].videoId)
+
+        val opened = CatalogUiProjection.container(
+            containerId = "i-cocomelon",
+            tree = tree,
+            thumbnails = repository.observeVideoThumbnails().first(),
+        )!!
+        assertEquals("Cocomelon", opened.title)
+        assertEquals(listOf("Video A", "Video B"), opened.cards.map { it.title })
     }
 
     @Test
@@ -1134,7 +1161,7 @@ class CatalogSyncServiceTest {
         // The disabled one is stored but not shown to the child.
         assertEquals(false, tree.single { it.id == "i-second" }.enabled)
         assertEquals(1, CatalogUiProjection.build(
-            catalog = repository.observeCatalogWithItems().first(),
+            tree = tree,
             thumbnails = repository.observeVideoThumbnails().first(),
             resumable = repository.observeResumableVideos(20_000, 95).first(),
         ).shelves.single().cards.size)

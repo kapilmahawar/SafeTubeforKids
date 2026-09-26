@@ -16,6 +16,7 @@
                 <action android:name="tv.safetubeforkids.app.DEBUG_SYNC_CATALOG" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_CATALOG_SYNC_UNAVAILABLE" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_DUMP_CATALOG_UI" />
+                <action android:name="tv.safetubeforkids.app.DEBUG_DUMP_CONTAINER_UI" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_DUMP_CATALOG_NODES" />
                 <action android:name="tv.safetubeforkids.app.DEBUG_CLEAR_RESUME_POSITIONS" />
                 <!-- PIN/Auth -->

@@ -64,14 +64,18 @@ import tv.safetubeforkids.app.ui.theme.OverscanPadding
  * The child-facing home screen: the parent's catalog, rendered as shelves.
  *
  * Every shelf, every card and every title comes from the local Room catalog. Nothing on this screen
- * performs a network request, and nothing here decides what may play - a card press hands a video id
- * to the existing player, which authorizes it as it always has.
+ * performs a network request, and nothing here decides what may play - a card press either opens a
+ * container or hands a video id to the existing player, which authorizes it as it always has.
+ *
+ * A category is a shelf *title*: the only things focusable here are the cards under it, and a
+ * sub-category card opens the sub-category rather than starting the first video inside it.
  */
 @Composable
 fun HomeScreen(
     onPlayVideo: (videoId: String, playlistId: String, videoIndex: Int) -> Unit,
     onSettings: () -> Unit,
     onConnect: () -> Unit,
+    onOpenContainer: (containerId: String) -> Unit = {},
     onLocked: (String) -> Unit = {},
     viewModel: HomeViewModel = viewModel(),
 ) {
@@ -225,8 +229,16 @@ fun HomeScreen(
                 CatalogContent(
                     state = catalogState,
                     onCardSelected = { card ->
-                        viewModel.onCardSelected(card) { target ->
-                            onPlayVideo(target.videoId, target.playlistId, target.startIndex)
+                        // A container opens; a video plays. Which one a card is comes from the catalog,
+                        // and the two destinations are decided in one place (CatalogNavigation) rather
+                        // than here, so the home screen and an open container cannot disagree.
+                        val containerId = CatalogNavigation.containerOpenedBy(card)
+                        if (containerId != null) {
+                            onOpenContainer(containerId)
+                        } else {
+                            viewModel.onCardSelected(card) { target ->
+                                onPlayVideo(target.videoId, target.playlistId, target.startIndex)
+                            }
                         }
                     },
                 )
@@ -292,162 +304,31 @@ private fun KioskAppsContent(
 /**
  * The shelves themselves.
  *
- * Focus is remembered across a trip to the player: the card that was pressed is written down before
- * navigating, and when the screen comes back that card is focused again. If the catalog changed
- * underneath and the card is gone, nothing is forced - the shelf simply takes focus normally.
+ * Focus is remembered across a trip to a player or into a container: the card that was pressed is
+ * written down before navigating, and when the screen comes back that card is focused again. If the
+ * catalog changed underneath and the card is gone, nothing is forced - the shelf simply takes focus
+ * normally.
  */
 @Composable
 private fun CatalogContent(
     state: CatalogUiState,
     onCardSelected: (CatalogCardUi) -> Unit,
 ) {
+    var restoreCardId by rememberSaveable { mutableStateOf<String?>(null) }
+
     if (state.isEmpty) {
         EmptyCatalogState()
         return
     }
 
-    val shelvesState = rememberLazyListState()
-    var restoreCardId by rememberSaveable { mutableStateOf<String?>(null) }
-    var pendingFocusId by remember { mutableStateOf<String?>(null) }
-    val focusRequesters = remember { mutableMapOf<String, FocusRequester>() }
-
-    // Coming back from the player: bring the pressed card back into view and give it focus.
-    LaunchedEffect(restoreCardId, state.shelves) {
-        val wanted = restoreCardId ?: return@LaunchedEffect
-        val shelfIndex = state.shelves.indexOfFirst { shelf -> shelf.cards.any { it.id == wanted } }
-        if (shelfIndex < 0) {
-            // The item is no longer in the catalog; leave focus to the normal first-press behaviour.
-            restoreCardId = null
-            return@LaunchedEffect
-        }
-        if (shelvesState.firstVisibleItemIndex != shelfIndex) {
-            runCatching { shelvesState.scrollToItem(shelfIndex) }
-        }
-        pendingFocusId = wanted
-    }
-
-    LazyColumn(
-        state = shelvesState,
-        contentPadding = PaddingValues(bottom = 32.dp),
-    ) {
-        items(state.shelves, key = { it.id }) { shelf ->
-            CatalogShelfSection(
-                shelf = shelf,
-                focusRequesterFor = { cardId -> focusRequesters.getOrPut(cardId) { FocusRequester() } },
-                pendingFocusId = pendingFocusId,
-                onFocusRequestHandled = { handled -> if (pendingFocusId == handled) pendingFocusId = null },
-                onCardClick = { card ->
-                    restoreCardId = card.id
-                    onCardSelected(card)
-                },
-            )
-        }
-    }
-}
-
-@Composable
-private fun CatalogShelfSection(
-    shelf: CatalogShelfUi,
-    focusRequesterFor: (String) -> FocusRequester,
-    pendingFocusId: String?,
-    onFocusRequestHandled: (String) -> Unit,
-    onCardClick: (CatalogCardUi) -> Unit,
-) {
-    val rowState: LazyListState = rememberLazyListState()
-
-    Column(modifier = Modifier.padding(vertical = 8.dp)) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // The shelf's own picture, when the parent configured a thumbnail for the category (or let
-            // AUTO pick one inside it). Absent is normal - a shelf whose videos are all unapproved, or
-            // an older catalog with no thumbnail configuration - and the header is then exactly what it
-            // always was: the title on its own. Nothing here is focusable, so D-pad navigation and the
-            // card order are untouched.
-            ShelfThumbnail(url = shelf.thumbnailUrl, title = shelf.title)
-
-            Text(
-                text = shelf.title,
-                style = MaterialTheme.typography.titleMedium,
-                color = KidText,
-            )
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        LazyRow(
-            state = rowState,
-            contentPadding = PaddingValues(horizontal = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            items(shelf.cards, key = { it.id }) { card ->
-                CatalogCard(
-                    card = card,
-                    onClick = { onCardClick(card) },
-                    focusRequester = focusRequesterFor(card.id),
-                    requestFocusNow = pendingFocusId == card.id,
-                    onFocusRequestHandled = { onFocusRequestHandled(card.id) },
-                )
-            }
-        }
-    }
-}
-
-/**
- * The shelf header's own artwork, or nothing at all.
- *
- * Drawn only when the catalog resolved a picture for the shelf, and never focusable: it is a
- * decoration beside the title, so it cannot take focus away from the cards or change the way the
- * screen is navigated. Coil loads a URL the approved cache already holds; when there is none, the
- * header keeps its previous appearance.
- */
-@Composable
-private fun ShelfThumbnail(url: String?, title: String) {
-    if (url.isNullOrBlank()) return
-
-    AsyncImage(
-        model = url,
-        contentDescription = null,
-        contentScale = ContentScale.Crop,
-        modifier = Modifier
-            .width(72.dp)
-            .height(40.dp)
-            .clip(RoundedCornerShape(6.dp))
-            .background(KidSurface),
+    CatalogShelves(
+        shelves = state.shelves,
+        onCardSelected = { card ->
+            restoreCardId = card.id
+            onCardSelected(card)
+        },
+        restoreCardId = restoreCardId,
+        onRestoreHandled = { restoreCardId = null },
     )
-
-    Spacer(modifier = Modifier.width(10.dp))
 }
 
-/**
- * Shown when the parent has configured nothing - either a fresh installation, or a catalog that
- * deliberately contains no shelves. No stale content, no YouTube browsing, no spinner: just a calm
- * message a child can read and a parent can act on.
- */
-@Composable
-private fun EmptyCatalogState() {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(horizontal = 48.dp),
-        ) {
-            Text(
-                text = "No videos yet",
-                style = MaterialTheme.typography.headlineSmall,
-                color = KidText,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            Text(
-                text = "Ask a parent to add videos to SafeTube",
-                style = MaterialTheme.typography.bodyLarge,
-                color = KidTextDim,
-                textAlign = TextAlign.Center,
-            )
-        }
-    }
-}

@@ -254,23 +254,11 @@ class CatalogDatabaseTest {
     @Test
     fun malformedItemsAreRejected() {
         val rejected = listOf(
-            "PLAYLIST with no playlist id" to {
-                ContentItemEntity(
-                    id = "i1", categoryId = "c", type = ContentItemType.PLAYLIST,
-                    displayName = "x", sortOrder = 0, youtubePlaylistId = null,
-                )
-            },
             "PLAYLIST carrying a video id too" to {
                 ContentItemEntity(
                     id = "i2", categoryId = "c", type = ContentItemType.PLAYLIST,
                     displayName = "x", sortOrder = 0,
                     youtubePlaylistId = "PLx", youtubeVideoId = "vidx",
-                )
-            },
-            "PLAYLIST with a blank playlist id" to {
-                ContentItemEntity(
-                    id = "i3", categoryId = "c", type = ContentItemType.PLAYLIST,
-                    displayName = "x", sortOrder = 0, youtubePlaylistId = "   ",
                 )
             },
             "VIDEO with no video id" to {

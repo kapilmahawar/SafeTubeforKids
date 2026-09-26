@@ -84,6 +84,11 @@ fun CatalogCard(
     focusRequester: FocusRequester? = null,
     requestFocusNow: Boolean = false,
     onFocusRequestHandled: () -> Unit = {},
+    /**
+     * Reports this card's focus, so the shelf can tell "the restored card is focused" from "something
+     * else on the screen took it", and can stop asking once the child has moved on.
+     */
+    onFocusChanged: (Boolean) -> Unit = {},
 ) {
     var isFocused by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (isFocused) FOCUS_SCALE else 1f, label = "catalog-card-scale")
@@ -91,16 +96,11 @@ fun CatalogCard(
     if (focusRequester != null) {
         LaunchedEffect(requestFocusNow) {
             if (!requestFocusNow) return@LaunchedEffect
-            // A card returning from the player may need a frame or two to exist again inside a lazy
-            // row, and requesting focus before the node is attached throws. Retry a bounded number
-            // of times rather than giving up on the first frame.
-            repeat(6) {
-                if (runCatching { focusRequester.requestFocus() }.isSuccess) {
-                    onFocusRequestHandled()
-                    return@LaunchedEffect
-                }
-                withFrameNanos { }
-            }
+            // A card returning from a container or the player may need a frame or two to exist again
+            // inside a lazy row, and requesting focus before the node is attached throws. The shelf
+            // keeps asking until the focus sticks; this is the first attempt.
+            runCatching { focusRequester.requestFocus() }
+            onFocusRequestHandled()
         }
     }
 
@@ -115,7 +115,10 @@ fun CatalogCard(
                 else Modifier
             )
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .onFocusChanged { isFocused = it.isFocused }
+            .onFocusChanged {
+                isFocused = it.isFocused
+                onFocusChanged(it.isFocused)
+            }
             .focusable()
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyUp && event.key == Key.DirectionCenter) {
@@ -183,8 +186,9 @@ private fun CardArtwork(card: CatalogCardUi) {
 
 @Composable
 private fun PlaceholderArtwork(kind: CatalogCardKind) {
+    // A container shows the playlist mark: it holds videos, and it is not one of them.
     val icon: ImageVector = when (kind) {
-        CatalogCardKind.PLAYLIST -> Icons.Rounded.PlaylistPlay
+        CatalogCardKind.CONTAINER -> Icons.Rounded.PlaylistPlay
         CatalogCardKind.VIDEO -> Icons.Rounded.PlayCircle
         CatalogCardKind.CONTINUE_WATCHING -> Icons.Rounded.PlayCircle
     }

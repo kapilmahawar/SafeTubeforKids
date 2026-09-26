@@ -15,9 +15,20 @@ import org.junit.Test
 class CatalogValidationTest {
 
     @Test
-    fun aPlaylistItemNeedsAPlaylistIdAndNoVideoId() {
+    fun aContainerItemMayNameAPlaylistOrNothingAtAllAndNeverAVideo() {
         assertNull(CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, "PLabc", null))
         assertTrue(CatalogValidation.isValidContentIdentity(ContentItemType.PLAYLIST, "PLabc", null))
+
+        // A container the parent built by hand: it imports nothing, and that is a legitimate catalog
+        // entry rather than a malformed one. Requiring an id here is what used to force such a
+        // container to be presented as its first video.
+        assertNull(CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, null, null))
+        assertTrue(CatalogValidation.isValidContentIdentity(ContentItemType.PLAYLIST, null, null))
+
+        assertNotNull(
+            "a container still may not carry a video id",
+            CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, "PLabc", "vid"),
+        )
     }
 
     @Test
@@ -28,14 +39,6 @@ class CatalogValidationTest {
 
     @Test
     fun everyMalformedCombinationNamesItsProblem() {
-        assertNotNull(
-            "PLAYLIST without a playlist id",
-            CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, null, null),
-        )
-        assertNotNull(
-            "PLAYLIST with a blank playlist id",
-            CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, "  ", null),
-        )
         assertNotNull(
             "PLAYLIST carrying a video id",
             CatalogValidation.contentIdentityProblem(ContentItemType.PLAYLIST, "PLabc", "vid"),

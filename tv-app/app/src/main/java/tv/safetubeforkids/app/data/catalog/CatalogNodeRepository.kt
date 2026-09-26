@@ -243,52 +243,10 @@ class CatalogNodeRepository(private val db: CacheDatabase) {
         )
     }
 
-    /**
-     * A category's children as the shape the projection already consumes: a video as a VIDEO item, and a
-     * container as the PLAYLIST item it used to be - its playlist id when it has an import source,
-     * otherwise its first enabled video, so a container the parent built by hand still opens something
-     * rather than presenting a card that can only fail. (W4 replaces this compatibility shape with real
-     * container navigation.)
-     */
-    suspend fun items(categoryId: String): List<ContentItemEntity> {
-        val result = mutableListOf<ContentItemEntity>()
-        dao.childrenOf(categoryId).forEach { node ->
-            when (node.nodeType) {
-                CatalogNodeType.VIDEO -> result += node.asItem(categoryId)
-
-                CatalogNodeType.SUBCATEGORY -> {
-                    if (!node.youtubePlaylistId.isNullOrBlank()) {
-                        result += node.asItem(categoryId)
-                    } else {
-                        dao.childrenOf(node.id)
-                            .firstOrNull { it.nodeType == CatalogNodeType.VIDEO && it.enabled }
-                            ?.let { result += it.asItem(categoryId) }
-                    }
-                }
-
-                CatalogNodeType.CATEGORY -> Unit
-            }
-        }
-        return result
-    }
-
-    private fun CatalogNodeEntity.asItem(categoryId: String) = ContentItemEntity(
-        id = id,
-        categoryId = categoryId,
-        type = if (nodeType == CatalogNodeType.VIDEO) ContentItemType.VIDEO else ContentItemType.PLAYLIST,
-        displayName = title,
-        sortOrder = position,
-        // The legacy value type is stricter than the tree: a VIDEO item must not carry a playlist id,
-        // and it refuses to be constructed while one is there. The tree *does* keep provenance on an
-        // imported video (which playlist brought it in), so the compatibility view drops it on videos
-        // and keeps it on the containers it means something for. Dropping it here loses nothing: the
-        // projection reads a video's identifier, not where it came from.
-        youtubePlaylistId = youtubePlaylistId.takeIf { nodeType == CatalogNodeType.SUBCATEGORY },
-        youtubeVideoId = youtubeVideoId,
-        enabled = enabled,
-        createdAt = createdAt,
-        updatedAt = updatedAt,
-    )
+    // A shelf's children as the compatibility shape the projection consumes are derived in exactly one
+    // place - `CatalogRepository.itemsOf` - so this repository deliberately has no second copy of that
+    // rule. Two copies is how a container came to be flattened to its first video on one read path and
+    // not on the other.
 
     // --- version 1 -> the tree ---------------------------------------------------------------------
 

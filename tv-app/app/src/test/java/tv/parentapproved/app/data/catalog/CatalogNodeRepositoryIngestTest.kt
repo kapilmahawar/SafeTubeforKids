@@ -388,13 +388,15 @@ class CatalogNodeRepositoryIngestTest {
         assertEquals(listOf("Cartoon", "Music"), categories.map { it.displayName })
         assertEquals(listOf(0, 1), categories.map { it.sortOrder })
 
-        val items = repo.items("cat-cartoon")
-        assertEquals(listOf("Cocomelon", "Halloween Special"), items.map { it.displayName })
-        assertEquals(listOf(0, 1), items.map { it.sortOrder })
+        // The derived shape is built by `CatalogRepository.itemsOf`, which is the one place that rule
+        // lives; this repository only serves the tree it is derived from.
+        val items = repo.tree().filter { it.parentId == "cat-cartoon" }
+        assertEquals(listOf("Cocomelon", "Halloween Special"), items.map { it.title })
+        assertEquals(listOf(0, 1), items.map { it.position })
         // A container reads as the playlist item it used to be; a video as a video.
-        assertEquals(ContentItemType.PLAYLIST, items[0].type)
+        assertEquals(CatalogNodeType.SUBCATEGORY, items[0].nodeType)
         assertEquals(playlist, items[0].youtubePlaylistId)
-        assertEquals(ContentItemType.VIDEO, items[1].type)
+        assertEquals(CatalogNodeType.VIDEO, items[1].nodeType)
         assertEquals("vid-halloween", items[1].youtubeVideoId)
     }
 

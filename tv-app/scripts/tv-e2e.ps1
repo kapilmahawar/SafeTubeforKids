@@ -596,6 +596,201 @@ if (((Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n") -match 'LOGIN_REQUIRE
     Log 'NOTE: YouTube is refusing anonymous watch access from this IP (LOGIN_REQUIRED) - playback phases will fail for that reason, not because of the app'
 }
 
+# ---------------------------------------------------------------- W6: the catalog hierarchy
+#
+# A category is a shelf *title*; a sub-category is a card that opens it. These checks use the app's own
+# projection for what it intends to draw and uiautomator for what is actually on screen and focused, so
+# a failure says which of the two is wrong. They run before the player phases and leave the app on the
+# library with nothing playing.
+function Get-DebugDump([string]$action, [string]$extra = '') {
+    Adb @('logcat', '-c') | Out-Null
+    $command = "am broadcast -f 0x01000000 -a $pkg.$action -p $pkg"
+    if ($extra) { $command = "$command $extra" }
+    Adb @('shell', $command) | Out-Null
+    Start-Sleep -Seconds 3
+    $lines = Adb @('logcat', '-d', '-s', 'SafeTube-Intent')
+    # logcat splits a long entry into several lines, so the payload is reassembled before parsing.
+    $text = ($lines | ForEach-Object { if ($_ -match 'D SafeTube-Intent: (.*)$') { $Matches[1] } else { $_ } }) -join ''
+    $start = $text.IndexOfAny([char[]]@('[', '{'))
+    if ($start -lt 0) { return $null }
+    return $text.Substring($start)
+}
+
+# The labels of a focusable node and its whole subtree: a Compose card is a focusable container whose
+# name lives on a child (the artwork's description and the title), so the card itself looks unlabelled.
+function Get-UiFacts([string]$dumpPath) {
+    $facts = [ordered]@{ Focused = ''; Focusable = @(); Texts = @(); Dump = '' }
+    if (-not (Test-Path $dumpPath)) { return $facts }
+    $raw = Get-Content $dumpPath -Raw
+    # uiautomator writes XML, so a title containing '&' arrives as '&amp;'. Decoding the five entities
+    # is what lets a card's title be compared with the title the app reported.
+    $facts.Dump = $raw -replace '&amp;', '&' -replace '&quot;', '"' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&apos;', "'"
+    try { [xml]$xml = $raw } catch { return $facts }
+    $all = $xml.SelectNodes('//node')
+    $focusable = @()
+    foreach ($node in $all) {
+        if ($node.text) { $facts.Texts += $node.text }
+        if ($node.focusable -ne 'true') { continue }
+        $labels = @()
+        $stack = New-Object System.Collections.Stack
+        $stack.Push($node)
+        while ($stack.Count -gt 0) {
+            $current = $stack.Pop()
+            foreach ($child in $current.ChildNodes) {
+                if ($child.NodeType -eq 'Element') { $stack.Push($child) }
+            }
+            if ($current.text) { $labels += $current.text }
+            elseif ($current.'content-desc') { $labels += $current.'content-desc' }
+        }
+        $label = ($labels | Select-Object -Unique) -join ' / '
+        $focusable += $label
+        if ($node.focused -eq 'true') { $facts.Focused = $label }
+    }
+    $facts.Focusable = $focusable
+    return $facts
+}
+
+# Whether a D-pad focus label belongs to a card with this exact title. A label is the card's own texts
+# joined with ' / ' (the artwork's description and the title), so a *substring* test is not enough:
+# "Wheels on the Bus | @CoComelon ..." would otherwise match a card called "CoComelon".
+function Test-CardLabel([string]$label, [string]$title) {
+    if (-not $label -or -not $title) { return $false }
+    foreach ($part in ($label -split ' / ')) {
+        $trimmed = $part.Trim()
+        if ($trimmed -eq $title -or $trimmed -eq "[$title]") { return $true }
+    }
+    return $false
+}
+
+# What is playing right now, from the app's own status endpoint.
+function Get-W6Playing {
+    $state = ApiState
+    if ($state -and $state.currentlyPlaying) { return $state.currentlyPlaying }
+    return $null
+}
+
+function Go-ToLibrary([string]$why) {
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        Dump "w6-library-$attempt"
+        $facts = Get-UiFacts (Join-Path $out "w6-library-$attempt.xml")
+        if ($facts.Dump -match 'SafeTube for Kids' -and $facts.Dump -match 'Refresh') { return $true }
+        Log "  $why - returning to the library from whatever screen is up"
+        Key 'KEYCODE_BACK'
+        Start-Sleep -Seconds 2
+    }
+    return $false
+}
+
+EnsureApp 'w6' | Out-Null
+if (Go-ToLibrary 'before the hierarchy checks') {
+    Log '=== W6: categories are titles, sub-categories are cards ==='
+    $projection = Get-DebugDump 'DEBUG_DUMP_CATALOG_UI'
+    $model = $null
+    if ($projection) { try { $model = $projection | ConvertFrom-Json } catch { $model = $null } }
+
+    if (-not $model) {
+        Record 'w6-catalog-projection' $false 'the app did not report its catalogue projection'
+    } else {
+        $shelf = $model.shelves | Where-Object { $_.id -ne 'shelf-continue-watching' } | Select-Object -First 1
+        if (-not $shelf -or $shelf.cards.Count -eq 0) {
+            Record 'w6-catalog-projection' $false 'no shelf with cards to navigate'
+        } else {
+            $first = $shelf.cards[0]
+            $shelfLine = ($shelf.cards | ForEach-Object { "$($_.title)[$($_.kind)]" }) -join ' '
+            Log "  shelf '$($shelf.title)': $shelfLine"
+            # Remembered for the D-pad phase below, which then knows whether the first press of Enter
+            # opens a container or starts a video - a guess about that route is what made it flaky.
+            $script:w6FirstCardIsContainer = ($first.kind -eq 'CONTAINER')
+
+            Dump 'w6-a-home'
+            $homeFacts = Get-UiFacts (Join-Path $out 'w6-a-home.xml')
+
+            # 1. the category title is a heading, and nothing focusable carries it
+            $titleFocusable = @($homeFacts.Focusable | Where-Object { $_ -eq $shelf.title -or $_ -eq "[$($shelf.title)]" })
+            Record 'w6-category-title-not-focusable' ($titleFocusable.Count -eq 0) `
+                "shelf title '$($shelf.title)' is a heading; focusable labels: $($homeFacts.Focusable.Count)"
+
+            # 2. the shelf's cards are focusable, in the configured order
+            $orderedLabels = @()
+            foreach ($card in $shelf.cards) {
+                $orderedLabels += @($homeFacts.Focusable | Where-Object { Test-CardLabel $_ $card.title } | Select-Object -First 1)
+            }
+            $present = @($orderedLabels | Where-Object { $_ })
+            Record 'w6-subcategory-is-a-card' ($first.kind -eq 'CONTAINER') "first card '$($first.title)' kind=$($first.kind)"
+            Record 'w6-cards-are-focusable' ($present.Count -ge [Math]::Min(2, $shelf.cards.Count)) `
+                "focusable cards on screen: $($present.Count) of $($shelf.cards.Count)"
+
+            # 3. focus the first card with the D-pad alone
+            $focused = ''
+            for ($press = 0; $press -lt 6; $press++) {
+                Key 'KEYCODE_DPAD_DOWN'
+                Dump "w6-b-focus-$press"
+                $facts = Get-UiFacts (Join-Path $out "w6-b-focus-$press.xml")
+                if (Test-CardLabel $facts.Focused $first.title) { $focused = $facts.Focused; break }
+            }
+            Record 'w6-dpad-reaches-the-first-card' ($focused -ne '') "focused '$focused'"
+            if ($focused -ne '') {
+                Log "  D-pad focus: $focused"
+                if ($first.kind -eq 'CONTAINER') {
+                    # 4. Enter opens the container - and must not start playing anything
+                    Key 'KEYCODE_DPAD_CENTER'
+                    Start-Sleep -Seconds 4
+                    $playingAfterEnter = Get-W6Playing
+                    Record 'w6-container-card-does-not-autoplay' ($null -eq $playingAfterEnter) `
+                        $(if ($null -eq $playingAfterEnter) { 'nothing started' } else { "started $($playingAfterEnter.videoId)" })
+
+                    # 5. the container's own children are what is shown
+                    $children = Get-DebugDump 'DEBUG_DUMP_CONTAINER_UI' "--es container_id $($first.containerId)"
+                    $childModel = $null
+                    if ($children) { try { $childModel = $children | ConvertFrom-Json } catch { $childModel = $null } }
+                    $childTitles = @()
+                    if ($childModel) { $childTitles = @($childModel.cards | ForEach-Object { $_.title }) }
+                    Dump 'w6-c-container'
+                    $inside = Get-UiFacts (Join-Path $out 'w6-c-container.xml')
+                    # Only the cards that fit on screen are in the hierarchy dump, so the check is that
+                    # the container's own name and its *first* child are there, and that this is the
+                    # container's screen rather than the home screen (which carries the Refresh button).
+                    $firstChild = if ($childTitles.Count -gt 0) { $childTitles[0] } else { '' }
+                    $openedChildren = ($childTitles.Count -gt 0) -and
+                        ($inside.Dump -match [regex]::Escape($first.title)) -and
+                        ($inside.Dump -match [regex]::Escape($firstChild)) -and
+                        ($inside.Dump -notmatch 'Refresh')
+                    Record 'w6-container-opens-its-children' $openedChildren `
+                        "container '$($first.title)' shows its first child '$firstChild' (of $($childTitles.Count))"
+                    if ($childTitles.Count -eq 0) {
+                        Log '  (the container is empty, so there is nothing to show inside it)'
+                    }
+
+                    # 6. Back returns to the shelf, with the same card focused again
+                    Key 'KEYCODE_BACK'
+                    Start-Sleep -Seconds 3
+                    Dump 'w6-d-back'
+                    $back = Get-UiFacts (Join-Path $out 'w6-d-back.xml')
+                    Record 'w6-back-returns-to-the-shelf' (($null -eq (Get-W6Playing)) -and ($back.Dump -match 'Refresh')) `
+                        'the library is back on screen and nothing is playing'
+                    Record 'w6-back-restores-the-card-focus' (Test-CardLabel $back.Focused $first.title) `
+                        "focused '$($back.Focused)'"
+                } else {
+                    Log '  the first card is a video, so the container checks do not apply to this catalog'
+                }
+            }
+
+            # Leave the focus where the D-pad phase below expects to find it: on the top bar. The
+            # hierarchy checks moved it onto a card, and a phase that assumes the library's starting
+            # focus would otherwise drive from the wrong place.
+            for ($up = 0; $up -lt 4; $up++) {
+                Dump 'w6-e-topbar'
+                $topFacts = Get-UiFacts (Join-Path $out 'w6-e-topbar.xml')
+                if ($topFacts.Focused -match 'Refresh') { break }
+                Key 'KEYCODE_DPAD_UP'
+                Start-Sleep -Seconds 1
+            }
+        }
+    }
+} else {
+    Record 'w6-catalog-projection' $false 'the app could not be returned to the library for the hierarchy checks'
+}
+
 Log "=== navigate with D-pad only ==="
 function PlayingNow {
     $s = ApiState
@@ -645,24 +840,57 @@ function Capture-PlayingState([string]$testName) {
     Log "  [diag:$testName] http=$httpStatus currentlyPlaying=$desc fg=$(ForegroundPackage)"
 }
 
-$sequences = @(
+# W6: a shelf's first card may be a *sub-category*, and pressing it opens that container instead of
+# starting anything - which is the correction W6 makes. The route therefore continues one level in:
+# after a CENTER that did not start playback, descend into the container and press its first video.
+# Every key is followed by a playback check, so no sequence can ever press a key on a running player.
+$sequences = @()
+# When the hierarchy checks saw a sub-category as the first card, the route is known: Enter opens it,
+# then down onto its first video and Enter plays it. Trying that first keeps this phase deterministic
+# instead of discovering the route by pressing keys and watching what happens.
+if ($script:w6FirstCardIsContainer) {
+    $sequences += , @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER', 'KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER')
+}
+$sequences += @(
     @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER'),
     @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_RIGHT', 'KEYCODE_DPAD_CENTER'),
     @('KEYCODE_DPAD_RIGHT', 'KEYCODE_DPAD_CENTER'),
-    @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER')
+    @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER'),
+    @('KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER', 'KEYCODE_DPAD_DOWN', 'KEYCODE_DPAD_CENTER')
 )
 $opened = $null
+$route = @()
 foreach ($sequence in $sequences) {
-    foreach ($keyCode in $sequence) { Key $keyCode }
-    Start-Sleep -Seconds 10
-    $opened = PlayingNow
-    if ($opened) { Log "  opened with remote sequence: $($sequence -join ' -> ')"; break }
+    $pressed = @()
+    foreach ($keyCode in $sequence) {
+        Key $keyCode
+        $pressed += $keyCode
+        Start-Sleep -Seconds 4
+        $opened = PlayingNow
+        if ($opened) {
+            Log "  opened with remote sequence: $($pressed -join ' -> ')"
+            break
+        }
+    }
+    if ($opened) { $route = $pressed; break }
     Log "  no playback after sequence: $($sequence -join ' -> ')"
+    # Whatever screen the failed sequence left behind, come back to the library before trying the next
+    # route - and never press BACK blind *on* the library, because that would leave the app.
+    for ($attempt = 0; $attempt -lt 4; $attempt++) {
+        Dump 'nav-restore'
+        $restorePath = Join-Path $out 'nav-restore.xml'
+        $restoreDump = ''
+        if (Test-Path $restorePath) { $restoreDump = Get-Content $restorePath -Raw }
+        if ($restoreDump -match 'SafeTube for Kids' -and $restoreDump -match 'Refresh') { break }
+        Key 'KEYCODE_BACK'
+        Start-Sleep -Seconds 2
+    }
 }
 Shot '02-player-opened'
 $afterOpen = ApiState
 if ($afterOpen) { $afterOpen | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $out 'api-playing.json') }
 Record 'dpad-opens-approved-video' ([bool]$opened)
+if ($route.Count) { Log "  route used: $($route -join ' -> ')" }
 
 if (-not $opened) {
     Log 'PLAYER_FEATURE_TEST: BLOCKED - no approved video started, so player controls cannot be exercised'
@@ -1440,8 +1668,12 @@ if ($opened) {
         $backDump = ''
         $backDumpPath = Join-Path $out '07-library-again.xml'
         if (Test-Path $backDumpPath) { $backDump = (Get-Content $backDumpPath -Raw) }
-        # The library is the only screen carrying both of these (see the D-pad navigation phase).
-        $libraryOnScreen = ($backDump -match 'SafeTube for Kids') -and ($backDump -match 'Refresh')
+        # The library is the app's own browsing UI. Since W6 that is either the catalogue home screen -
+        # which carries the app title and the Refresh button - or the screen of the sub-category the
+        # video was opened from, which carries the app title and a Back button. Both are the library;
+        # BACK returning to the container the child came from is the corrected behaviour, not a leak.
+        $libraryOnScreen = ($backDump -match 'SafeTube for Kids') -and
+            (($backDump -match 'Refresh') -or ($backDump -match 'content-desc="Back"'))
         Record 'back-returned-to-library-ui' $libraryOnScreen
         $backReturned = ($foregroundAfterBack -eq $pkg) -and $libraryOnScreen -and ($null -eq $backPlaying)
         Log "BACK_RETURNED_TO_LIBRARY=$(Format-Bool $backReturned)"

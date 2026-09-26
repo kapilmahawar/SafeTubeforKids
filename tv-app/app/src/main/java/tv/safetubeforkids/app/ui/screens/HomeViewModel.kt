@@ -56,25 +56,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private var lastChannelSignature = ""
 
     /**
-     * `WhileSubscribed` so the database work stops while the player is on screen and resumes on the
-     * way back; the last value is retained, so returning from a video repaints the same shelves
+     * `WhileSubscribed` so the database work stops while the player or a container is on screen and
+     * resumes on the way back; the last value is retained, so returning repaints the same shelves
      * immediately instead of flashing an empty state.
      *
-     * The fourth flow is the tree itself, which is what a container's thumbnail is resolved from: a
-     * shelf or sub-category names (or lets the app pick) a video *inside* it, and only the tree knows
-     * what is inside. It is still Room and only Room - the thumbnail configuration arrives with the
-     * catalog the TV already synchronised, so a shelf keeps its picture with the server switched off.
+     * The three flows are the whole tree, the artwork the approved cache holds, and the half-watched
+     * videos. There is no fourth "items" view: the tree *is* the catalog, and reading it directly is
+     * what lets a sub-category be a container rather than being flattened into its first video. It is
+     * still Room and only Room - the catalog arrives with the sync the TV already did, so the shelves
+     * render with the server switched off.
      */
     val catalogState: StateFlow<CatalogUiState> = combine(
-        catalogRepository.observeCatalogWithItems(),
+        catalogRepository.observeTree(),
         catalogRepository.observeVideoThumbnails(),
         catalogRepository.observeResumableVideos(
             CatalogUiProjection.RESUME_MIN_POSITION_MS,
             CatalogUiProjection.RESUME_MAX_PERCENT,
         ),
-        catalogRepository.observeTree(),
-    ) { catalog, thumbnails, resumable, tree ->
-        CatalogUiProjection.build(catalog, thumbnails, resumable, tree)
+    ) { tree, thumbnails, resumable ->
+        CatalogUiProjection.build(tree, thumbnails, resumable)
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -195,40 +195,25 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Turns a card press into a player destination.
+     * Turns a *video* card press into a player destination.
      *
-     * A single video names itself. A playlist has to name the video to start on, so the first video
-     * of that playlist's approved queue is used - the same queue the player will then walk with
-     * next/previous. When the playlist has nothing authorized behind it the playlist id is passed
-     * through, so the press lands on the player's normal "can't be played" path rather than on a new
-     * success route that would have to be authorized somewhere else.
+     * A container card never reaches here: pressing one opens the container (see `CatalogNavigation`),
+     * because starting the first video inside a group is exactly what W6 removed. A card that names no
+     * video resolves to nothing at all rather than to a guessed identifier, so a malformed catalog
+     * cannot turn a press into a request for something nobody approved.
      *
      * Nothing here grants permission: the chosen video id still has to pass
      * `PlaybackAuthorization` inside the player before any media is prepared.
      */
     fun onCardSelected(card: CatalogCardUi, onTarget: (CatalogPlaybackTarget) -> Unit) {
         viewModelScope.launch {
-            val target = when (card.kind) {
-                CatalogCardKind.PLAYLIST -> {
-                    val playlistId = card.playlistId.orEmpty()
-                    val firstApproved = runCatching {
-                        catalogRepository.firstApprovedVideoOf(playlistId)
-                    }.getOrNull()
-                    CatalogPlaybackTarget(
-                        videoId = firstApproved ?: playlistId,
-                        playlistId = playlistId,
-                    )
-                }
-
-                CatalogCardKind.VIDEO, CatalogCardKind.CONTINUE_WATCHING -> {
-                    val videoId = card.videoId.orEmpty()
-                    CatalogPlaybackTarget(
-                        videoId = videoId,
-                        playlistId = card.playlistId?.takeIf { it.isNotBlank() } ?: videoId,
-                    )
-                }
-            }
-            onTarget(target)
+            val videoId = card.videoId?.takeIf { it.isNotBlank() } ?: return@launch
+            onTarget(
+                CatalogPlaybackTarget(
+                    videoId = videoId,
+                    playlistId = card.playlistId?.takeIf { it.isNotBlank() } ?: videoId,
+                )
+            )
         }
     }
 }

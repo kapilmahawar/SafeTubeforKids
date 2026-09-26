@@ -13,6 +13,7 @@ import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.util.AppLogger
 import tv.safetubeforkids.app.util.BandwidthOverride
 import tv.safetubeforkids.app.util.CatalogSyncDebug
+import tv.safetubeforkids.app.ui.screens.CatalogCardUi
 import tv.safetubeforkids.app.ui.screens.CatalogUiProjection
 import kotlinx.coroutines.flow.first
 import tv.safetubeforkids.app.util.ContentSourceParser
@@ -29,6 +30,14 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+
+/**
+ * How many cards one debug dump lists. logcat keeps about 4 KB of a single log entry, so a payload
+ * longer than that arrives truncated and unparseable - worse than a short one. The count is always
+ * reported next to the list, so nothing is lost: a reader knows how many cards there are and sees the
+ * ones a child would see first.
+ */
+private const val CONTAINER_DUMP_CARDS = 12
 
 class DebugReceiver : BroadcastReceiver() {
 
@@ -57,6 +66,7 @@ class DebugReceiver : BroadcastReceiver() {
             "$PKG.DEBUG_SYNC_CATALOG" -> handleSyncCatalog()
             "$PKG.DEBUG_CATALOG_SYNC_UNAVAILABLE" -> handleCatalogSyncUnavailable(intent)
             "$PKG.DEBUG_DUMP_CATALOG_UI" -> handleDumpCatalogUi()
+            "$PKG.DEBUG_DUMP_CONTAINER_UI" -> handleDumpContainerUi(intent)
             "$PKG.DEBUG_DUMP_CATALOG_NODES" -> handleDumpCatalogNodes()
             "$PKG.DEBUG_CLEAR_RESUME_POSITIONS" -> handleClearResumePositions()
 
@@ -309,21 +319,24 @@ class DebugReceiver : BroadcastReceiver() {
      * Dumps exactly what the catalog home screen would render, computed by the same projection the
      * UI uses. This is the evidence that a device test can assert on: `uiautomator` shows only what
      * happens to be on screen, while this reports every shelf and card in the parent's order.
+     *
+     * Each card also names what pressing it does: a `CONTAINER` card carries the `containerId` it
+     * opens, a `VIDEO` card the `videoId` it plays. That is how a test can tell "Cartoon shows
+     * [CoComelon]" from "Cartoon shows [Wheels on the Bus]" without guessing at pixels.
      */
     private fun handleDumpCatalogUi() {
         scope.launch {
             try {
                 val repository = ServiceLocator.catalogRepository
+                val tree = repository.observeTree().first()
+                val thumbnails = repository.observeVideoThumbnails().first()
                 val state = CatalogUiProjection.build(
-                    catalog = repository.observeCatalogWithItems().first(),
-                    thumbnails = repository.observeVideoThumbnails().first(),
+                    tree = tree,
+                    thumbnails = thumbnails,
                     resumable = repository.observeResumableVideos(
                         CatalogUiProjection.RESUME_MIN_POSITION_MS,
                         CatalogUiProjection.RESUME_MAX_PERCENT,
                     ).first(),
-                    // The tree is what decides a container's picture, so a dump that left it out would
-                    // describe a home screen nobody is looking at.
-                    tree = repository.observeTree().first(),
                 )
                 val metadata = repository.getMetadata()
                 val json = buildJsonObject {
@@ -339,17 +352,9 @@ class DebugReceiver : BroadcastReceiver() {
                                 // The exact artwork the shelf header draws. It comes from the approved
                                 // cache, so the URL names which video's picture was resolved.
                                 put("thumbnailUrl", shelf.thumbnailUrl ?: "")
+                                put("cardCount", shelf.cards.size)
                                 put("cards", buildJsonArray {
-                                    shelf.cards.forEach { card ->
-                                        add(buildJsonObject {
-                                            put("id", card.id)
-                                            put("title", card.title)
-                                            put("kind", card.kind.name)
-                                            put("hasArtwork", card.thumbnailUrl != null)
-                                            put("thumbnailUrl", card.thumbnailUrl ?: "")
-                                            card.badgeText?.let { put("badge", it) }
-                                        })
-                                    }
+                                    shelf.cards.take(CONTAINER_DUMP_CARDS).forEach { card -> add(cardJson(card)) }
                                 })
                             })
                         }
@@ -360,6 +365,68 @@ class DebugReceiver : BroadcastReceiver() {
                 logResult("""{"error":"${e.message}"}""")
             }
         }
+    }
+
+    /**
+     * Dumps what the child would see *inside* one sub-category, from the same projection the container
+     * screen uses. `container_id` is required; an id that is not a container reports that instead of an
+     * empty list, so a test can tell "empty" from "not a container".
+     */
+    private fun handleDumpContainerUi(intent: Intent) {
+        val containerId = intent.getStringExtra("container_id").orEmpty()
+        scope.launch {
+            try {
+                val repository = ServiceLocator.catalogRepository
+                val container = CatalogUiProjection.container(
+                    containerId = containerId,
+                    tree = repository.observeTree().first(),
+                    thumbnails = repository.observeVideoThumbnails().first(),
+                )
+                if (container == null) {
+                    logResult("""{"containerId":"$containerId","exists":false}""")
+                    return@launch
+                }
+                val json = buildJsonObject {
+                    put("containerId", container.id)
+                    put("exists", true)
+                    put("title", container.title)
+                    put("isEmpty", container.isEmpty)
+                    put("hasArtwork", container.thumbnailUrl != null)
+                    put("thumbnailUrl", container.thumbnailUrl ?: "")
+                    put("cardCount", container.cards.size)
+                    // One log entry is all logcat keeps (about 4 KB), and a container can hold a whole
+                    // imported playlist: the first cards - the ones a child sees without scrolling - are
+                    // listed, the count says how many there are, and every card here is described without
+                    // its artwork url so the payload stays complete and parseable. A truncated payload
+                    // would be worse than a short one: no parser accepts it.
+                    put("cardsListed", minOf(container.cards.size, CONTAINER_DUMP_CARDS))
+                    put("truncated", container.cards.size > CONTAINER_DUMP_CARDS)
+                    put("cards", buildJsonArray {
+                        container.cards.take(CONTAINER_DUMP_CARDS).forEach { card ->
+                            add(cardJson(card, includeArtwork = false))
+                        }
+                    })
+                }
+                logResult(json.toString())
+            } catch (e: Exception) {
+                logResult("""{"error":"${e.message}"}""")
+            }
+        }
+    }
+
+    /** One card as JSON, including where pressing it goes. */
+    private fun cardJson(card: CatalogCardUi, includeArtwork: Boolean = true) = buildJsonObject {
+        put("id", card.id)
+        put("title", card.title)
+        put("kind", card.kind.name)
+        if (includeArtwork) {
+            put("hasArtwork", card.thumbnailUrl != null)
+            put("thumbnailUrl", card.thumbnailUrl ?: "")
+        }
+        card.badgeText?.let { put("badge", it) }
+        card.videoId?.let { put("videoId", it) }
+        card.containerId?.let { put("containerId", it) }
+        card.playlistId?.let { put("playlistId", it) }
     }
 
     // --- PIN/Auth ---

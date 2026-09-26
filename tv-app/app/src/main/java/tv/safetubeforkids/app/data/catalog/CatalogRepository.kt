@@ -58,11 +58,11 @@ class CatalogRepository(private val db: CacheDatabase) {
     fun observeItems(categoryId: String): Flow<List<ContentItemEntity>> =
         nodes.observeTree().map { tree -> tree.itemsOf(categoryId) }
 
-    suspend fun getItems(categoryId: String): List<ContentItemEntity> = nodes.items(categoryId)
+    suspend fun getItems(categoryId: String): List<ContentItemEntity> = nodes.tree().itemsOf(categoryId)
 
     suspend fun getItem(id: String): ContentItemEntity? {
         val node = nodes.node(id) ?: return null
-        return nodes.items(node.parentId ?: return null).firstOrNull { it.id == id }
+        return nodes.tree().itemsOf(node.parentId ?: return null).firstOrNull { it.id == id }
     }
 
     fun observeMetadata(): Flow<CatalogMetadataEntity?> = metadataDao.observe()
@@ -97,7 +97,11 @@ class CatalogRepository(private val db: CacheDatabase) {
 
     /**
      * The first video of [playlistId]'s approved queue, or null when that playlist has nothing
-     * authorized behind it. This chooses where a container card *starts*; it grants nothing.
+     * authorized behind it.
+     *
+     * It answers "where does this playlist start", and it grants nothing. Since W6 nothing in the UI
+     * uses it to make a container press play: a container card opens the container, so the child decides
+     * which video they want instead of being given the first one.
      */
     suspend fun firstApprovedVideoOf(playlistId: String): String? =
         tv.safetubeforkids.app.playback.PlaybackAuthorization.approvedQueue(db, playlistId)
@@ -306,14 +310,12 @@ class CatalogRepository(private val db: CacheDatabase) {
             when (node.nodeType) {
                 CatalogNodeType.VIDEO -> node.asItem(categoryId)
 
-                CatalogNodeType.SUBCATEGORY -> if (!node.youtubePlaylistId.isNullOrBlank()) {
-                    node.asItem(categoryId)
-                } else {
-                    // A hand-built container has no playlist to start: it opens its first enabled video.
-                    filter { it.parentId == node.id && it.nodeType == CatalogNodeType.VIDEO && it.enabled }
-                        .minByOrNull { it.position }
-                        ?.asItem(categoryId)
-                }
+                // Every sub-category is one entry on its shelf, whatever is inside it. A container the
+                // parent built by hand used to be flattened to its first video here, because pressing a
+                // card could only ever start playback - so the container had no way to be itself. Since
+                // W6 a container card opens the container, and the flattening would be exactly the
+                // wrong answer: the child would see an episode where the parent put a group.
+                CatalogNodeType.SUBCATEGORY -> node.asItem(categoryId)
 
                 CatalogNodeType.CATEGORY -> null
             }
