@@ -81,6 +81,9 @@
         token: readToken(),
         session: null,
         artwork: { videos: {}, containers: {}, installedCatalogVersion: 0 },
+        // Whether the TV's installed version is known at all. A failed artwork read means "unknown",
+        // never "zero": see tvFreshness().
+        artworkKnown: false,
         playlists: [],
         limits: null,
         stats: null,
@@ -260,18 +263,26 @@
      * the second is a sentence a parent cannot act on, so it becomes one they can.
      */
     var FRIENDLY_FAILURES = [
-        { match: /private|unavailable|not available|deleted|removed/i, says: 'That playlist is private or no longer on YouTube.' },
+        // Ordered: a network problem is described as one, even when the extractor's own words for it
+        // would also match something later in this list.
         { match: /offline|simulated/i, says: 'The TV could not reach YouTube just now. Try again in a moment.' },
         { match: /timeout|timed out|connect|socket|unreachable|503/i, says: 'The TV did not answer. Check that it is on and on the same wifi.' },
-        { match: /not found|no such|404/i, says: 'Nothing was found at that link.' },
-        { match: /list|playlist.*(empty|no videos)|no videos/i, says: 'That playlist has no videos that can be added.' },
+        // The two shapes YouTube's extractor produces for something that is not there. Measured on
+        // the device: "JSON response is too short" and "Got error ERROR: \"This video is unavailable\"".
+        { match: /json response is too short|no such|not found|404/i, says: 'Nothing was found at that link.' },
+        { match: /unavailable|private|deleted|removed|does not exist/i, says: 'That video or playlist is not available on YouTube.' },
+        { match: /(playlist|list).*(empty|no videos)|no videos/i, says: 'That playlist has no videos that can be added.' },
     ];
 
     /** True when a server message is one the project wrote for a parent to read. */
     function isParentReadable(message) {
         if (!message || typeof message !== 'string') return false;
         if (message.length > 160) return false;
-        return !/(exception|\bnull\b|undefined|\bat [a-z]+\.|\.kt:|\.java:|json|serializ|extract|url:|http[s]?:\/\/127|stack)/i
+        // The rejections below are what an extractor's own text looks like. A short technical string
+        // is still technical: "Got error ERROR: \"This video is unavailable\"" is 44 characters and
+        // reads as English, and it is exactly the kind of sentence that must be translated rather
+        // than passed on.
+        return !/(exception|\bnull\b|undefined|\bat [a-z]+\.|\.kt:|\.java:|json|serializ|extract|url:|http[s]?:\/\/127|stack|got error|\berror\b\s*[:"']|stream ?info|too short)/i
             .test(message);
     }
 
@@ -543,9 +554,33 @@
                 containers: result.data.containers || {},
                 installedCatalogVersion: result.data.installedCatalogVersion || 0
             };
+            state.artworkKnown = true;
         } else {
             state.artwork = { videos: {}, containers: {}, installedCatalogVersion: 0 };
+            // The read failed, so the TV's installed version is *unknown* - not zero. Recording that
+            // distinction is what keeps a picture problem from being reported as a stale TV.
+            state.artworkKnown = false;
         }
+    }
+
+    /**
+     * What the dashboard actually knows about the TV's copy of the library.
+     *
+     * Four states, and they are not interchangeable:
+     *
+     *   current      the TV's installed version is known and is not behind
+     *   behind       the TV's installed version is known and *is* behind
+     *   unknown      the read that would have told us failed - which says nothing about the TV
+     *   unreachable  the TV itself is not answering
+     *
+     * Only `behind` may ever be shown to a parent as "your TV does not have the latest": an unknown
+     * version is not evidence of anything, and a failed picture read is not evidence of staleness.
+     */
+    function tvFreshness() {
+        if (state.reachable === false) return 'unreachable';
+        if (!state.artworkKnown) return 'unknown';
+        if (!state.session || state.session.catalogVersion <= 0) return 'unknown';
+        return state.artwork.installedCatalogVersion >= state.session.catalogVersion ? 'current' : 'behind';
     }
 
     async function loadPlaylists() {
@@ -954,7 +989,7 @@
 
         if (outcome.outcome === 'conflict') {
             state.session = outcome.session;
-            openConflictDialog(outcome, reason);
+            openConflictDialog(reason);
             return false;
         }
 
@@ -985,16 +1020,15 @@
         render();
     }
 
-    function openConflictDialog(outcome, reason) {
-        var theirs = outcome.serverVersion;
-
+    function openConflictDialog(reason) {
         openModal(function (inner, close) {
             inner.appendChild(h('h2', { class: 'dialog__title', text: 'The library changed somewhere else' }));
+            // No version number here: the parent needs to know that their change was not saved and
+            // that the TV is untouched, not which revision of a document they are looking at.
             inner.appendChild(h('p', {
                 class: 'dialog__body',
-                text: 'Another phone or browser saved a change first' +
-                    (typeof theirs === 'number' ? ' (the TV is now on version ' + theirs + ')' : '') +
-                    ', so this change was not saved. Nothing on the TV changed.'
+                text: 'Another phone or browser saved a change first, so this change was not saved. ' +
+                    'Nothing on the TV changed.'
             }));
 
             var reload = withListener(h('button', {
@@ -1031,6 +1065,19 @@
 
     function isContainer(node) {
         return node.nodeType === CatalogEditor.SUBCATEGORY;
+    }
+
+    /**
+     * The videos a parent would lose by removing this node.
+     *
+     * A collection is counted by [containerVideoCount] - the TV's own count, which knows about the
+     * episodes the document has never held - and a category by the sum of what is inside it. This is
+     * the same pair of rules the headings use, so the number in the removal question is the number
+     * the parent just read above it.
+     */
+    function removableVideoCount(node) {
+        if (node.nodeType === CatalogEditor.VIDEO) return 0;
+        return isContainer(node) ? containerVideoCount(node) : reachableVideoCount(node);
     }
 
     function nodeById(id) {
@@ -1070,13 +1117,36 @@
     /** How many videos, collections and hidden things a category or collection holds. */
     function countsFor(nodeId) {
         var inside = descendantsOf(nodeId);
-        var videos = inside.filter(function (child) { return child.nodeType === CatalogEditor.VIDEO; });
         return {
             collections: inside.filter(function (child) { return child.nodeType === CatalogEditor.SUBCATEGORY; }).length,
-            videos: videos.length,
+            // The videos the child can actually reach, which is what every screen counts. It is not
+            // the number of VIDEO rows in the document: a collection whose episodes the TV keeps for
+            // itself holds fifty videos and no rows at all.
+            videos: reachableVideoCount(nodeId),
             hidden: inside.filter(function (child) { return child.enabled === false; }).length,
-            videosList: videos
+            videosList: inside.filter(function (child) { return child.nodeType === CatalogEditor.VIDEO; })
         };
+    }
+
+    /**
+     * The videos a child can reach inside a node, counted once.
+     *
+     * One implementation, used by the library summary, by every category and collection heading, and
+     * by the sentence that asks permission to remove something - because two screens showing two
+     * different totals for the same library was the defect this replaces. A hidden video is not
+     * counted as reachable here, and it is reported separately as a hidden item, so the two numbers
+     * never describe the same thing twice.
+     */
+    function reachableVideoCount(nodeId) {
+        var total = 0;
+        childrenOf(nodeId).forEach(function (child) {
+            if (child.nodeType === CatalogEditor.VIDEO) {
+                if (child.enabled !== false) total += 1;
+            } else if (child.nodeType === CatalogEditor.SUBCATEGORY) {
+                total += containerVideoCount(child);
+            }
+        });
+        return total;
     }
 
     /** The TV's own count, which knows about episodes the document has never seen. */
@@ -1146,10 +1216,9 @@
 
     function nodeMeta(node, maps) {
         if (node.nodeType === CatalogEditor.VIDEO) {
-            var parts = [sourceNameFor(node)];
-            if (node.enabled === false) parts.push('hidden');
-            if (!canPlay(node, maps)) parts.push('can\'t play yet');
-            return parts.join(' · ');
+            // Only where it came from: whether it is hidden and whether it can play are both said by
+            // the badges beside this line, and saying them twice made the row read like a log.
+            return sourceNameFor(node);
         }
 
         var counts = countsFor(node.id);
@@ -1573,8 +1642,7 @@
     function screenLibrary() {
         var categories = CatalogEditor.roots(state.session);
         var totals = libraryTotals(categories);
-        var behind = state.session.catalogVersion > 0 &&
-            state.artwork.installedCatalogVersion < state.session.catalogVersion;
+        var freshness = tvFreshness();
 
         var summary = categories.length
             ? words(categories.length, 'category', 'categories') + ' · ' +
@@ -1595,7 +1663,7 @@
 
         children.push(unplayableBanner(categories));
 
-        if (behind) {
+        if (freshness === 'behind') {
             children.push(banner('info', 'Your TV does not have the latest yet',
                 'It will pick the change up on its own, or you can send it now.',
                 [actionButton('Update the TV now', 'send-to-tv', {}, 'btn--primary')]));
@@ -2066,7 +2134,9 @@
             options.push({
                 id: 'move',
                 title: 'Move to another category…',
-                meta: 'Keeps the video and everything inside it'
+                // A video and a collection both arrive with everything they hold, so this says that
+                // rather than naming one of them.
+                meta: 'Keeps everything inside it'
             });
         }
 
@@ -2084,12 +2154,16 @@
             });
         }
 
+        var removable = removableVideoCount(node);
+
         options.push({
             id: 'delete',
             title: 'Remove from library',
             meta: node.nodeType === CatalogEditor.VIDEO
                 ? 'It disappears from your child\'s library; nothing is deleted from YouTube'
-                : 'Removes this and the ' + words(descendantsOf(node.id).length, 'item') + ' inside it',
+                : (removable > 0
+                    ? 'Removes this and the ' + words(removable, 'video') + ' inside it'
+                    : 'Removes this from your library; nothing is deleted from YouTube'),
             danger: true
         });
 
@@ -2228,12 +2302,18 @@
     }
 
     async function askDelete(node) {
-        var inside = descendantsOf(node.id).length;
+        // What the child will lose, counted the way the screens count it: a collection whose episodes
+        // the TV keeps for itself holds videos that no node in the document mentions, and removing
+        // the collection takes them with it.
+        var inside = removableVideoCount(node);
+        var consequence = inside > 0
+            ? 'This removes it and the ' + words(inside, 'video') + ' inside it from your child\'s SafeTube ' +
+              'library, on this phone and on the TV. '
+            : 'This removes it from your child\'s SafeTube library, on this phone and on the TV. ';
+
         var confirmed = await confirmDialog({
             title: 'Remove “' + node.title + '” from your library?',
-            body: 'This removes it' + (inside ? ' and the ' + words(inside, 'item') + ' inside it' : '') +
-                ' from your child\'s SafeTube library, on this phone and on the TV. ' +
-                'It does not delete anything from YouTube.',
+            body: consequence + 'It does not delete anything from YouTube.',
             confirmLabel: 'Remove',
             danger: true
         });
@@ -2593,17 +2673,15 @@
 
     function libraryPanel() {
         var count = state.session.nodes.length;
-        var version = state.session.catalogVersion;
-        var installed = state.artwork.installedCatalogVersion;
-        var upToDate = version > 0 && installed >= version;
+        var freshness = tvFreshness();
 
         var body = [
             h('p', {
                 class: 'panel__note',
-                text: words(count, 'item') + ' in your library. ' +
-                    (upToDate
-                        ? 'Your TV has this version.'
-                        : 'Your TV is on an older version — update it now.')
+                text: words(count, 'item') + ' in your library. ' + (
+                    freshness === 'current' ? 'Your TV has this version.'
+                        : freshness === 'behind' ? 'Your TV is on an older version — update it now.'
+                            : 'What version your TV has could not be checked just now.')
             }),
             h('div', { class: 'btn-group' }, [
                 actionButton('Update the TV now', 'send-to-tv', {}, 'btn--primary'),

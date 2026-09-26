@@ -340,9 +340,13 @@ button {
 }
 
 .crumb {
+    /* A control a parent taps to go back: the text stays small, the target does not. */
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 0 4px;
     background: none;
     border: 0;
-    padding: 4px 2px;
     color: var(--brand-text);
     font-size: var(--fs-sm);
     cursor: pointer;

@@ -132,8 +132,8 @@ fun Route.catalogImportRoutes(
                     call.respond(
                         HttpStatusCode.BadRequest,
                         mapOf(
-                            "error" to "A whole channel is not a shelf. Allow that channel in Settings, " +
-                                "then add the videos or playlists from it that you want your child to see.",
+                            "error" to "A whole channel can't be added here. Allow that channel in Settings, " +
+                                "then add the videos or playlists you want from it.",
                         ),
                     )
                     return@post
