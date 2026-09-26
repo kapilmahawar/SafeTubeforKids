@@ -37,7 +37,7 @@ import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.cache.VideoEntity
 import tv.safetubeforkids.app.data.models.VideoItem
-import tv.safetubeforkids.app.server.ResolvePlaylistRequest
+import tv.safetubeforkids.app.server.ResolveLinkRequest
 import tv.safetubeforkids.app.server.catalogImportRoutes
 
 /**
@@ -72,12 +72,15 @@ class CatalogImportRoutesTest {
 
     private fun testApp(
         resolve: suspend (String, Int) -> ResolvedSource,
+        resolveVideo: suspend (String) -> ResolvedSource = { id ->
+            ResolvedSource(title = "One video", videos = listOf(video(id, "One video")))
+        },
         block: suspend ApplicationTestBuilder.(token: String) -> Unit,
     ) = testApplication {
         val sessionManager = SessionManager(clock = { currentTime })
         application {
             install(ContentNegotiation) { json() }
-            routing { catalogImportRoutes(sessionManager, db, resolve = resolve) }
+            routing { catalogImportRoutes(sessionManager, db, resolve = resolve, resolveVideo = resolveVideo) }
         }
         block(sessionManager.createSession()!!)
     }
@@ -86,7 +89,7 @@ class CatalogImportRoutesTest {
         client.post("/catalog/import/resolve") {
             token?.let { header(HttpHeaders.Authorization, "Bearer $it") }
             contentType(ContentType.Application.Json)
-            setBody(Json.encodeToString(ResolvePlaylistRequest.serializer(), ResolvePlaylistRequest(url = url)))
+            setBody(Json.encodeToString(ResolveLinkRequest.serializer(), ResolveLinkRequest(url = url)))
         }
 
     private fun video(id: String, title: String, duration: Long = 60L) =
@@ -116,7 +119,7 @@ class CatalogImportRoutesTest {
         val response = resolvePlaylist(token, "   ")
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        assertTrue(response.bodyAsText().contains("Paste a YouTube playlist URL"))
+        assertTrue(response.bodyAsText().contains("Paste a YouTube playlist or video link"))
     }
 
     @Test
@@ -131,15 +134,33 @@ class CatalogImportRoutesTest {
     }
 
     @Test
-    fun onlyAPlaylistCanBeImported() = testApp(okResolver) { token ->
-        val videoUrl = resolvePlaylist(token, "https://www.youtube.com/watch?v=DuXwFlL8Usk")
-        assertEquals(HttpStatusCode.BadRequest, videoUrl.status)
-        assertTrue(videoUrl.bodyAsText().contains("Only a YouTube playlist can be imported"))
+    fun aVideoLinkResolvesAsOneVideo() = testApp(okResolver) { token ->
+        val response = resolvePlaylist(token, "https://www.youtube.com/watch?v=DuXwFlL8Usk")
 
-        val channelUrl = resolvePlaylist(token, "https://www.youtube.com/@CoComelon")
-        assertEquals(HttpStatusCode.BadRequest, channelUrl.status)
-        assertTrue(channelUrl.bodyAsText().contains("Only a YouTube playlist can be imported"))
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
 
+        // The dashboard renders a video link as one video, and a playlist link as a playlist, from
+        // this one field - there is no second endpoint for the second case.
+        assertEquals("video", body["kind"]!!.jsonPrimitive.content)
+        assertEquals("yt_video", body["sourceType"]!!.jsonPrimitive.content)
+        assertEquals("DuXwFlL8Usk", body["sourceId"]!!.jsonPrimitive.content)
+        assertEquals(1, body["videos"]!!.jsonArray.size)
+
+        assertEquals("a video link approves nothing either", 0 to 0, approvalState())
+    }
+
+    @Test
+    fun aChannelLinkIsRefusedWithAWayForward() = testApp(okResolver) { token ->
+        val response = resolvePlaylist(token, "https://www.youtube.com/@CoComelon")
+
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        val message = response.bodyAsText()
+
+        // A channel is a source, not a shelf: approving one belongs in the allowed-source list, and
+        // the refusal says where rather than leaving the parent staring at a form.
+        assertTrue(message.contains("not a shelf"))
+        assertTrue(message.contains("Settings"))
         assertEquals(0 to 0, approvalState())
     }
 
@@ -153,6 +174,7 @@ class CatalogImportRoutesTest {
         val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
 
         assertEquals("yt_playlist", body["sourceType"]!!.jsonPrimitive.content)
+        assertEquals("playlist", body["kind"]!!.jsonPrimitive.content)
         assertEquals("PLimported", body["sourceId"]!!.jsonPrimitive.content)
         assertEquals("Imported Playlist", body["title"]!!.jsonPrimitive.content)
         assertEquals(false, body["truncated"]!!.jsonPrimitive.content.toBoolean())

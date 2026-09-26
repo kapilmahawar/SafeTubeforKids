@@ -16,30 +16,42 @@ import io.ktor.server.routing.*
 import kotlinx.serialization.Serializable
 
 @Serializable
-data class ResolvePlaylistRequest(val url: String? = null)
+data class ResolveLinkRequest(val url: String? = null)
 
-/** One video a playlist listed, in the shape the editor needs to build catalog nodes from. */
+/** One video a link resolved to, in the shape the editor needs to build catalog nodes from. */
 @Serializable
 data class ResolvedVideoDto(
     val videoId: String,
     val title: String,
     val durationSeconds: Long = 0L,
+    /**
+     * The picture YouTube itself gave for this video.
+     *
+     * Reported, never stored: the catalog model refuses a picture URL outright, and what a card
+     * shows comes from the approved cache. It is here so the *preview* the parent confirms before
+     * adding can look like the thing they pasted, not like a form.
+     */
+    val thumbnailUrl: String = "",
 )
 
 @Serializable
-data class ResolvedPlaylistResponse(
+data class ResolvedLinkResponse(
+    /** What this link turned out to be: `playlist` or `video`. The editor renders it accordingly. */
+    val kind: String,
     val sourceType: String,
     val sourceId: String,
     val title: String,
     val videos: List<ResolvedVideoDto>,
+    /** A picture for the whole link: a video's own picture, or a playlist's first usable one. */
+    val thumbnailUrl: String = "",
     /** The playlist had more videos than one import takes; the editor has to say so. */
     val truncated: Boolean = false,
     /** Items the playlist listed that cannot become catalog nodes (unavailable/deleted). */
     val unusableItems: Int = 0,
     /**
-     * Whether this playlist is already an approved Content Source.
+     * Whether this link is already an approved Content Source.
      *
-     * Reported, never changed: resolving a playlist for the catalog must not approve anything. An
+     * Reported, never changed: resolving a link for the catalog must not approve anything. An
      * imported video that is not in the approved cache becomes a visible catalog entry that cannot
      * play until the parent adds the source, which is the security model working, and the editor says
      * so instead of leaving the parent to wonder.
@@ -48,18 +60,23 @@ data class ResolvedPlaylistResponse(
 )
 
 /**
- * Resolving a YouTube playlist so the editor can import it as catalog nodes.
+ * Resolving a YouTube link - a playlist or a single video - so the editor can turn it into catalog
+ * entries.
  *
  * **This route never writes anything.** It is not a catalog mutation endpoint - the catalog still
  * changes through exactly one path, `PUT /catalog` with the version the editor read (W2/W3) - and it
  * is deliberately not the `/playlists` endpoint either, which *approves* a source by adding it to the
- * approved cache. Importing a playlist into the catalog is curation; it must not create authorization
+ * approved cache. Putting something in the catalog is curation; it must not create authorization
  * records, and a video's presence in the catalog must never become a reason it can play.
  *
- * So: parse the URL with the project's one parser, resolve it with the project's one resolver (NewPipe,
- * every page, unusable items skipped), and answer with the videos. The browser then computes the new
- * catalog and publishes it as one document - which means a failed or abandoned import leaves the
- * catalog, and its version, exactly as they were.
+ * So: parse the link with the project's one parser, resolve it with the project's one resolver, and
+ * answer with what it found. The browser then computes the new catalog and publishes it as one
+ * document - which means a failed or abandoned add leaves the catalog, and its version, exactly as
+ * they were.
+ *
+ * A **channel** link is refused here on purpose: a channel is a source, not a shelf, and approving a
+ * channel is an authorization decision that belongs in the allowed-source list. The message says so
+ * rather than leaving the parent staring at a form that will not accept their link.
  */
 fun Route.catalogImportRoutes(
     sessionManager: SessionManager,
@@ -67,13 +84,16 @@ fun Route.catalogImportRoutes(
     resolve: suspend (String, Int) -> ResolvedSource = { playlistId, limit ->
         ContentSourceRepository.resolvePlaylistForImport(playlistId, limit)
     },
+    resolveVideo: suspend (String) -> ResolvedSource = { videoId ->
+        ContentSourceRepository.resolve("yt_video", videoId)
+    },
     importLimit: Int = tv.safetubeforkids.app.data.MAX_VIDEOS_PER_IMPORT,
 ) {
     post("/catalog/import/resolve") {
         if (!validateSession(sessionManager)) return@post
 
         val body = try {
-            call.receive<ResolvePlaylistRequest>()
+            call.receive<ResolveLinkRequest>()
         } catch (e: Exception) {
             call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Unreadable request body"))
             return@post
@@ -81,7 +101,7 @@ fun Route.catalogImportRoutes(
 
         val url = body.url
         if (url.isNullOrBlank()) {
-            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Paste a YouTube playlist URL or id"))
+            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Paste a YouTube playlist or video link"))
             return@post
         }
 
@@ -93,35 +113,58 @@ fun Route.catalogImportRoutes(
             return@post
         }
         val source = (parsed as ParseResult.Success).source
-        if (source.type != SourceType.YT_PLAYLIST) {
-            call.respond(
-                HttpStatusCode.BadRequest,
-                mapOf("error" to "Only a YouTube playlist can be imported; that is a ${source.type.name.lowercase().removePrefix("yt_")}"),
-            )
-            return@post
-        }
 
-        val resolved = try {
-            resolve(source.id, importLimit)
+        val kind: String
+        val resolved: ResolvedSource
+        try {
+            when (source.type) {
+                SourceType.YT_PLAYLIST -> {
+                    kind = "playlist"
+                    resolved = resolve(source.id, importLimit)
+                }
+
+                SourceType.YT_VIDEO -> {
+                    kind = "video"
+                    resolved = resolveVideo(source.id)
+                }
+
+                else -> {
+                    call.respond(
+                        HttpStatusCode.BadRequest,
+                        mapOf(
+                            "error" to "A whole channel is not a shelf. Allow that channel in Settings, " +
+                                "then add the videos or playlists from it that you want your child to see.",
+                        ),
+                    )
+                    return@post
+                }
+            }
         } catch (e: Exception) {
             // Nothing was resolved, and nothing was written: the editor keeps whatever the parent was
             // working on and shows the reason.
-            AppLogger.error("Playlist ${source.id} could not be resolved: ${e.message}")
+            AppLogger.error("Link ${source.id} could not be resolved: ${e.message}")
             call.respond(
                 HttpStatusCode.BadGateway,
-                mapOf("error" to (e.message ?: "The playlist could not be resolved")),
+                mapOf("error" to (e.message ?: "That link could not be resolved")),
             )
             return@post
         }
 
         call.respond(
-            ResolvedPlaylistResponse(
-                sourceType = "yt_playlist",
+            ResolvedLinkResponse(
+                kind = kind,
+                sourceType = if (kind == "video") "yt_video" else "yt_playlist",
                 sourceId = source.id,
-                title = resolved.title,
+                title = resolved.title.ifBlank { source.id },
                 videos = resolved.videos.map {
-                    ResolvedVideoDto(videoId = it.videoId, title = it.title, durationSeconds = it.durationSeconds)
+                    ResolvedVideoDto(
+                        videoId = it.videoId,
+                        title = it.title,
+                        durationSeconds = it.durationSeconds,
+                        thumbnailUrl = it.thumbnailUrl,
+                    )
                 },
+                thumbnailUrl = resolved.videos.firstOrNull { it.thumbnailUrl.isNotBlank() }?.thumbnailUrl ?: "",
                 truncated = resolved.truncated,
                 unusableItems = resolved.unusableItems,
                 approved = database.channelDao().getBySourceId(source.id) != null,
