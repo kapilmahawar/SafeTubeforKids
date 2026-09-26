@@ -360,10 +360,10 @@ class CatalogThumbnailsTest {
         assertEquals("and the choice is not thrown away", "vidChosen", resolve(shown, "cat-cartoon"))
     }
 
-    // ------------------------------------------------------------------ every container at once
+    // -------------------------------------------------- the pictures a screen asks for (W6.1)
 
     @Test
-    fun everyContainerIsAnsweredOnceAndVideosAreNot() {
+    fun onlySubcategoriesAreAnsweredInTheMapBecauseOnlyTheyHaveAPicture() {
         val nodes = listOf(
             category(id = "cat-cartoon", position = 0),
             subcategory(id = "i-nursery", position = 0),
@@ -376,12 +376,19 @@ class CatalogThumbnailsTest {
         val representatives = CatalogThumbnails.representatives(nodes)
 
         assertEquals(
-            mapOf("cat-cartoon" to "vidNested", "i-nursery" to "vidNested"),
+            "a sub-category is a card, so it has a picture; a category is a title, so it is not asked",
+            mapOf("i-nursery" to "vidNested"),
             representatives,
         )
         assertNull("a container with nothing inside is left out rather than faked", representatives["i-empty"])
+        assertNull("a category is never in the map, even when it would resolve", representatives["cat-cartoon"])
         assertNull(representatives["cat-music"])
         assertNull("a video's picture is itself; it needs no representative", representatives["i-direct"])
+
+        // The rule itself is unchanged - `representativeFor` still answers for any container, which is
+        // what a caller asking about one node directly gets. It is the *map* that is narrowed to the
+        // nodes a screen draws a picture for.
+        assertEquals("vidNested", resolve(nodes, "cat-cartoon"))
     }
 
     @Test

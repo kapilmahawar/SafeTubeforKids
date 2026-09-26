@@ -50,16 +50,23 @@ object CatalogThumbnails {
         representativeFor(nodes.associateBy { it.id }, nodeId)
 
     /**
-     * Every container's representative in one pass, keyed by node id.
+     * Every **sub-category's** representative in one pass, keyed by node id.
      *
-     * Containers are the only nodes that need one - a video's picture is itself - so a caller can
-     * look up a card's artwork with a single map.
+     * A sub-category is a card, and a card has a picture, so this is the map a screen needs to draw
+     * one. A `CATEGORY` is deliberately absent: since W6 a category is the *title* of a shelf - no
+     * card, no icon, no picture of its own - so its representative is never asked for, let alone
+     * drawn. Narrowing the map to the nodes that have a picture is what makes that impossible to get
+     * wrong at a call site rather than a rule somebody has to remember.
+     *
+     * [representativeFor] still answers for any container, because the rule it encodes - `VIDEO` when
+     * the parent chose one and it still holds, `AUTO` otherwise - is the same rule for both; it is the
+     * *set* of nodes a screen asks about that changed.
      */
     fun representatives(nodes: List<CatalogNodeEntity>): Map<String, String> {
         val byId = nodes.associateBy { it.id }
         val result = LinkedHashMap<String, String>()
         nodes.forEach { node ->
-            if (node.nodeType == CatalogNodeType.CATEGORY || node.nodeType == CatalogNodeType.SUBCATEGORY) {
+            if (node.nodeType == CatalogNodeType.SUBCATEGORY) {
                 representativeFor(byId, node.id)?.let { result[node.id] = it }
             }
         }

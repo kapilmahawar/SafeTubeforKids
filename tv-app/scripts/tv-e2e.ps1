@@ -619,7 +619,7 @@ function Get-DebugDump([string]$action, [string]$extra = '') {
 # The labels of a focusable node and its whole subtree: a Compose card is a focusable container whose
 # name lives on a child (the artwork's description and the title), so the card itself looks unlabelled.
 function Get-UiFacts([string]$dumpPath) {
-    $facts = [ordered]@{ Focused = ''; Focusable = @(); Texts = @(); Dump = '' }
+    $facts = [ordered]@{ Focused = ''; Focusable = @(); Texts = @(); Images = @(); Dump = '' }
     if (-not (Test-Path $dumpPath)) { return $facts }
     $raw = Get-Content $dumpPath -Raw
     # uiautomator writes XML, so a title containing '&' arrives as '&amp;'. Decoding the five entities
@@ -630,6 +630,8 @@ function Get-UiFacts([string]$dumpPath) {
     $focusable = @()
     foreach ($node in $all) {
         if ($node.text) { $facts.Texts += $node.text }
+        # Artwork is an ImageView whose contentDescription is the card's title; a heading has no image.
+        if ($node.class -eq 'android.widget.ImageView') { $facts.Images += $node.'content-desc' }
         if ($node.focusable -ne 'true') { continue }
         $labels = @()
         $stack = New-Object System.Collections.Stack
@@ -704,6 +706,23 @@ if (Go-ToLibrary 'before the hierarchy checks') {
 
             Dump 'w6-a-home'
             $homeFacts = Get-UiFacts (Join-Path $out 'w6-a-home.xml')
+
+            # 0. W6.1: a category heading is text and nothing else. Checked from both sides - the app's
+            # own projection must report no heading picture for any shelf, and on screen every image must
+            # belong to a card. A card's artwork carries that card's title as its description, so an
+            # image with no description at all is exactly what a heading decoration would be, and an
+            # image described with the shelf's own title would be a category picture by another route.
+            $shelvesWithArtwork = @($model.shelves | Where-Object { $_.hasArtwork })
+            Record 'w6-1-category-heading-has-no-picture' ($shelvesWithArtwork.Count -eq 0) `
+                "shelves carrying a heading picture: $($shelvesWithArtwork.Count) of $($model.shelves.Count)"
+
+            $describedImages = @($homeFacts.Images | Where-Object { $_ })
+            $anonymousImages = @($homeFacts.Images | Where-Object { -not $_ })
+            $headingImages = @($homeFacts.Images | Where-Object { $_ -eq $shelf.title })
+            $noCategoryImage = ($anonymousImages.Count -eq 0) -and ($headingImages.Count -eq 0)
+            Record 'w6-1-category-heading-has-no-image' $noCategoryImage `
+                "images on screen: $($homeFacts.Images.Count) ($($describedImages.Count) described as a card, $($anonymousImages.Count) undescribed); none for '$($shelf.title)'"
+            Log "  images on screen: $($describedImages -join ' | ')"
 
             # 1. the category title is a heading, and nothing focusable carries it
             $titleFocusable = @($homeFacts.Focusable | Where-Object { $_ -eq $shelf.title -or $_ -eq "[$($shelf.title)]" })

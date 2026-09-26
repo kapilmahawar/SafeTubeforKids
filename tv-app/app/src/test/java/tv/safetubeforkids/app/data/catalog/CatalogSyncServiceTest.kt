@@ -756,9 +756,9 @@ class CatalogSyncServiceTest {
         val representatives = CatalogThumbnails.representatives(afterRestart)
 
         assertEquals("vidSecond", representatives["i-nursery"])
-        assertEquals(
-            "and the shelf above answers automatic for itself rather than borrowing the nested choice",
-            "vidFirst", representatives["cat-cartoon"],
+        assertNull(
+            "and the category is not answered at all: a category is a title with no picture (W6.1)",
+            representatives["cat-cartoon"],
         )
     }
 

@@ -348,10 +348,11 @@ class DebugReceiver : BroadcastReceiver() {
                             add(buildJsonObject {
                                 put("id", shelf.id)
                                 put("title", shelf.title)
-                                put("hasArtwork", shelf.thumbnailUrl != null)
-                                // The exact artwork the shelf header draws. It comes from the approved
-                                // cache, so the URL names which video's picture was resolved.
-                                put("thumbnailUrl", shelf.thumbnailUrl ?: "")
+                                // A shelf's heading has a picture only when it is an open container's
+                                // screen. A category is a title, so this is false for every shelf on the
+                                // home screen - which is exactly what a device test asserts.
+                                put("hasArtwork", shelf.headingPicture != null)
+                                put("headingPicture", shelf.headingPicture ?: "")
                                 put("cardCount", shelf.cards.size)
                                 put("cards", buildJsonArray {
                                     shelf.cards.take(CONTAINER_DUMP_CARDS).forEach { card -> add(cardJson(card)) }

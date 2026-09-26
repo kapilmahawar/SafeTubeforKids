@@ -156,7 +156,9 @@ internal fun CatalogShelves(
  * One shelf: a heading, and a row of the cards under it.
  *
  * The heading is the category's (or the open container's) own name. It is a `Text`, never a card: a
- * category is a group title, so it is not focusable, not clickable and cannot be "opened".
+ * category is a group title, so it is not focusable, not clickable and cannot be "opened" - and, on
+ * the home screen, it has no picture either. The only heading that carries one is an open
+ * sub-category's screen, where the picture is that sub-category's own thumbnail.
  */
 @Composable
 private fun CatalogShelfSection(
@@ -173,12 +175,11 @@ private fun CatalogShelfSection(
             modifier = Modifier.padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // The shelf's own picture, when the parent configured a thumbnail for the category (or let
-            // AUTO pick one inside it). Absent is normal - a shelf whose videos are all unapproved, or
-            // an older catalog with no thumbnail configuration - and the header is then exactly what it
-            // always was: the title on its own. Nothing here is focusable, so D-pad navigation and the
-            // card order are untouched.
-            ShelfThumbnail(url = shelf.thumbnailUrl, title = shelf.title)
+            // A picture here only ever belongs to an open container. A category's heading is text and
+            // nothing else: no image beside it, no icon, no decoration, and nothing here asks the
+            // thumbnail resolver for one. Nothing in this row is focusable, so D-pad navigation and
+            // the card order are untouched either way.
+            HeadingPicture(url = shelf.headingPicture, title = shelf.title)
 
             Text(
                 text = shelf.title,
@@ -209,15 +210,15 @@ private fun CatalogShelfSection(
 }
 
 /**
- * The shelf header's own artwork, or nothing at all.
+ * The picture beside a heading - an open container's own thumbnail, or nothing at all.
  *
- * Drawn only when the catalog resolved a picture for the shelf, and never focusable: it is a
- * decoration beside the title, so it cannot take focus away from the cards or change the way the
- * screen is navigated. Coil loads a URL the approved cache already holds; when there is none, the
- * header keeps its previous appearance.
+ * `url` is non-null only for a sub-category's screen ([CatalogContainerUi.asShelf]); a category's
+ * heading passes null and draws nothing, so the home screen's titles are text only. Never focusable:
+ * it is a decoration beside the title, so it cannot take focus away from the cards or change the way
+ * the screen is navigated. Coil loads a URL the approved cache already holds.
  */
 @Composable
-private fun ShelfThumbnail(url: String?, title: String) {
+private fun HeadingPicture(url: String?, title: String) {
     if (url.isNullOrBlank()) return
 
     AsyncImage(

@@ -49,13 +49,14 @@ data class CatalogShelfUi(
     val title: String,
     val cards: List<CatalogCardUi>,
     /**
-     * The picture that stands for the shelf itself, when one could be resolved.
+     * The picture beside this row's heading, when the row is an *open container*.
      *
-     * Null is a normal state - a shelf of nothing but unapproved videos, or a catalog with no eligible
-     * video at all - and the header simply draws no image, exactly as a card without artwork draws a
-     * placeholder.
+     * That is the only case there is: a sub-category has a thumbnail (its own W5 picture) and its
+     * screen shows it above the videos inside. A **category shelf never has one** - a category is a
+     * title, and [CatalogUiProjection.categoryShelves] neither resolves nor sets a picture for it - so
+     * this is null for every shelf on the home screen, and for the Continue Watching row.
      */
-    val thumbnailUrl: String? = null,
+    val headingPicture: String? = null,
 )
 
 /** Everything the home screen renders, projected from Room. */
@@ -78,7 +79,12 @@ data class CatalogUiState(
 data class CatalogContainerUi(
     val id: String,
     val title: String,
-    /** The container's own picture, resolved exactly as a shelf header's is. */
+    /**
+     * The container's own picture: the sub-category's W5 thumbnail, shown above the videos inside it.
+     *
+     * This is the sub-category's picture, never a category's - a category cannot be opened, so it has
+     * no screen to show anything on.
+     */
     val thumbnailUrl: String? = null,
     val cards: List<CatalogCardUi> = emptyList(),
 ) {
@@ -86,7 +92,8 @@ data class CatalogContainerUi(
     val isEmpty: Boolean get() = cards.isEmpty()
 
     /** The same shape the shelf renderer draws, so both screens use one implementation. */
-    fun asShelf(): CatalogShelfUi = CatalogShelfUi(id = id, title = title, cards = cards, thumbnailUrl = thumbnailUrl)
+    fun asShelf(): CatalogShelfUi =
+        CatalogShelfUi(id = id, title = title, cards = cards, headingPicture = thumbnailUrl)
 }
 
 /**
@@ -109,17 +116,21 @@ data class CatalogContainerUi(
  * - **Artwork comes from the approved cache.** The catalog has no thumbnails; the video the parent
  *   already approved for that identifier supplies one. A missing thumbnail is null, and the card
  *   shows a placeholder of exactly the same size.
- * - **Which video represents a container is the parent's configuration.** A shelf or a sub-category
- *   resolves its picture through [CatalogThumbnails] - `AUTO` picks the first eligible video inside
- *   it in catalog order, `VIDEO` the one the parent named - and the resolved video's artwork is then
- *   looked up the same way a video card's is. A container that resolves to nothing keeps exactly the
- *   artwork it had before this existed (its playlist's opening video, when it has one) and otherwise
- *   shows the placeholder. Nothing here can fail to draw: every path ends in a url or in null.
- * - **A category is a title, a sub-category is a card.** A `CATEGORY` becomes the heading of a shelf
- *   and nothing else: it has no card, no icon, no picture of its own to press, and it is never
- *   focusable. A `SUBCATEGORY` becomes one selectable card, whether the parent built it by hand or it
- *   imports a playlist - and pressing it opens the container rather than starting anything. Flattening
- *   a container into its first video is what W6 removed: a group is not an episode.
+ * - **Which video represents a card is the parent's configuration.** A sub-category resolves its
+ *   picture through [CatalogThumbnails] - `AUTO` picks the first eligible video inside it in catalog
+ *   order, `VIDEO` the one the parent named - and the resolved video's artwork is then looked up the
+ *   same way a video card's is. A container that resolves to nothing keeps exactly the artwork it had
+ *   before this existed (its playlist's opening video, when it has one) and otherwise shows the
+ *   placeholder. Nothing here can fail to draw: every path ends in a url or in null.
+ * - **A category is a title and nothing else.** A `CATEGORY` becomes the heading of a shelf: no card,
+ *   no icon, no picture - not a resolved representative video, not a placeholder, not a decoration -
+ *   and it is never focusable. A `SUBCATEGORY` becomes one selectable card, whether the parent built
+ *   it by hand or it imports a playlist, and pressing it opens the container rather than starting
+ *   anything. Flattening a container into its first video is what W6 removed: a group is not an
+ *   episode. The only picture a shelf row ever carries is an *open container's* own - see
+ *   [CatalogShelfUi.headingPicture].
+ * - **Only sub-categories are asked for a picture.** [CatalogThumbnails.representatives] answers for
+ *   sub-categories alone, so a category thumbnail cannot be resolved here even by accident.
  * - **Continue Watching is first** and contains only videos the child can still reach: the video
  *   must be half-watched *and* still approved (the query guarantees the latter) *and* still part of
  *   the currently published child-visible catalog. The catalog is what a parent curates, so removing
@@ -219,14 +230,11 @@ object CatalogUiProjection {
             CatalogShelfUi(
                 id = category.id,
                 // A category is a shelf/group *title*: it is the heading above its children and is
-                // never a card of its own, never focusable and never clickable.
+                // never a card of its own, never focusable and never clickable. It has no picture
+                // either - not a resolved representative video, not an icon, not a decoration - and
+                // nothing here asks for one, which is why this constructor sets no `headingPicture`.
                 title = category.title,
                 cards = cards,
-                // The shelf's own picture: the video the parent chose for the category, or what AUTO
-                // picked inside it. Null when there is nothing eligible, and the header then draws no
-                // image at all - there is no placeholder to preserve here, because a shelf header never
-                // had a picture before.
-                thumbnailUrl = representatives[category.id]?.let { artwork.forVideo(it) },
             )
         }
 

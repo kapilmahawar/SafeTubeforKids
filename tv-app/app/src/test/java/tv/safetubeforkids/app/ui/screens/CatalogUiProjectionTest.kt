@@ -11,6 +11,7 @@ import tv.safetubeforkids.app.data.catalog.CategoryEntity
 import tv.safetubeforkids.app.data.catalog.CategoryWithItems
 import tv.safetubeforkids.app.data.catalog.CatalogNodeEntity
 import tv.safetubeforkids.app.data.catalog.CatalogNodeType
+import tv.safetubeforkids.app.data.catalog.CatalogThumbnails
 import tv.safetubeforkids.app.data.catalog.ContentItemEntity
 import tv.safetubeforkids.app.data.catalog.ContentItemType
 import tv.safetubeforkids.app.data.catalog.ThumbnailMode
@@ -320,6 +321,199 @@ class CatalogUiProjectionTest {
         )
 
         assertEquals(listOf("Cartoon"), state.shelves.map { it.title })
+    }
+
+    // ------------------------------------------------ W6.1: a category has no thumbnail (product rule)
+    //
+    // The child-facing rule, in the three shapes a shelf can take:
+    //
+    //   CATEGORY    -> heading only: no card, no icon, no picture, nothing to focus
+    //   SUBCATEGORY -> a card, with its W5 thumbnail
+    //   VIDEO       -> a card, with the video's thumbnail
+    //
+    // The category cases deliberately use a catalog whose category *could* resolve a picture (its
+    // videos are cached and one is configured), because "no picture" has to hold even then.
+
+    @Test
+    fun aCategoryIsAHeadingWithNoCardNoPictureAndNothingToFocus() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidA"),
+        )
+
+        val shelf = CatalogUiProjection.build(
+            tree = tree,
+            thumbnails = listOf(VideoThumbnailRow("vidA", "PLapproved", "https://img/a.jpg")),
+            resumable = emptyList(),
+        ).shelves.single()
+
+        assertEquals("Cartoons", shelf.title)
+        assertNull("a category has no picture, not even a resolved representative", shelf.headingPicture)
+        assertEquals("and no card of its own", listOf("i-cocomelon"), shelf.cards.map { it.id })
+        assertTrue("the category is not a card to press", shelf.cards.none { it.id == "cat-cartoon" })
+        assertTrue(
+            "a card is the only thing on a shelf that can be focused",
+            shelf.cards.all { it.kind == CatalogCardKind.CONTAINER || it.kind == CatalogCardKind.VIDEO },
+        )
+    }
+
+    @Test
+    fun aSubcategoryCardKeepsItsW5ThumbnailInBothModes() {
+        val automatic = build(
+            catalog = listOf(
+                listOf(
+                    node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+                    node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+                    node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidA"),
+                    node("i-cocomelon#b", "i-cocomelon", CatalogNodeType.VIDEO, "Video 2", position = 1, videoId = "vidB"),
+                ),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vidA", "PLapproved", "https://img/a.jpg"),
+                VideoThumbnailRow("vidB", "PLapproved", "https://img/b.jpg"),
+            ),
+        )
+
+        assertEquals(
+            "AUTO takes the first video inside",
+            "https://img/a.jpg", automatic.shelves.single().cards.single().thumbnailUrl,
+        )
+
+        val chosen = build(
+            catalog = listOf(
+                listOf(
+                    node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+                    node(
+                        "i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0,
+                        thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-cocomelon#b",
+                    ),
+                    node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidA"),
+                    node("i-cocomelon#b", "i-cocomelon", CatalogNodeType.VIDEO, "Video 2", position = 1, videoId = "vidB"),
+                ),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vidA", "PLapproved", "https://img/a.jpg"),
+                VideoThumbnailRow("vidB", "PLapproved", "https://img/b.jpg"),
+            ),
+        )
+
+        assertEquals(
+            "VIDEO takes the one the parent named",
+            "https://img/b.jpg", chosen.shelves.single().cards.single().thumbnailUrl,
+        )
+        assertNull(
+            "and neither mode puts a picture on the category",
+            chosen.shelves.single().headingPicture,
+        )
+    }
+
+    @Test
+    fun aVideoCardKeepsItsOwnThumbnail() {
+        val state = build(
+            catalog = listOf(
+                category("cat-music", "Music", 0, items = listOf(video("i-v", "Twinkle", 0, "vid1"))),
+            ),
+            thumbnails = listOf(VideoThumbnailRow("vid1", "PLone", "https://img/vid1.jpg")),
+        )
+
+        val card = state.shelves.single().cards.single()
+        assertEquals(CatalogCardKind.VIDEO, card.kind)
+        assertEquals("https://img/vid1.jpg", card.thumbnailUrl)
+        assertNull(state.shelves.single().headingPicture)
+    }
+
+    @Test
+    fun aMixedShelfGivesItsCardsPicturesAndItsHeadingNone() {
+        val state = build(
+            catalog = listOf(
+                listOf(
+                    node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+                    node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+                    node("i-direct-a", "cat-cartoon", CatalogNodeType.VIDEO, "Direct Video A", position = 1, videoId = "vidA"),
+                    node("i-peppa", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "Peppa Pig", position = 2),
+                    node("i-direct-b", "cat-cartoon", CatalogNodeType.VIDEO, "Direct Video B", position = 3, videoId = "vidB"),
+                    node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidC"),
+                    node("i-peppa#a", "i-peppa", CatalogNodeType.VIDEO, "Video 4", position = 0, videoId = "vidD"),
+                ),
+            ),
+            thumbnails = listOf(
+                VideoThumbnailRow("vidA", "PLapproved", "https://img/a.jpg"),
+                VideoThumbnailRow("vidB", "PLapproved", "https://img/b.jpg"),
+                VideoThumbnailRow("vidC", "PLapproved", "https://img/c.jpg"),
+                VideoThumbnailRow("vidD", "PLapproved", "https://img/d.jpg"),
+            ),
+        )
+
+        val shelf = state.shelves.single()
+
+        assertNull("the category is a text-only heading", shelf.headingPicture)
+        assertEquals(
+            listOf("CoComelon", "Direct Video A", "Peppa Pig", "Direct Video B"),
+            shelf.cards.map { it.title },
+        )
+        assertEquals(
+            listOf(
+                CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO,
+                CatalogCardKind.CONTAINER, CatalogCardKind.VIDEO,
+            ),
+            shelf.cards.map { it.kind },
+        )
+        assertEquals(
+            "every card keeps its picture: the containers theirs, the videos their own",
+            listOf("https://img/c.jpg", "https://img/a.jpg", "https://img/d.jpg", "https://img/b.jpg"),
+            shelf.cards.map { it.thumbnailUrl },
+        )
+    }
+
+    @Test
+    fun hidingTheChosenVideoFallsBackToAutoForASubcategoryAndLeavesTheCategoryPictureless() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node(
+                "i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0,
+                thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-cocomelon#b",
+            ),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidA"),
+            node(
+                "i-cocomelon#b", "i-cocomelon", CatalogNodeType.VIDEO, "Video 2",
+                position = 1, enabled = false, videoId = "vidB",
+            ),
+        )
+
+        val state = CatalogUiProjection.build(
+            tree = tree,
+            thumbnails = listOf(
+                VideoThumbnailRow("vidA", "PLapproved", "https://img/a.jpg"),
+                VideoThumbnailRow("vidB", "PLapproved", "https://img/b.jpg"),
+            ),
+            resumable = emptyList(),
+        )
+
+        assertEquals(
+            "the hidden choice falls back to what AUTO picks",
+            "https://img/a.jpg", state.shelves.single().cards.single().thumbnailUrl,
+        )
+        assertNull("and the category stays pictureless", state.shelves.single().headingPicture)
+    }
+
+    @Test
+    fun onlyASubcategoryIsAskedForARepresentative() {
+        val tree = listOf(
+            node("cat-cartoon", null, CatalogNodeType.CATEGORY, "Cartoons", position = 0),
+            node("i-cocomelon", "cat-cartoon", CatalogNodeType.SUBCATEGORY, "CoComelon", position = 0),
+            node("i-cocomelon#a", "i-cocomelon", CatalogNodeType.VIDEO, "Video 1", position = 0, videoId = "vidA"),
+        )
+
+        val representatives = CatalogThumbnails.representatives(tree)
+
+        assertEquals(
+            "a category's representative is never resolved: nothing would draw it",
+            mapOf("i-cocomelon" to "vidA"),
+            representatives,
+        )
+        assertNull(representatives["cat-cartoon"])
+        assertNull("a video's picture is itself", representatives["i-cocomelon#a"])
     }
 
     // -------------------------------------------------- the hierarchy the child navigates (W6)
@@ -653,14 +847,30 @@ class CatalogUiProjectionTest {
     }
 
     @Test
-    fun theShelfHeadingCarriesTheSamePictureAsTheShelf() {
+    fun aCategoryShelfHasNoPictureEvenWhenOneCouldBeResolved() {
+        // W6.1: a category is a title and nothing else. The parent *can* configure a picture for a
+        // category - this catalog does, and the first video inside it is cached - and the shelf still
+        // draws no image, because no shelf on the home screen has one.
+        val tree = treeOfTheShelfItem().map {
+            if (it.id == "cat-music") {
+                it.copy(thumbnailMode = ThumbnailMode.VIDEO, thumbnailVideoId = "i-p#first")
+            } else {
+                it
+            }
+        }
+
         val state = build(
-            catalog = listOf(treeOfTheShelfItem()),
+            catalog = listOf(tree),
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
         )
 
-        assertEquals("https://img/first.jpg", state.shelves.single().thumbnailUrl)
-        assertEquals(state.shelves.single().cards.single().thumbnailUrl, state.shelves.single().thumbnailUrl)
+        val shelf = state.shelves.single()
+        assertNull("a category is a title: it has no picture at all", shelf.headingPicture)
+        assertEquals("Music", shelf.title)
+        assertEquals(
+            "and its child card still has one",
+            "https://img/first.jpg", shelf.cards.single().thumbnailUrl,
+        )
     }
 
     @Test
@@ -679,7 +889,7 @@ class CatalogUiProjectionTest {
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLn", "https://img/first.jpg")),
         )
 
-        assertNull("a hidden video may not stand for the shelf", state.shelves.single().thumbnailUrl)
+        assertNull("no shelf on the home screen has a picture", state.shelves.single().headingPicture)
         assertEquals(
             "and the container card keeps the playlist artwork it had before thumbnails existed",
             "https://img/first.jpg", state.shelves.single().cards.single().thumbnailUrl,
@@ -697,16 +907,16 @@ class CatalogUiProjectionTest {
 
         assertEquals("https://img/vid1.jpg", state.shelves.single().cards.single().thumbnailUrl)
         assertEquals(CatalogCardKind.VIDEO, state.shelves.single().cards.single().kind)
-        assertEquals(
-            "and the shelf header shows the video the app picked inside it",
-            "https://img/vid1.jpg", state.shelves.single().thumbnailUrl,
+        assertNull(
+            "the category heading stays text only, whatever its videos are",
+            state.shelves.single().headingPicture,
         )
     }
 
     @Test
-    fun theContinueWatchingShelfHasNoHeaderPictureBecauseItIsNotAContainer() {
+    fun theContinueWatchingShelfHasNoPictureEither() {
         // Continue Watching is a shelf the app builds, not a category a parent configured, so there is
-        // no node for a picture to come from and its header stays exactly what it has always been.
+        // no node for a picture to come from - and no shelf header carries one anyway (W6.1).
         val state = build(
             catalog = catalogPublishingApproved(),
             thumbnails = listOf(VideoThumbnailRow("vid1", "PLapproved", "https://img/vid1.jpg")),
@@ -714,7 +924,7 @@ class CatalogUiProjectionTest {
         )
 
         val continueWatching = state.shelves.first { it.id.startsWith("shelf-continue-watching") }
-        assertNull("a built shelf has no category to take a picture from", continueWatching.thumbnailUrl)
+        assertNull("a built shelf has no picture at all", continueWatching.headingPicture)
         assertEquals(1, continueWatching.cards.size)
         assertEquals(
             "the card keeps its own artwork",
