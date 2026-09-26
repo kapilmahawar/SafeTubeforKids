@@ -48,7 +48,17 @@ cd tv-app && ./gradlew connectedDebugAndroidTest
 
 # The dashboard JavaScript has no build step, so CI parses it
 node --check tv-app/app/src/main/assets/app.js
+
+# The dashboard's model and its guards, as plain Node tests (no browser, no dependencies)
+cd tv-app && node --test scripts/dashboard-*.test.js
 ```
+
+The three dashboard suites are `dashboard-catalog-editor.test.js` (the model: every mutation and the
+save/reload conversation), `dashboard-catalog-import.test.js` (the import rules and the ordering they
+produce) and `dashboard-catalog-ui.test.js` (the shell that ships: the theme rule, the token palette,
+the action table, what the browser is allowed to store, and that no Apps/Kiosk surface is left in any
+dashboard file). They run against the real asset files, so a page and a script that disagree fail
+here rather than on a phone.
 
 CI (`.github/workflows/ci.yml`) runs `./gradlew --no-daemon --stacktrace assembleDebug
 testDebugUnitTest`, checks `app.js` parses, and uploads the debug APK.
@@ -79,6 +89,7 @@ Test count history (each measured, not estimated):
 | Phase 3 (`017d68f`) | 506 | +125 contract, validator, sync, routes, store, end-to-end |
 | Phase 4 (`b8d4110`) | 542 | +36 UI projection and catalog home flows |
 | `3962d31` | 542 | re-run to confirm |
+| W7 redesign (`a6f51ba`) | 846 | +13: `GET /catalog/artwork` and `POST /catalog/refresh`, the resolver's single-video link, and the redesigned dashboard shell. Measured on `testDebugUnitTest` and `testReleaseUnitTest`, both 846/846, plus 117 dashboard JavaScript tests |
 
 **205 of the 542 tests are catalog-era** (Phases 2–4) and live in 11 classes:
 

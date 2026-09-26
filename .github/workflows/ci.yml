@@ -31,7 +31,21 @@ jobs:
           ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest
 
       - name: Check the dashboard JavaScript parses
-        run: node --check tv-app/app/src/main/assets/app.js
+        run: |
+          node --check tv-app/app/src/main/assets/app.js
+          node --check tv-app/app/src/main/assets/theme.js
+          node --check tv-app/app/src/main/assets/catalog-editor.js
+
+      # The dashboard's model and the guards over the page it ships with. Plain Node, no
+      # dependencies, and the thing that keeps the page and the script in step: a control wired to
+      # nothing, a token that was never defined, or a browser-storage key that should not exist
+      # fails here rather than on somebody's phone.
+      - name: Dashboard model and guard tests
+        working-directory: tv-app
+        run: >-
+          node --test scripts/dashboard-catalog-editor.test.js
+          scripts/dashboard-catalog-import.test.js
+          scripts/dashboard-catalog-ui.test.js
 
       - name: Upload the debug APK
         uses: actions/upload-artifact@v4

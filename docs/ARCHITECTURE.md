@@ -21,6 +21,7 @@ The real architecture, with the class names that exist in the repository at
 │  │   AuthRoutes        POST /auth, /auth/refresh        (PIN -> session)  │  │
 │  │   PlaylistRoutes    /playlists, /sources/export, /sources/import       │  │
 │  │   CatalogRoutes     GET /catalog, PUT /catalog        (Phase 3)        │  │
+│  │   LibraryRoutes     /catalog/artwork, /catalog/refresh    (W7)         │  │
 │  │   PlaybackRoutes    /playback/pause|skip|stop                          │  │
 │  │   StatsRoutes       /stats, /stats/recent                              │  │
 │  │   TimeLimitRoutes   /time-limits ...                                   │  │
@@ -246,6 +247,9 @@ POST   /auth                      PIN -> session token
 POST   /auth/refresh              rotate a session
 GET    /catalog                   AUTH  the parent's catalog
 PUT    /catalog                   AUTH  replace the parent's catalog   (Phase 3)
+POST   /catalog/import/resolve    AUTH  read-only resolve of a playlist or a video link (W7)
+GET    /catalog/artwork           AUTH  the pictures and counts the TV has, for the dashboard (W7)
+POST   /catalog/refresh           AUTH  ask the TV to fetch the catalog and its sources now (W7)
 GET    /playlists                 AUTH  approved sources
 POST   /playlists                 AUTH  add an approved source
 DELETE /playlists/{id}            AUTH  remove an approved source
