@@ -333,8 +333,8 @@ navigation change was made for it.
 ```text
 JVM                  846 / 846 debug, 846 / 846 release   (0 failures)
 Dashboard JS          73 / 73 editor, 29 / 29 import, 41 / 41 ui   = 143 / 143  (was 135)
-PLAYER tier           see Real Mi Box Verification
-FULL tier             see Real Mi Box Verification
+PLAYER tier           41 / 41   (test-results/tv/2026-09-27-000237)
+FULL tier             56 / 56   (test-results/tv/2026-09-27-003040)
 ```
 
 The dashboard suite gained **8 tests** (135 → 143), one per implemented finding, each asserting the
@@ -372,9 +372,24 @@ freshness scenarios (normal, artwork-blocked, genuinely stale, unreachable) — 
 library was left byte-identical (`cat-cartoon, i-cocomelon, i-demo-disabled`).
 
 ```text
-PLAYER tier   41 / 41
-FULL tier     56 / 56
+PLAYER tier   41 / 41   (test-results/tv/2026-09-27-000237)
+FULL tier     56 / 56   (test-results/tv/2026-09-27-003040)
 ```
+
+**One FULL-tier run had to be repeated, and the reason is worth recording.** The first attempt
+(`2026-09-27-001102`) failed exactly one check, `autoplay-advances-to-next-approved`, with the
+transcript line `queue e_04ZrNroTo -> e_04ZrNroTo (reached 228s of 229s)`: the video reached one
+second before its end and the harness's own deadline expired first. The seek presses that the check
+uses to reach the end had not landed, so it fell back to playing the video out, and the deadline is
+computed from the position sampled *before* those presses. Two things say this was the harness and
+not the product: the very next check in the same run, `end-of-video-handling`, passed by observing a
+real transition to the next approved item in the same source (`MR5XSOdjKMA` → `fdPu-wvl3KE`), and
+`autoplay-stays-in-same-source` passed too. The likely trigger was the resume position this phase's own
+verification left on that video, which makes the resume offer appear and can consume the harness's
+fixed centre press; playing it to 228 of 229 seconds deleted that saved position (a position at 95% or
+more is discarded on the next start), and the repeat on the clean state passed all 56 checks with
+`queue e_04ZrNroTo -> MR5XSOdjKMA (reached 1s of 229s)`. Both runs are quoted rather than only the
+passing one.
 
 ## Responsive Verification
 
