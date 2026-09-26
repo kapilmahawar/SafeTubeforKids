@@ -90,7 +90,12 @@
         reachable: null,
         versionMismatch: false,
         publishing: false,
-        route: { name: 'library', id: null }
+        route: { name: 'library', id: null },
+        // What the TV last said it was playing, and when it said it: the two facts the freshness
+        // rule is made of.
+        nowPlayingSeen: null,
+        nowPlayingFrozen: 0,
+        nowPlayingAt: 0
     };
 
     // The inputs of whichever screen is on screen, so the handlers can read them without looking
@@ -100,7 +105,12 @@
     var deferredInstallPrompt = null;
     var statusTimer = null;
     var toastTimer = null;
+    var playheadTimer = null;
+    var pollIntervalMs = 20000;
     var saving = false;
+
+    // The mounted Now Playing card's parts, so the playhead can be painted without a re-render.
+    var npRefs = null;
 
     // --- tiny DOM helpers --------------------------------------------------------------------
 
@@ -555,7 +565,290 @@
             state.status = null;
             state.reachable = false;
         }
+        noteNowPlaying();
         paintStatusPill();
+        paintNowPlaying();
+        retunePolling();
+    }
+
+    // --- what the TV is playing right now ------------------------------------------------------
+    //
+    // The TV publishes this itself: `GET /status` answers from the player's own live state (the
+    // video id, the title, the queue it came from, the playhead, whether it is playing), and the
+    // player clears it when playback stops, moves to the next video or leaves the screen. So this
+    // is not watch history read back, and it is not a guess: it is what Media3 is doing at the
+    // moment the question was asked.
+    //
+    // What the endpoint does *not* carry is a timestamp, so freshness is derived from the one thing
+    // that must move while a video plays: the playhead. Three consecutive polls reporting the same
+    // position while the TV says it is playing means the TV has stopped reporting, and the screen
+    // says exactly that rather than "nothing is playing" - which would be a different, and false,
+    // statement.
+
+    var NOW_PLAYING_STALE_POLLS = 3;
+
+    /** The state of the TV, in the one place the screens read it from. */
+    function nowPlayingModel() {
+        if (state.reachable === null) return { state: 'connecting' };
+        if (state.reachable === false) return { state: 'unreachable' };
+
+        var playing = state.status && state.status.currentlyPlaying;
+        if (!playing || !playing.videoId) return { state: 'idle' };
+        if (state.nowPlayingFrozen >= NOW_PLAYING_STALE_POLLS) {
+            return { state: 'stale', playing: playing };
+        }
+        return { state: playing.playing ? 'playing' : 'paused', playing: playing };
+    }
+
+    /** Compares this poll with the last one, so a frozen playhead can be told from a moving one. */
+    function noteNowPlaying() {
+        var playing = state.status && state.status.currentlyPlaying;
+
+        if (!playing || !playing.videoId) {
+            state.nowPlayingSeen = null;
+            state.nowPlayingFrozen = 0;
+            return;
+        }
+
+        var seen = state.nowPlayingSeen;
+        var moved = !seen || seen.videoId !== playing.videoId ||
+            seen.positionSec !== playing.positionSec || seen.playing !== playing.playing;
+
+        state.nowPlayingFrozen = moved ? 0 : (state.nowPlayingFrozen || 0) + 1;
+        state.nowPlayingSeen = {
+            videoId: playing.videoId,
+            positionSec: playing.positionSec,
+            playing: playing.playing
+        };
+        // When the TV said it. The playhead is advanced locally from here, so the readout moves
+        // between polls instead of jumping once every five seconds.
+        state.nowPlayingAt = Date.now();
+    }
+
+    /** A picture for the playing video: the TV's own artwork when it has one. */
+    function nowPlayingArtwork(playing) {
+        var cached = state.artwork.videos[playing.videoId];
+        if (cached) return cached;
+        // The TV has no picture for this video, which happens when it is playing something the
+        // library does not name. YouTube's own thumbnail for a video id is public and derivable, and
+        // it is a picture of the thing being described - not an invented fact about it. If it does
+        // not load, the card falls back to the placeholder like every other picture here.
+        return /^[A-Za-z0-9_-]{6,20}$/.test(playing.videoId || '')
+            ? 'https://i.ytimg.com/vi/' + playing.videoId + '/hqdefault.jpg'
+            : '';
+    }
+
+    function formatClock(totalSeconds) {
+        var seconds = Math.max(0, Math.floor(totalSeconds || 0));
+        var minutes = Math.floor(seconds / 60);
+        var rest = seconds % 60;
+        if (minutes < 60) return minutes + ':' + (rest < 10 ? '0' : '') + rest;
+        return Math.floor(minutes / 60) + ':' + ('0' + (minutes % 60)).slice(-2) + ':' + ('0' + rest).slice(-2);
+    }
+
+    /** Where the playhead is now: the TV's last report, plus the time since it was made. */
+    function playheadNow(playing) {
+        var position = playing.positionSec || 0;
+        if (playing.playing && state.nowPlayingFrozen === 0 && state.nowPlayingAt) {
+            position += (Date.now() - state.nowPlayingAt) / 1000;
+        }
+        if (playing.durationSec > 0) position = Math.min(position, playing.durationSec);
+        return Math.max(0, position);
+    }
+
+    /**
+     * The Now Playing card.
+     *
+     * Five states, and the difference between them matters: a TV that cannot be reached is not a TV
+     * that is playing nothing, and a TV that has stopped reporting is neither. Showing the wrong one
+     * would make a parent think their child is watching when they are not - or the reverse, which is
+     * worse.
+     *
+     * The card records its own parts as it is built, which is how the playhead and the state can be
+     * painted in place later without rebuilding the screen.
+     */
+    function nowPlayingCard() {
+        var model = nowPlayingModel();
+
+        if (model.state !== 'playing' && model.state !== 'paused') {
+            // The one-line states are all the same shape, so only their words change - but they must
+            // change: "Nothing is playing" becoming "Unable to reach the TV" is the difference
+            // between a child who stopped watching and a TV that has gone quiet, and a card that
+            // never repainted would keep telling the parent the reassuring one.
+            npRefs = { mode: 'quiet', quietState: model.state };
+            return quietNowPlaying(model.state);
+        }
+
+        var playing = model.playing;
+        var position = playheadNow(playing);
+        var title = playing.title || playing.videoId;
+
+        var stateLine = h('p', { class: 'now-playing__state' });
+        var elapsed = h('span', { text: formatClock(position) });
+        var duration = h('span', { class: 'now-playing__of', text: playing.durationSec > 0 ? ' / ' + formatClock(playing.durationSec) : '' });
+        var time = h('p', { class: 'now-playing__time' }, [elapsed, duration]);
+        var fill = h('span', {
+            class: 'progress__bar',
+            style: 'width: ' + (playing.durationSec > 0 ? Math.round((position / playing.durationSec) * 100) : 0) + '%'
+        });
+        var progress = h('div', { class: 'progress now-playing__progress' }, [fill]);
+        var pause = actionButton(model.state === 'playing' ? 'Pause' : 'Resume', 'playback-pause', {}, 'btn--sm');
+        var actions = h('div', { class: 'now-playing__actions' }, [
+            pause,
+            actionButton('Stop', 'playback-stop', {}, 'btn--sm')
+        ]);
+        var picture = pictureNode(title, nowPlayingArtwork(playing), 'now-playing__art');
+
+        npRefs = {
+            mode: 'card',
+            videoId: playing.videoId,
+            state: stateLine,
+            elapsed: elapsed,
+            time: time,
+            duration: duration,
+            fill: fill,
+            progress: progress,
+            actions: actions,
+            title: h('p', { class: 'now-playing__title', text: title }),
+            picture: picture
+        };
+
+        paintNowPlayingState(model, stateLine);
+
+        return h('section', { class: 'now-playing', 'aria-live': 'polite' }, [
+            h('p', { class: 'now-playing__label', text: 'Now playing' }),
+            h('div', { class: 'now-playing__row' }, [
+                picture,
+                h('div', { class: 'now-playing__body' }, [npRefs.title, stateLine, time])
+            ]),
+            playing.durationSec > 0 ? progress : null,
+            actions
+        ]);
+    }
+
+    function paintNowPlayingState(model, stateLine) {
+        stateLine.textContent = '';
+        stateLine.appendChild(h('span', {
+            class: 'now-playing__icon',
+            'aria-hidden': 'true',
+            text: model.state === 'playing' ? '▶' : '❙❙'
+        }));
+        stateLine.appendChild(document.createTextNode(
+            model.state === 'playing' ? 'Playing on TV' : 'Paused on TV'));
+    }
+
+    /** The one-line version: what a TV that is idle, unreachable or quiet gets instead of a card. */
+    function quietNowPlaying(state) {
+        var says = {
+            connecting: 'Connecting…',
+            unreachable: 'Unable to reach the TV.',
+            stale: 'The TV stopped reporting what it is playing.',
+            idle: 'Nothing is playing right now'
+        }[state] || 'Nothing is playing right now';
+
+        var actions = state === 'unreachable' || state === 'stale'
+            ? [actionButton('Try again', 'retry-status', {}, 'btn--sm')]
+            : [];
+
+        return h('section', { class: 'now-playing now-playing--quiet', 'aria-live': 'polite' }, [
+            h('p', { class: 'now-playing__label', text: 'TV' }),
+            h('div', { class: 'now-playing__quiet-body' }, [
+                h('p', { class: 'now-playing__state', text: says }),
+                actions.length ? h('div', { class: 'now-playing__actions' }, actions) : null
+            ])
+        ]);
+    }
+
+    /**
+     * Updates the card in place.
+     *
+     * The playhead moves every second and the TV is polled every few seconds, and rebuilding the
+     * whole screen on either would throw away the parent's scroll position and focus for a number
+     * that changed by one. So the card is painted, not re-rendered - except when its *shape* has to
+     * change (a video starting or stopping), which is rare and worth a render.
+     */
+    function paintNowPlaying() {
+        if (!state.token || state.route.name !== 'library') return;
+
+        var model = nowPlayingModel();
+        var wanted = (model.state === 'playing' || model.state === 'paused') ? 'card' : 'quiet';
+
+        if (!npRefs || npRefs.mode !== wanted) {
+            render();
+            return;
+        }
+
+        if (wanted === 'quiet') {
+            if (npRefs.quietState !== model.state) render();
+            return;
+        }
+
+        var playing = model.playing;
+        var position = playheadNow(playing);
+        paintNowPlayingState(model, npRefs.state);
+        npRefs.elapsed.textContent = formatClock(position);
+        npRefs.duration.textContent = playing.durationSec > 0 ? ' / ' + formatClock(playing.durationSec) : '';
+        npRefs.progress.hidden = playing.durationSec <= 0;
+        if (playing.durationSec > 0) {
+            npRefs.fill.style.width = Math.round((position / playing.durationSec) * 100) + '%';
+        }
+
+        if (npRefs.videoId !== playing.videoId) {
+            npRefs.videoId = playing.videoId;
+            npRefs.title.textContent = playing.title || playing.videoId;
+            if (npRefs.picture.tagName === 'IMG') {
+                npRefs.picture.src = nowPlayingArtwork(playing);
+                npRefs.picture.alt = playing.title || playing.videoId;
+            }
+            npRefs.actions.replaceChild(
+                actionButton(model.state === 'playing' ? 'Pause' : 'Resume', 'playback-pause', {}, 'btn--sm'),
+                npRefs.actions.firstChild
+            );
+        }
+    }
+
+    /** The playhead ticker: one timer, only while a video is playing and the page is visible. */
+    function retunePlayheadTicker() {
+        var wanted = nowPlayingModel().state === 'playing' && !document.hidden &&
+            state.route.name === 'library';
+
+        if (wanted && !playheadTimer) {
+            playheadTimer = setInterval(function () {
+                if (document.hidden) return;
+                var model = nowPlayingModel();
+                if (model.state !== 'playing' || !npRefs || npRefs.mode !== 'card') return;
+                var position = playheadNow(model.playing);
+                npRefs.elapsed.textContent = formatClock(position);
+                if (model.playing.durationSec > 0) {
+                    npRefs.fill.style.width =
+                        Math.round((position / model.playing.durationSec) * 100) + '%';
+                }
+            }, 1000);
+        } else if (!wanted && playheadTimer) {
+            clearInterval(playheadTimer);
+            playheadTimer = null;
+        }
+    }
+
+    /**
+     * How often to ask the TV.
+     *
+     * The old dashboard used 30 s while playing and 120 s when idle, which is why its progress bar
+     * jumped. Playing is worth a short interval; a paused video changes only when somebody acts on
+     * it; and an idle TV changes only when the child picks something, so 20 s is enough and keeps
+     * the phone's radio quiet. The timer is retuned, never duplicated, and it never runs while the
+     * page is hidden.
+     */
+    function retunePolling() {
+        if (!state.token) return;
+
+        var model = nowPlayingModel();
+        var wanted = model.state === 'playing' ? 5000 : (model.state === 'paused' ? 10000 : 20000);
+        if (wanted === pollIntervalMs && statusTimer) return;
+
+        pollIntervalMs = wanted;
+        stopPolling();
+        startPolling();
     }
 
     async function loadLimits() {
@@ -965,9 +1258,9 @@
 
         var playing = state.status && state.status.currentlyPlaying;
         if (playing && playing.title) {
-            tvState.classList.add('pill--ok');
-            tvState.textContent = '▶ ' + playing.title;
-            tvState.title = 'Playing on the TV right now';
+            tvState.classList.add(playing.playing ? 'pill--ok' : 'pill--warn');
+            tvState.textContent = (playing.playing ? '▶ ' : '❙❙ ') + playing.title;
+            tvState.title = playing.playing ? 'Playing on the TV right now' : 'Paused on the TV';
             return;
         }
 
@@ -1083,24 +1376,30 @@
     }
 
     function artworkNode(node, className) {
-        var url = artworkFor(node);
+        return pictureNode(node.title, artworkFor(node), className,
+            node.nodeType === CatalogEditor.VIDEO ? '▶' : '🗂');
+    }
+
+    /**
+     * A picture for something, with the two things every picture here needs: a name, and a way to
+     * fail. A URL that stops resolving becomes the same placeholder the rest of the interface uses
+     * rather than the browser's broken-image glyph.
+     */
+    function pictureNode(title, url, className, glyph) {
         var placeholder = function () {
             return h('div', {
                 class: className + ' ' + className + '--placeholder',
                 'aria-hidden': 'true',
-                text: node.nodeType === CatalogEditor.VIDEO ? '▶' : '🗂'
+                text: glyph || '▶'
             });
         };
 
         if (!url) return placeholder();
 
-        // A card the parent recognises by sight: the picture carries the item's name for a screen
-        // reader, and a picture that stops resolving degrades to the same placeholder the rest of
-        // the interface uses rather than to a browser's broken-image glyph.
         var image = h('img', {
             class: className,
             src: url,
-            alt: node.title,
+            alt: title || '',
             loading: 'lazy',
             decoding: 'async'
         });
@@ -1283,6 +1582,9 @@
             : 'Nothing here yet — this is where your child\'s videos live.';
 
         var children = [
+            // What the TV is doing comes first: it is the question a parent opens this page to ask
+            // while standing in the kitchen, and it is answered before "what do you have".
+            nowPlayingCard(),
             screenHead('Your library', null, summary, addActions(null))
         ];
 
@@ -2442,6 +2744,7 @@
         'send-to-tv': function () { sendToTv(); },
         'reload-catalog': function () { reloadFromTv(); },
         'check-library': function () { checkLibrary(); },
+        'retry-status': function () { checkTvAgain(); },
         'allow-sources': function (element) { allowSources(element.getAttribute('data-sources')); },
 
         'playback-stop': function () { playback('stop', 'Stopped'); },
@@ -2514,6 +2817,12 @@
         if (!applied.ok) return void toast(applied.reason, 'error');
         state.session = applied.session;
         publish('Shown again');
+    }
+
+    /** "Try again" on the Now Playing card: ask the TV once, without waiting for the next poll. */
+    async function checkTvAgain() {
+        await loadStatus();
+        if (state.reachable === false) toast('The TV did not answer.', 'error');
     }
 
     async function sendToTv() {
@@ -2723,12 +3032,14 @@
         statusTimer = setInterval(function () {
             if (document.hidden) return;
             loadStatus();
-        }, 20000);
+        }, pollIntervalMs);
+        retunePlayheadTicker();
     }
 
     function stopPolling() {
         if (statusTimer) clearInterval(statusTimer);
         statusTimer = null;
+        retunePlayheadTicker();
     }
 
     // --- startup -----------------------------------------------------------------------------

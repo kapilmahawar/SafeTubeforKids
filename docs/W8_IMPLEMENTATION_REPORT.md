@@ -235,7 +235,91 @@ W8-FINAL docs(w8): report the polish
 `FINAL_COMMIT` and the working-tree status are recorded in the delivery note that accompanies this
 report. Every commit builds and passes the dashboard suites on its own.
 
-## 8. Known limitations
+## 8. W8.1 — live TV "Now Playing"
+
+```text
+W8_1_NOW_PLAYING_STATUS=COMPLETE
+
+OLD_IMPLEMENTATION_FOUND=YES (git history, pre-W7 `assets/index.html:46-67` and `app.js:388-441`)
+OLD_API=GET /status → currentlyPlaying {videoId, playlistId, title, playlistTitle, elapsedSec,
+        positionSec, durationSec, playing} - the same shape it has today, unchanged
+CURRENT_API=GET /status, the same endpoint; no new route, no new field, no new socket
+TV_SOURCE_OF_TRUTH=PlayEventRecorder (in-memory, process-wide): the player publishes the playhead
+                   every 500ms from Media3 itself, and clears the published state on stop, on
+                   next/previous, on leaving the player and on an authorization rejection. The
+                   status route reads that live, so it is what the TV is doing - not a log
+
+NOW_PLAYING_UI=A card above "Your library": label, artwork, title, ▲Playing on TV / ❙❙ Paused on TV,
+               position / duration and a progress bar, with Pause and Stop. A one-line variant for
+               a TV that is idle, unreachable, connecting or has stopped reporting. The header pill
+               carries the same answer on every other screen.
+LIVE_UPDATE_METHOD=polling with a locally advanced playhead: the TV is asked every 5s while playing,
+                    10s while paused and 20s otherwise, the playhead is interpolated every 1s from
+                    the last report, and the card is painted in place (never re-rendered) so the
+                    parent's scroll and focus survive. One status timer, retuned not duplicated,
+                    silent while the page is hidden, with an immediate ask when it comes back.
+REFRESH_INTERVAL=5000 / 10000 / 20000 ms (playing / paused / otherwise); playhead tick 1000 ms
+STALE_STATE_HANDLING=the endpoint carries no timestamp, so freshness comes from the one thing that
+                     must move while a video plays: the playhead. Three consecutive polls reporting
+                     the same position while the TV says it is playing switches the card to "The TV
+                     stopped reporting what it is playing." with a Try again button. A *new* video
+                     id, a new position or a pause each reset that counter, so a real pause is never
+                     mistaken for a dead TV, and a missed poll is never reported as "nothing is
+                     playing".
+
+PLAYING_TEST=PASS  the card appeared on its own, named "Wheels on the Bus", showed 0:09 / 3:49, the
+                   picture loaded, and the position advanced (TV 10s→16s, card 0:09→0:14)
+PAUSED_TEST=PASS   "❙❙ Paused on TV" and the position frozen across six seconds
+RESUME_TEST=PASS   "▲Playing on TV" again, without a reload
+SEEK_TEST=PASS     two remote seek presses: TV 24s→36s, card 0:23→0:47
+VIDEO_TRANSITION_TEST=PASS  skip moved the TV to the next queue item and the card followed it
+                            ("Wheels on the Bus" → "Hot Cross Buns", playing, 0:00 / 2:52)
+STOP_TEST=PASS     the card collapsed to "Nothing is playing right now" and the pill stopped naming
+                   a video
+NETWORK_FAILURE_TEST=PASS  with /status blocked the card said "Unable to reach the TV." (not
+                           "nothing is playing"), offered Try again, and recovered without a reload
+MOBILE_TEST=PASS   360/390/412px: no sideways scrolling, the card is 239px of an ~800px viewport
+                   (30%), both buttons are 40px
+DARK_MODE_TEST=PASS  the card repaints (surface rgb(23,28,35), title rgb(238,241,246)); screenshots
+                     in both themes, and at 1280px
+
+SECURITY_IMPACT=NONE. The card is informational; it reuses the two playback controls the dashboard
+                already had (POST /playback/pause, /playback/stop - session-authenticated, no body,
+                acting only on what is already playing) and grants no new permission. Nothing here
+                can start playback, name a video to play, or reach an external URL, and
+                PlaybackAuthorization is untouched: a video reaches the player only through the
+                catalog and the allowed-source list, exactly as before.
+KNOWN_LIMITATIONS=1) There is no push channel: the TV is polled. A WebSocket or SSE would be a new
+                  architectural component for a status card, so polling stayed. 2) The playhead is
+                  interpolated between polls, so it can be a second ahead of the TV; every poll
+                  corrects it. 3) The endpoint carries no timestamp, which is why staleness is
+                  derived from the playhead - a TV that is *paused* by a time limit and a TV that
+                  has died look the same to the client until the position stops moving for three
+                  polls. 4) A video the library does not name has no artwork in the TV's cache, so
+                  the card falls back to YouTube's thumbnail for the reported id, and to the
+                  placeholder if that does not load. 5) Buffering shows as "playing" with a still
+                  playhead, which is what Media3 is actually doing.
+```
+
+**What W8.1 was, in one line:** W7 removed only the *UI* — the card and its script. The server
+endpoint (`GET /status`), the TV's playback reporting (`PlayEventRecorder` + `PlaybackController`) and
+the debug broadcast that can start a video were all still there and unchanged, so W8.1 **reconnected
+an existing data source to the new dashboard**: no new endpoint, no Android change, no database
+change, and no second playback-state system. The old card fabricated its thumbnail URL and jumped its
+progress bar every 30 seconds; this one asks the TV every five seconds, advances the playhead locally
+in between, and distinguishes a paused TV from an unreachable one from a TV that has stopped
+reporting.
+
+Two defects were found by the device run and fixed before this commit:
+
+1. the one-line states were never repainted, so a TV that became unreachable kept showing the
+   reassuring "Nothing is playing right now" until the page was reloaded — the exact confusion
+   PART 5 forbids;
+2. the freshness counter disabled the local playhead interpolation on the *first* repeated reading,
+   which is what surfaced the seek behaviour as a frozen clock.
+
+## 9. Known limitations
+
 
 1. **No drag-and-drop reordering**, deliberately (F6): ▲▼, "Move to the top", "Move to the bottom"
    and "Move to another category…" cover every journey, are deterministic, and work on a touch

@@ -101,6 +101,7 @@ Test count history (each measured, not estimated):
 | `3962d31` | 542 | re-run to confirm |
 | W7 redesign (`a6f51ba`) | 846 | +13: `GET /catalog/artwork` and `POST /catalog/refresh`, the resolver's single-video link, and the redesigned dashboard shell. Measured on `testDebugUnitTest` and `testReleaseUnitTest`, both 846/846, plus 117 dashboard JavaScript tests |
 | W8 polish | 846 | no Kotlin changed; the dashboard suites went 117 → 128 (`dashboard-catalog-ui.test.js` gained 11 guards for the loading state, the vocabulary, the reorder arrows, the remove copy, the error translator and the artwork fallback) |
+| W8.1 now playing | 846 | still no Kotlin change; the dashboard suites went 128 → 135 (the seventh group guards the live status card: the five states, the freshness rule, the playhead ticker, the polling cadence and the fact that it reads `/status` and never the watch history) |
 
 **205 of the 542 tests are catalog-era** (Phases 2–4) and live in 11 classes:
 

@@ -360,12 +360,125 @@ test('settings are grouped, and every group holds real controls', () => {
 
 test('a picture carries the item’s name and degrades to the placeholder', () => {
     const app = code('app.js');
-    const artwork = app.slice(app.indexOf('function artworkNode'), app.indexOf('/** One category'));
+    const artwork = app.slice(app.indexOf('function pictureNode'), app.indexOf('function sectionHead'));
 
-    assert.match(artwork, /alt: node\.title/, 'the picture is the item, so it has a name');
+    assert.match(artwork, /alt: title \|\| ''/, 'the picture is the item, so it has a name');
     assert.match(artwork, /addEventListener\('error'/, 'a picture that stops resolving is replaced');
     assert.match(artwork, /loading: 'lazy'/);
     assert.match(artwork, /decoding: 'async'/);
+});
+
+// --- W8.1: what the TV is playing right now --------------------------------------------------
+
+test('now playing reads the TV’s own live state, not the watch history', () => {
+    const app = code('app.js');
+    const from = app.indexOf('function nowPlayingModel');
+    const to = app.indexOf('function retunePolling');
+    const block = app.slice(from, to);
+
+    // The same endpoint the dashboard has always used for this, answered from the player itself.
+    assert.match(app, /apiCall\('GET', '\/status'\)/);
+    assert.match(block, /state\.status\.currentlyPlaying/);
+
+    // And never the history list: "what was watched" is a different question.
+    assert.doesNotMatch(block, /state\.recent|loadStats|play_events/,
+        'Now Playing must not be built out of watch history');
+});
+
+test('the five states are distinct, and a TV that cannot be reached is not a TV playing nothing', () => {
+    const app = code('app.js');
+    const model = app.slice(app.indexOf('function nowPlayingModel'), app.indexOf('function noteNowPlaying'));
+
+    assert.match(model, /return \{ state: 'connecting' \}/);
+    assert.match(model, /state\.reachable === false/);
+    assert.match(model, /return \{ state: 'unreachable' \}/);
+    assert.match(model, /return \{ state: 'idle' \}/);
+    assert.match(model, /state: playing\.playing \? 'playing' : 'paused'/);
+
+    // The reachability check comes first, so a failed poll can never be read as "nothing playing".
+    assert.ok(model.indexOf("state: 'unreachable'") < model.indexOf("state: 'idle'"),
+        'unreachable must be decided before idle');
+
+    ['Playing on TV', 'Paused on TV', 'Nothing is playing right now', 'Connecting…',
+        'Unable to reach the TV.']
+        .forEach((copy) => assert.ok(app.includes(copy), 'the card should be able to say "' + copy + '"'));
+
+    // A card that has stopped being updated says so, rather than pretending.
+    assert.ok(app.includes('The TV stopped reporting what it is playing.'));
+});
+
+test('a playhead that stops moving means the TV stopped reporting', () => {
+    const app = code('app.js');
+
+    assert.match(app, /var NOW_PLAYING_STALE_POLLS = 3;/);
+    assert.match(app, /state\.nowPlayingFrozen = moved \? 0 : \(state\.nowPlayingFrozen \|\| 0\) \+ 1;/);
+    assert.match(app, /state\.nowPlayingFrozen >= NOW_PLAYING_STALE_POLLS/);
+
+    // A new video, a new position or a pause all count as the TV still reporting.
+    assert.match(app, /seen\.videoId !== playing\.videoId/);
+    assert.match(app, /seen\.positionSec !== playing\.positionSec/);
+    assert.match(app, /seen\.playing !== playing\.playing/);
+});
+
+test('the playhead is advanced locally between polls, and only while playing', () => {
+    const app = code('app.js');
+    const playhead = app.slice(app.indexOf('function playheadNow'), app.indexOf('function nowPlayingCard'));
+
+    assert.match(playhead, /playing\.playing && state\.nowPlayingFrozen === 0 && state\.nowPlayingAt/);
+    assert.match(playhead, /Date\.now\(\) - state\.nowPlayingAt/);
+    assert.match(playhead, /Math\.min\(position, playing\.durationSec\)/,
+        'the readout never runs past the end of the video');
+
+    // One timer, one second, and only while there is something moving to show.
+    assert.match(app, /playheadTimer = setInterval\(function \(\) \{/);
+    assert.match(app, /\}, 1000\);/);
+    const ticker = app.slice(app.indexOf('function retunePlayheadTicker'), app.indexOf('function retunePolling'));
+    assert.match(ticker, /if \(wanted && !playheadTimer\)/);
+    assert.match(ticker, /nowPlayingModel\(\)\.state === 'playing' && !document\.hidden/);
+});
+
+test('polling is retuned, never duplicated, and stops while the page is hidden', () => {
+    const app = code('app.js');
+    const retune = app.slice(app.indexOf('function retunePolling'), app.indexOf('async function boot'));
+
+    assert.match(retune, /model\.state === 'playing' \? 5000 : \(model\.state === 'paused' \? 10000 : 20000\)/);
+    assert.match(retune, /if \(wanted === pollIntervalMs && statusTimer\) return;/,
+        'the timer is only restarted when the cadence actually changes');
+    assert.match(retune, /stopPolling\(\);\s*\n\s*startPolling\(\);/);
+
+    const polling = app.slice(app.indexOf('function startPolling'), app.indexOf('// --- startup'));
+    assert.ok((polling.match(/setInterval\(/g) || []).length === 1,
+        'there is one status timer');
+    assert.match(polling, /if \(document\.hidden\) return;/);
+
+    // Coming back to the page asks immediately instead of waiting out the interval.
+    assert.match(app, /document\.addEventListener\('visibilitychange'/);
+});
+
+test('now playing is informational: it reuses the playback controls and grants nothing', () => {
+    const app = code('app.js');
+
+    // The card's controls are the ones the dashboard already had, by the same endpoint.
+    assert.match(app, /actionButton\('Stop', 'playback-stop'/);
+    assert.match(app, /actionButton\(model\.state === 'playing' \? 'Pause' : 'Resume', 'playback-pause'/);
+    assert.match(app, /'playback-stop': function \(\) \{ playback\('stop'/);
+
+    // Nothing here can start playback: there is no route to play a video, and no way to name one.
+    assert.doesNotMatch(app, /\/playback\/play|playback-start|startPlayback/);
+    assert.doesNotMatch(app, /apiCall\('POST', '\/playback\/(pause|stop|skip)', *\{/, 'the controls take no body');
+});
+
+test('the card gets its picture from the TV first, and never invents a fact about it', () => {
+    const app = code('app.js');
+    const artwork = app.slice(app.indexOf('function nowPlayingArtwork'), app.indexOf('function formatClock'));
+
+    assert.match(artwork, /state\.artwork\.videos\[playing\.videoId\]/,
+        'the TV\'s own artwork comes first');
+    // Read from the raw source: the comment-stripping helper eats everything after "//", which is
+    // exactly what a URL literal starts with.
+    assert.match(raw('app.js'), /i\.ytimg\.com\/vi\//, 'and YouTube\'s thumbnail for that id is the fallback');
+    assert.match(artwork, /\^\[A-Za-z0-9_-\]\{6,20\}\$/,
+        'only something shaped like a YouTube id is turned into a URL');
 });
 
 // --- W7's removal, guaranteed ---------------------------------------------------------------

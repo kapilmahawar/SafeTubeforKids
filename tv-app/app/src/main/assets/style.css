@@ -681,6 +681,107 @@ button {
     color: var(--danger);
 }
 
+/* --- what the TV is playing right now ------------------------------------------------------ */
+
+.now-playing {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.now-playing__label {
+    color: var(--text-dim);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.now-playing__row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.now-playing__art {
+    flex: 0 0 104px;
+    width: 104px;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    border-radius: var(--radius-sm);
+    background: var(--surface-3);
+}
+
+.now-playing__art--placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 22px;
+}
+
+.now-playing__body {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.now-playing__title {
+    font-weight: 700;
+    overflow-wrap: anywhere;
+}
+
+.now-playing__state {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.now-playing__icon {
+    color: var(--ok);
+    font-size: 11px;
+}
+
+.now-playing__time {
+    color: var(--text-dim);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+}
+
+.now-playing__progress {
+    height: 6px;
+}
+
+.now-playing__actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.now-playing--quiet {
+    gap: 4px;
+}
+
+.now-playing__quiet-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.now-playing--quiet .now-playing__state {
+    font-size: var(--fs-sm);
+}
+
 /* --- buttons ---------------------------------------------------------------------------- */
 
 .btn {
@@ -1286,6 +1387,11 @@ button {
 
     .tiles {
         grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    }
+
+    .now-playing__art {
+        flex-basis: 160px;
+        width: 160px;
     }
 
     .cards--shelf {
