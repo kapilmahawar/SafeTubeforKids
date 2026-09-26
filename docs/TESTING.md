@@ -46,12 +46,22 @@ cd tv-app && ./gradlew testDebugUnitTest --tests "*CatalogDatabaseTest.sync01*"
 # Instrumented suite (needs a device/emulator; not run in the catalog era)
 cd tv-app && ./gradlew connectedDebugAndroidTest
 
+# ...or just the one class that guards the dashboard assets
+cd tv-app && ./gradlew connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=tv.safetubeforkids.app.server.DashboardAssetTest
+
 # The dashboard JavaScript has no build step, so CI parses it
 node --check tv-app/app/src/main/assets/app.js
 
 # The dashboard's model and its guards, as plain Node tests (no browser, no dependencies)
 cd tv-app && node --test scripts/dashboard-*.test.js
 ```
+
+**`connectedDebugAndroidTest` uninstalls the app when it finishes.** That wipes the app's private
+data: `files/catalog.json`, and the Room database holding the approved sources, watch history, resume
+positions and time-limit configuration. It happened during W8 and cost a device's history. Do not
+run it as the last thing before a device demo, and if you do run it, re-approve the sources and
+publish the catalog again afterwards.
 
 The three dashboard suites are `dashboard-catalog-editor.test.js` (the model: every mutation and the
 save/reload conversation), `dashboard-catalog-import.test.js` (the import rules and the ordering they
@@ -90,6 +100,7 @@ Test count history (each measured, not estimated):
 | Phase 4 (`b8d4110`) | 542 | +36 UI projection and catalog home flows |
 | `3962d31` | 542 | re-run to confirm |
 | W7 redesign (`a6f51ba`) | 846 | +13: `GET /catalog/artwork` and `POST /catalog/refresh`, the resolver's single-video link, and the redesigned dashboard shell. Measured on `testDebugUnitTest` and `testReleaseUnitTest`, both 846/846, plus 117 dashboard JavaScript tests |
+| W8 polish | 846 | no Kotlin changed; the dashboard suites went 117 → 128 (`dashboard-catalog-ui.test.js` gained 11 guards for the loading state, the vocabulary, the reorder arrows, the remove copy, the error translator and the artwork fallback) |
 
 **205 of the 542 tests are catalog-era** (Phases 2–4) and live in 11 classes:
 
