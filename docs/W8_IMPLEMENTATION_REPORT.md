@@ -4,7 +4,8 @@
 W8_STATUS=COMPLETE
 
 BASELINE_COMMIT=953628e   (W7 complete, fork/main, working tree clean)
-FINAL_COMMIT=<see §7>     (this commit)
+FINAL_COMMIT=1820c0c      (the W8 implementation; the two docs commits that follow are fb58c90 and
+                           the report commit, ending at a7e62f1 + the commit that pins this line)
 BRANCH=main
 WORKTREE=fork/main, pushed to github.com/kapilmahawar/SafeTubeforKids
 
