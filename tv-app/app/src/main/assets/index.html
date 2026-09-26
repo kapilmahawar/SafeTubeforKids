@@ -1,329 +1,53 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="light">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SafeTube for Kids</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="SafeTube — choose what your child can watch on the TV.">
+    <title>SafeTube</title>
     <link rel="icon" href="favicon.svg">
+    <link rel="apple-touch-icon" href="favicon.svg">
     <link rel="stylesheet" href="style.css">
+    <!-- Loaded before the page paints, so the palette never flashes. -->
+    <script src="theme.js"></script>
 </head>
 <body>
-    <div id="app">
-        <div id="offline-banner" class="offline-banner hidden">
-            <span>TV is not connected. Make sure your TV is powered on, connected to WiFi, and Remote Access is enabled in the TV app Settings.</span>
+    <a class="skip-link" href="#view">Skip to the content</a>
+
+    <!-- The shell carries no screens. Every screen is rendered into #view by app.js, and the two
+         bars below are the only chrome there is: what your child can watch, and everything else. -->
+    <header class="topbar" id="topbar" hidden>
+        <button class="brand" type="button" data-action="go-library">
+            <span class="brand__mark" aria-hidden="true">●</span>
+            <span class="brand__name">SafeTube</span>
+        </button>
+
+        <div class="topbar__right">
+            <p class="pill" id="tv-state" role="status" aria-live="polite" hidden></p>
+            <button class="theme-toggle" type="button" id="theme-toggle" data-action="toggle-theme"
+                    aria-pressed="false">
+                <span class="theme-toggle__icon" id="theme-icon" aria-hidden="true">🌙</span>
+                <span class="theme-toggle__label" id="theme-label">Dark</span>
+            </button>
         </div>
+    </header>
 
-        <div id="version-banner" class="version-banner hidden">
-            <span>Your TV app needs updating. Please update SafeTube for Kids on your TV.</span>
-        </div>
+    <main class="view" id="view" tabindex="-1"></main>
 
-        <div id="auth-screen">
-            <h1><svg class="logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="24" fill="#22A559"/><path d="M20 33.4L12 25.4L14.8 22.6L20 27.8L33.2 14.6L36 17.4Z" fill="#fff"/></svg> SafeTube for Kids</h1>
-            <p>Enter the PIN shown on your TV</p>
-            <form id="pin-form">
-                <input type="text" id="pin-input" maxlength="6" pattern="[0-9]{6}" placeholder="000000" inputmode="numeric" autocomplete="off">
-                <button type="submit">Connect</button>
-            </form>
-            <p id="auth-error" class="error hidden"></p>
-        </div>
+    <nav class="tabbar" id="tabbar" aria-label="Sections" hidden>
+        <button class="tab" type="button" id="tab-library" data-action="go-library">
+            <span class="tab__icon" aria-hidden="true">🎬</span>
+            <span class="tab__label">Library</span>
+        </button>
+        <button class="tab" type="button" id="tab-settings" data-action="go-settings">
+            <span class="tab__icon" aria-hidden="true">⚙️</span>
+            <span class="tab__label">Settings</span>
+        </button>
+    </nav>
 
-        <div id="dashboard" class="hidden">
-            <header>
-                <h1><svg class="logo" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="24" r="24" fill="#22A559"/><path d="M20 33.4L12 25.4L14.8 22.6L20 27.8L33.2 14.6L36 17.4Z" fill="#fff"/></svg> SafeTube for Kids</h1>
-            </header>
+    <div class="toasts" id="toasts" aria-live="polite" aria-atomic="true"></div>
 
-            <div id="homescreen-banner" class="homescreen-banner hidden">
-                <span id="homescreen-text">Add SafeTube for Kids to your home screen for quick access.</span>
-                <div class="homescreen-actions">
-                    <button id="homescreen-add-btn" class="homescreen-btn">Add</button>
-                    <button id="homescreen-dismiss-btn" class="homescreen-dismiss">&times;</button>
-                </div>
-            </div>
-
-            <div id="now-playing" class="now-playing-card hidden">
-                <div class="np-header">
-                    <span class="badge">Now Playing</span>
-                    <span id="np-playlist-title" class="np-playlist"></span>
-                </div>
-                <img id="np-thumbnail" class="np-thumbnail" src="" alt="">
-                <div id="np-title" class="np-title"></div>
-                <div class="np-progress-container">
-                    <div class="np-progress-bar">
-                        <div id="np-progress-fill" class="np-progress-fill"></div>
-                    </div>
-                    <div class="np-time">
-                        <span id="np-elapsed">0:00</span>
-                        <span id="np-duration">0:00</span>
-                    </div>
-                </div>
-                <div class="np-controls">
-                    <button id="np-stop-btn" class="np-btn np-btn-stop">Stop</button>
-                    <button id="np-pause-btn" class="np-btn np-btn-pause">Pause</button>
-                    <button id="np-next-btn" class="np-btn np-btn-next">Next</button>
-                </div>
-            </div>
-
-            <section id="screen-time-section">
-                <h2>Screen Time</h2>
-                <div id="screen-time-card" class="screen-time-card">
-                    <div class="st-status-row">
-                        <span id="st-status-badge" class="badge st-badge-allowed">Allowed</span>
-                        <span id="st-lock-reason" class="st-lock-reason hidden"></span>
-                    </div>
-
-                    <div class="st-usage-row">
-                        <div class="st-usage-bar-container">
-                            <div id="st-usage-bar" class="st-usage-bar" style="width: 0%"></div>
-                        </div>
-                        <span id="st-usage-label" class="st-usage-label">0m / No limit</span>
-                    </div>
-
-                    <div id="st-time-request" class="st-time-request hidden">
-                        Your child is requesting more time.
-                        <div class="st-request-actions">
-                            <button onclick="grantBonusTime(15)" class="st-bonus-btn">+15 min</button>
-                            <button onclick="grantBonusTime(30)" class="st-bonus-btn">+30 min</button>
-                        </div>
-                    </div>
-
-                    <div class="st-controls">
-                        <button id="st-lock-btn" onclick="toggleLock()">Lock TV</button>
-                        <button id="st-bonus-15" class="st-bonus-btn" onclick="grantBonusTime(15)">+15 min</button>
-                        <button id="st-bonus-30" class="st-bonus-btn" onclick="grantBonusTime(30)">+30 min</button>
-                        <button id="st-edit-btn" class="st-edit-btn" onclick="openEditLimits()">Edit Limits</button>
-                    </div>
-                </div>
-
-                <!-- Edit Limits Modal -->
-                <div id="edit-limits-modal" class="modal-overlay hidden">
-                    <div class="modal-content">
-                        <h3>Edit Time Limits</h3>
-
-                        <div class="modal-field">
-                            <label>
-                                <input type="checkbox" id="edit-limit-enabled"> Daily limit
-                            </label>
-                            <div id="edit-limit-input-row" class="modal-input-row hidden">
-                                <input type="number" id="edit-limit-minutes" min="1" max="480" value="120" class="modal-number-input">
-                                <span>minutes</span>
-                            </div>
-                        </div>
-
-                        <div class="modal-field">
-                            <label>
-                                <input type="checkbox" id="edit-bedtime-enabled"> Bedtime
-                            </label>
-                            <div id="edit-bedtime-input-row" class="modal-input-row hidden">
-                                <input type="time" id="edit-bedtime-start" value="20:30" class="modal-time-input">
-                                <span>to</span>
-                                <input type="time" id="edit-bedtime-end" value="07:00" class="modal-time-input">
-                            </div>
-                        </div>
-
-                        <div class="modal-actions">
-                            <button onclick="saveLimits()" class="modal-save-btn">Save</button>
-                            <button onclick="closeEditLimits()" class="modal-cancel-btn">Cancel</button>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <section id="kiosk-section" class="hidden">
-                <h2>Apps & Kiosk</h2>
-                <div id="kiosk-card" class="kiosk-card">
-                    <div class="kiosk-status-row">
-                        <span id="kiosk-status-badge" class="badge st-badge-allowed">Off</span>
-                        <span id="kiosk-device-owner-status" class="kiosk-hint"></span>
-                    </div>
-                    <div id="kiosk-controls" class="kiosk-controls hidden">
-                        <button id="kiosk-toggle-btn" onclick="toggleKiosk()">Enable Kiosk Mode</button>
-                        <label class="kiosk-checkbox"><input type="checkbox" id="kiosk-enforce-time" onchange="updateKioskEnforceTime()"> Apply time limits to all apps</label>
-                    </div>
-                    <div id="kiosk-setup-hint" class="kiosk-setup-hint hidden">
-                        Not set up yet. Run <code>setup-kiosk.sh</code> on the TV after factory reset.
-                    </div>
-                </div>
-                <div id="apps-list-card" class="apps-list-card hidden">
-                    <h3>Installed Apps</h3>
-                    <ul id="apps-list" class="apps-list"></ul>
-                </div>
-            </section>
-
-            <section id="playlists-section">
-                <h2>Content Sources</h2>
-                <form id="playlist-form">
-                    <input type="url" id="playlist-url" placeholder="Paste any YouTube URL (video, playlist, or channel)" required>
-                    <button type="submit">Add</button>
-                </form>
-                <p id="playlist-error" class="error hidden"></p>
-                <div class="playlist-transfer">
-                <button type="button" id="export-sources">Export list</button>
-                <label for="import-sources" class="transfer-import">Import list</label>
-                <input type="file" id="import-sources" accept="application/json,.json" class="hidden">
-            </div>
-            <p id="transfer-status" class="hidden"></p>
-            <ul id="playlist-list"></ul>
-            </section>
-
-            <section id="catalog-section">
-                <h2>Catalog</h2>
-                <div class="catalog-card">
-                    <div class="catalog-header">
-                        <span id="catalog-meta" class="catalog-meta">Loading…</span>
-                        <span id="catalog-status" class="catalog-status"></span>
-                        <button type="button" id="catalog-reload-btn" class="btn-small" onclick="reloadCatalogFromServer()">Reload</button>
-                        <button type="button" id="catalog-save-btn" class="btn-small btn-primary" onclick="saveCatalog()">Save</button>
-                    </div>
-
-                    <p id="catalog-unsaved" class="catalog-unsaved hidden">
-                        Unsaved changes — they exist only in this browser. Press Save to publish them; a page
-                        refresh would discard them.
-                    </p>
-
-                    <div id="catalog-conflict" class="catalog-conflict hidden">
-                        <p id="catalog-conflict-text"></p>
-                        <div class="catalog-conflict-actions">
-                            <button type="button" onclick="reloadCatalogFromServer()">Reload server version</button>
-                            <button type="button" onclick="keepEditing()">Keep editing</button>
-                        </div>
-                        <p class="catalog-hint">
-                            Keeping your edits does not publish them: saving stays disabled until you reload,
-                            because they were made against a catalog that has since changed.
-                        </p>
-                    </div>
-
-                    <div class="catalog-editor">
-                        <div id="catalog-tree" class="catalog-tree-container"></div>
-                        <div class="catalog-panel">
-                            <h3>Selected node</h3>
-                            <p id="catalog-panel-empty" class="catalog-hint">Select a node in the tree to edit it.</p>
-                            <div id="catalog-panel" class="hidden">
-                                <p class="catalog-panel-meta">
-                                    <span id="panel-type" class="catalog-node-type"></span>
-                                    <code id="panel-id" class="catalog-node-id"></code>
-                                    <span id="panel-detail" class="catalog-hint"></span>
-                                </p>
-                                <label class="catalog-field">
-                                    <span>Name</span>
-                                    <input type="text" id="panel-title" maxlength="120">
-                                </label>
-                                <p class="catalog-panel-row">
-                                    <button type="button" onclick="renameSelected()">Rename</button>
-                                    <span id="panel-rename-hint" class="catalog-hint"></span>
-                                </p>
-                                <p class="catalog-panel-row">
-                                    <label class="catalog-checkbox">
-                                        <input type="checkbox" id="panel-enabled" onchange="toggleSelectedEnabled()">
-                                        Shown to the child
-                                    </label>
-                                </p>
-                                <div id="panel-thumbnail" class="catalog-thumbnail hidden">
-                                    <label class="catalog-field">
-                                        <span>Picture</span>
-                                        <select id="panel-thumbnail-mode" onchange="changeThumbnailMode()">
-                                            <option value="AUTO">Automatic — the first video inside</option>
-                                            <option value="VIDEO">A video I choose</option>
-                                        </select>
-                                    </label>
-                                    <label class="catalog-field" id="panel-thumbnail-video-field">
-                                        <span>Video for the picture</span>
-                                        <select id="panel-thumbnail-video" onchange="changeThumbnailVideo()"></select>
-                                    </label>
-                                    <p id="panel-thumbnail-hint" class="catalog-hint"></p>
-                                </div>
-                                <p class="catalog-panel-row">
-                                    <button type="button" onclick="moveSelectedUp()">Move Up</button>
-                                    <button type="button" onclick="moveSelectedDown()">Move Down</button>
-                                </p>
-                                <p class="catalog-panel-row">
-                                    <label class="catalog-field">
-                                        <span>Move to</span>
-                                        <select id="panel-parent"></select>
-                                    </label>
-                                    <button type="button" onclick="moveSelectedTo()">Move</button>
-                                </p>
-                                <p class="catalog-panel-row">
-                                    <button type="button" class="btn-danger" onclick="deleteSelected()">Delete</button>
-                                    <span class="catalog-hint">Deleting a shelf or subcategory deletes everything inside it.</span>
-                                </p>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="catalog-add">
-                        <h3>Add</h3>
-                        <div class="catalog-add-row">
-                            <select id="add-kind" onchange="refreshAddForm()">
-                                <option value="CATEGORY">Category</option>
-                                <option value="SUBCATEGORY">Subcategory</option>
-                                <option value="VIDEO">Video</option>
-                            </select>
-                            <select id="add-parent"></select>
-                            <input type="text" id="add-title" placeholder="Name shown to your child" maxlength="120">
-                            <input type="text" id="add-video" placeholder="YouTube video URL or id" maxlength="200">
-                            <button type="button" onclick="addNode()">Add</button>
-                        </div>
-                        <p id="add-hint" class="catalog-hint"></p>
-                    </div>
-
-                    <div class="catalog-add">
-                        <h3>Import a YouTube playlist</h3>
-                        <div class="catalog-add-row">
-                            <input type="text" id="import-url" placeholder="Playlist URL or id (PL…)" maxlength="300">
-                            <select id="import-parent"></select>
-                            <button type="button" id="import-btn" onclick="importPlaylistNow()">Import</button>
-                        </div>
-                        <p id="import-hint" class="catalog-hint"></p>
-                        <p id="import-status" class="catalog-import-status hidden"></p>
-                    </div>
-
-                    <p id="catalog-error" class="error hidden"></p>
-                </div>
-            </section>
-
-            <section id="stats-section">
-                <h2>Today's Activity</h2>
-                <div class="stats-grid">
-                    <div class="stat-card">
-                        <span class="stat-value" id="stat-videos">0</span>
-                        <span class="stat-label">Videos</span>
-                    </div>
-                    <div class="stat-card">
-                        <span class="stat-value" id="stat-time">0m</span>
-                        <span class="stat-label">Watch Time</span>
-                    </div>
-                </div>
-            </section>
-
-            <section id="recent-section">
-                <h2>Recent Activity</h2>
-                <ul id="recent-list"></ul>
-            </section>
-
-            <section id="crash-section" class="hidden">
-                <h2>Last Crash</h2>
-                <pre id="crash-log" class="crash-log"></pre>
-                <button id="copy-crash" class="btn-small">Copy to clipboard</button>
-            </section>
-
-            <footer class="dashboard-footer">
-                <p class="version-line">
-                    <span id="footer-version"></span>
-                    <span id="update-badge" class="update-badge hidden">Update available</span>
-                </p>
-                <p><a id="feedback-link" href="#">Report a problem</a></p>
-                <p class="charityware-text">SafeTube for Kids is free to use. </p>
-            </footer>
-
-            <footer id="local-notice" class="local-notice">
-                <p>This dashboard is local-only (same WiFi). To access from anywhere, enable Remote Access in the TV app Settings.</p>
-            </footer>
-        </div>
-    </div>
-    <script src="catalog-tree.js"></script>
     <script src="catalog-editor.js"></script>
     <script src="app.js"></script>
 </body>

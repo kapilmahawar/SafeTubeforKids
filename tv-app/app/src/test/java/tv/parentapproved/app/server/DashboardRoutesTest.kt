@@ -75,16 +75,15 @@ class DashboardRoutesTest {
     }
 
     @Test
-    fun rootRelative_catalogTreeJs_routeExists() = testApp {
-        // The read-only catalog tree is a separate script so that it can be a pure function of the
-        // catalog document - no DOM, no fetch, no storage - and therefore testable outside a browser.
-        val response = client.get("/catalog-tree.js")
+    fun rootRelative_themeJs_routeExists() = testApp {
+        // The theme is set by a script the page loads from its head, before the first paint.
+        val response = client.get("/theme.js")
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
     @Test
-    fun legacy_assetsCatalogTreeJs_routeExists() = testApp {
-        val response = client.get("/assets/catalog-tree.js")
+    fun legacy_assetsThemeJs_routeExists() = testApp {
+        val response = client.get("/assets/theme.js")
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
@@ -132,6 +131,14 @@ class DashboardRoutesTest {
     fun unknownAsset_returns404() = testApp {
         val response = client.get("/assets/unknown.txt")
         assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun removedTreeScript_isNotRoutedAnyMore() = testApp {
+        // The hierarchical tree renderer was replaced by the library screens, and its file is gone:
+        // leaving the route registered would serve a 404 for a name no page uses.
+        assertEquals(HttpStatusCode.NotFound, client.get("/catalog-tree.js").status)
+        assertEquals(HttpStatusCode.NotFound, client.get("/assets/catalog-tree.js").status)
     }
 
     // --- Only known asset types are routed ---

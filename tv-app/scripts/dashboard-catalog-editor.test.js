@@ -1111,21 +1111,18 @@ test('no node ever carries a picture URL, however the picture was chosen', () =>
         'the editor must not synthesise a thumbnail URL');
 });
 
-test('the page offers exactly two pictures, and the reserved mode is nowhere in the editor', () => {
-    const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
+test('the page offers exactly two kinds of picture, and the reserved mode is nowhere in the editor', () => {
     const app = code('app.js');
+    const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
 
-    const modes = html.match(/<select id="panel-thumbnail-mode"[\s\S]*?<\/select>/);
-    assert.ok(modes, 'the panel must offer a picture for a container');
-    assert.deepEqual([...modes[0].matchAll(/value="([^"]+)"/g)].map((m) => m[1]), ['AUTO', 'VIDEO'],
-        'CUSTOM is reserved and is deliberately not offered');
-
-    assert.ok(html.includes('id="panel-thumbnail-video"'), 'the videos inside must be choosable');
+    // A shelf or folder either lets the app choose, or names a video that is inside it. Those are the
+    // only two answers the page can produce, and the reserved third one appears nowhere.
+    assert.match(app, /CatalogEditor\.descendantVideos\(/);
+    assert.match(app, /CatalogEditor\.setThumbnail\(/);
+    assert.match(app, /mode: 'AUTO'/);
+    assert.match(app, /mode: 'VIDEO', videoNodeId: chosen/);
     assert.ok(!/CUSTOM/.test(app), 'app.js must never write the reserved mode either');
-
-    // The two controls are wired to the model, not to a second way of saving anything.
-    assert.match(app, /window\.changeThumbnailMode\s*=/);
-    assert.match(app, /window\.changeThumbnailVideo\s*=/);
+    assert.ok(!/CUSTOM/.test(html), 'and the page must not name it');
 });
 
 test('a picture travels through the catalog document, so the editor opens no endpoint of its own', () => {
@@ -1170,23 +1167,46 @@ function code(file) {
         .join('\n');
 }
 
-test('every control in the page is wired to a function the script exposes', () => {
+test('every control goes through the action table, and the page carries no inline handler', () => {
     const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
     const app = code('app.js');
 
-    const handlers = [...html.matchAll(/on(?:click|change)="(\w+)\(/g)].map((m) => m[1]);
-    assert.ok(handlers.length > 0, 'the editor must have controls');
+    // The rewritten page has no inline handlers: the server's content policy no longer exempts them,
+    // so a control that is not wired in app.js would simply do nothing.
+    assert.doesNotMatch(html, /\son[a-z]+\s*=/i, 'index.html must not carry an inline handler');
+    assert.doesNotMatch(app, /window\.[a-zA-Z]+\s*=\s*function/, 'app.js must not publish globals for markup');
 
-    [...new Set(handlers)].forEach((name) => {
-        // app.js is an IIFE, so an inline handler only works if the script put it on `window`.
-        assert.match(app, new RegExp('window\\.' + name + '\\s*='),
-            'index.html calls ' + name + '() but app.js never exposes it');
+    const defined = new Set([...app.matchAll(/^\s*'([a-z-]+)':\s*function/gm)].map((m) => m[1]));
+    assert.ok(defined.size > 10, 'the action table is where every control is wired');
+
+    // A control names its action either in the page or through the helper that builds every button
+    // inside a screen, so both are collected. The helper's calls are read one at a time, because an
+    // argument may itself be a call with a string in it.
+    const used = [...html.matchAll(/data-action="([a-z-]+)"/g), ...app.matchAll(/data-action="([a-z-]+)"/g)]
+        .map((m) => m[1]);
+
+    for (let at = app.indexOf('actionButton('); at !== -1; at = app.indexOf('actionButton(', at + 1)) {
+        const call = app.slice(at, at + 240);
+        const named = call.match(/^actionButton\([\s\S]*?,\s*'([a-z][a-z-]+)',\s*\{/);
+        if (named) used.push(named[1]);
+    }
+
+    assert.ok(used.length > 10, 'the page still offers controls');
+
+    [...new Set(used)].forEach((name) => {
+        assert.ok(defined.has(name), 'a control asks for ' + name + ', which the action table does not have');
     });
 
-    // The editor's own controls are all here, so a missing one is a missing feature, not a typo.
-    ['addNode', 'renameSelected', 'toggleSelectedEnabled', 'moveSelectedUp', 'moveSelectedDown',
-        'moveSelectedTo', 'deleteSelected', 'saveCatalog', 'reloadCatalogFromServer', 'keepEditing']
-        .forEach((required) => assert.ok(handlers.includes(required), 'the page must offer ' + required));
+    [...defined].forEach((name) => {
+        assert.ok(used.includes(name), 'the action table wires ' + name + ', which nothing offers');
+    });
+
+    // Every editing capability the model has is still reachable from the page: a redesign may move a
+    // control, never lose one.
+    ['addCategory', 'addSubcategory', 'addVideo', 'rename', 'setEnabled', 'remove', 'moveUp',
+        'moveDown', 'moveTo', 'setThumbnail', 'importPlaylist', 'save', 'reload', 'problems']
+        .forEach((name) => assert.match(app, new RegExp('CatalogEditor\\.' + name + '\\('),
+            'the page must still be able to ' + name));
 });
 
 test('every element the dashboard looks up exists in the page', () => {
@@ -1194,9 +1214,16 @@ test('every element the dashboard looks up exists in the page', () => {
     const app = code('app.js');
 
     const ids = [...new Set([...app.matchAll(/getElementById\('([^']+)'\)/g)].map((m) => m[1]))];
-    assert.ok(ids.length > 10);
+    assert.ok(ids.length >= 8, 'the shell is what the script looks up by name');
 
     ids.forEach((id) => {
         assert.ok(html.includes('id="' + id + '"'), 'app.js looks up #' + id + ', which the page does not have');
+    });
+
+    // The reverse holds too: every id the page carries is one the script knows about, so the shell
+    // has no decoration the script cannot reach.
+    const declared = [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+    declared.forEach((id) => {
+        assert.ok(ids.includes(id), 'index.html carries #' + id + ', which nothing in app.js uses');
     });
 });

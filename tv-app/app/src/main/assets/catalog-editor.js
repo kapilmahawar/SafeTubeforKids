@@ -1,9 +1,9 @@
 /*
  * The parent's catalog editor: the working copy and every mutation a parent can make to it.
  *
- * This file is the *model*, and like `catalog-tree.js` it is deliberately free of the DOM, of fetch
- * and of browser storage: every function here takes a session and returns a new one, so every
- * mutation is testable without a browser and the view can only ever be a view.
+ * This file is the *model*: it is deliberately free of the DOM, of fetch and of browser storage, and
+ * every function here takes a session and returns a new one, so every mutation is testable without a
+ * browser and the view - `app.js` - can only ever be a view.
  *
  * ### What a session is
  *

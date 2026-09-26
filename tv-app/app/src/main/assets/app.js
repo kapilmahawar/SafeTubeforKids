@@ -1,1559 +1,2595 @@
-(function() {
+/*
+ * SafeTube's parent dashboard.
+ *
+ * This file is the only thing that talks to the server. It is written for one reader: a parent
+ * holding a phone, standing next to the TV, who wants to change what their child can watch. Every
+ * screen answers one of four questions - what is in the library, what is inside this shelf or
+ * folder, how do I add something, and where is everything else - and the words are the parent's
+ * words, not the project's: a "shelf" is a row on the TV, a "folder" is a card that opens a list, a
+ * "video" is a video. Nothing on screen says catalog, node, position, schema or playlist id.
+ *
+ * Three rules shape the code below.
+ *
+ * 1. **The library is the server's document, never a local copy.** It is read from `GET /catalog`
+ *    and written back with `PUT /catalog` carrying the version it was read from. Nothing about it is
+ *    stored in the browser: the only three things in `localStorage` are the session token, the theme
+ *    the parent chose, and whether the "add to home screen" hint was dismissed.
+ * 2. **Every change is published immediately.** There is no Save button and no half-saved state: a
+ *    rename, a reorder, an add and a delete each become one atomic document write, and a write the
+ *    server refuses leaves the library exactly as it was.
+ * 3. **Being in the library is not permission to watch.** A video the parent curates still cannot
+ *    play until its source is allowed, and the screens say so in those words rather than leaving the
+ *    parent to discover it on the TV.
+ *
+ * The pure model - every mutation, and the save/reload conversation - lives in `catalog-editor.js`
+ * and is deliberately free of DOM, network and storage. This file is the view: it renders the model,
+ * asks it to change, and publishes the result. Every control goes through one delegated click
+ * listener and one action table, so the page carries no inline handlers at all.
+ */
+(function () {
     'use strict';
 
-    // --- Environment detection ---
-    // On relay: URL is /tv/{tvId}/... → tvId is set, API_BASE is /tv/{tvId}/api
-    // On local: URL is / → tvId is null, API_BASE is ''
+    // --- where this page is running ----------------------------------------------------------
+    //
+    // The same bundle is served by the TV itself (`http://<tv>:8080/`) and by the relay
+    // (`https://relay.parentapproved.tv/tv/<id>/`), and the two need different API prefixes.
+
     function extractTvId() {
         var parts = window.location.pathname.split('/');
-        if (parts.length >= 3 && parts[1] === 'tv') {
-            return parts[2];
-        }
+        if (parts.length >= 3 && parts[1] === 'tv') return parts[2];
         return null;
     }
 
     function extractApiBase() {
-        var tvId = extractTvId();
-        if (!tvId) return '';
-        return '/tv/' + tvId + '/api';
+        var id = extractTvId();
+        return id ? '/tv/' + id + '/api' : '';
     }
 
     function extractPin() {
-        var params = new URLSearchParams(window.location.search);
-        return params.get('pin');
+        return new URLSearchParams(window.location.search).get('pin');
     }
 
     var tvId = extractTvId();
-    var isRelay = !!tvId;
     var API_BASE = extractApiBase();
-    var STORAGE_KEY = tvId ? 'kw_token_' + tvId : 'kw_token';
-    var sessionToken = localStorage.getItem(STORAGE_KEY);
-    var statusInterval = null;
-    var isCurrentlyPlaying = false;
-    var offlineRetryInterval = null;
-    var tvIsOffline = false;
+    var TOKEN_KEY = tvId ? 'kw_token_' + tvId : 'kw_token';
+    var HOMESCREEN_KEY = tvId ? 'kw_homescreen_dismissed_' + tvId : 'kw_homescreen_dismissed';
+    var THEME_KEY = 'safetube.theme';
+    var PROTOCOL_VERSION = 1;
 
-    // Export functions for testing
-    if (typeof window !== 'undefined') {
-        window._kw = {
-            extractTvId: extractTvId,
-            extractApiBase: extractApiBase,
-            extractPin: extractPin
-        };
+    // --- the shell ---------------------------------------------------------------------------
+    //
+    // Only elements that exist in index.html are looked up here. Every other element is created by
+    // the screen that needs it, which is what keeps the page and the script honestly in step.
+
+    var view = document.getElementById('view');
+    var topbar = document.getElementById('topbar');
+    var tabbar = document.getElementById('tabbar');
+    var tvState = document.getElementById('tv-state');
+    var themeToggle = document.getElementById('theme-toggle');
+    var themeIcon = document.getElementById('theme-icon');
+    var themeLabel = document.getElementById('theme-label');
+    var tabLibrary = document.getElementById('tab-library');
+    var tabSettings = document.getElementById('tab-settings');
+    var toasts = document.getElementById('toasts');
+
+    // --- state -------------------------------------------------------------------------------
+    //
+    // Everything the screens render from. `session` is not a second copy of the library: it is the
+    // working copy the editor handed back, replaced by the server's document after every write.
+
+    var state = {
+        token: readToken(),
+        session: null,
+        artwork: { videos: {}, containers: {}, installedCatalogVersion: 0 },
+        playlists: [],
+        limits: null,
+        stats: null,
+        recent: [],
+        crash: null,
+        status: null,
+        reachable: null,
+        versionMismatch: false,
+        publishing: false,
+        route: { name: 'library', id: null }
+    };
+
+    // The inputs of whichever screen is on screen, so the handlers can read them without looking
+    // anything up by id.
+    var fields = {};
+
+    var deferredInstallPrompt = null;
+    var statusTimer = null;
+    var toastTimer = null;
+    var saving = false;
+
+    // --- tiny DOM helpers --------------------------------------------------------------------
+
+    /**
+     * Builds an element: `h('div', { class: 'row' }, [child, 'text'])`.
+     *
+     * Text goes in as text and attributes as attributes, never as HTML, so a name the parent typed
+     * can never become markup.
+     */
+    function h(tag, attrs, children) {
+        var node = document.createElement(tag);
+        var settings = attrs || {};
+
+        Object.keys(settings).forEach(function (key) {
+            var value = settings[key];
+            if (value === null || value === undefined || value === false) return;
+            if (key === 'text') node.textContent = String(value);
+            else if (key === 'class') node.className = String(value);
+            else if (key === 'style') node.setAttribute('style', String(value));
+            else node.setAttribute(key, value === true ? '' : String(value));
+        });
+
+        (children || []).forEach(function (child) {
+            if (child === null || child === undefined || child === false) return;
+            node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+        });
+
+        return node;
     }
 
-    // DOM refs
-    var authScreen = document.getElementById('auth-screen');
-    var dashboard = document.getElementById('dashboard');
-    var pinForm = document.getElementById('pin-form');
-    var pinInput = document.getElementById('pin-input');
-    var authError = document.getElementById('auth-error');
-    var playlistForm = document.getElementById('playlist-form');
-    var playlistUrl = document.getElementById('playlist-url');
-    var playlistError = document.getElementById('playlist-error');
-    var playlistList = document.getElementById('playlist-list');
-    var recentList = document.getElementById('recent-list');
-    var nowPlaying = document.getElementById('now-playing');
-    var npTitle = document.getElementById('np-title');
-    var npPlaylistTitle = document.getElementById('np-playlist-title');
-    var npElapsed = document.getElementById('np-elapsed');
-    var npDuration = document.getElementById('np-duration');
-    var npProgressFill = document.getElementById('np-progress-fill');
-    var npStopBtn = document.getElementById('np-stop-btn');
-    var npPauseBtn = document.getElementById('np-pause-btn');
-    var npNextBtn = document.getElementById('np-next-btn');
-    var statVideos = document.getElementById('stat-videos');
-    var statTime = document.getElementById('stat-time');
-    var offlineBanner = document.getElementById('offline-banner');
-    var versionBanner = document.getElementById('version-banner');
-    var localNotice = document.getElementById('local-notice');
-
-    // Hide local-notice on relay
-    if (isRelay && localNotice) {
-        localNotice.classList.add('hidden');
+    function clear(node) {
+        while (node.firstChild) node.removeChild(node.firstChild);
+        return node;
     }
+
+    function actionButton(label, action, attrs, extraClass) {
+        var settings = { type: 'button', 'data-action': action, class: ('btn ' + (extraClass || '')).trim() };
+        Object.keys(attrs || {}).forEach(function (key) { settings[key] = attrs[key]; });
+        return h('button', settings, [label]);
+    }
+
+    function withListener(element, type, handler) {
+        element.addEventListener(type, handler);
+        return element;
+    }
+
+    // --- talking to the server ---------------------------------------------------------------
 
     function authHeaders() {
-        return { 'Authorization': 'Bearer ' + sessionToken, 'Content-Type': 'application/json' };
+        var headers = { 'Content-Type': 'application/json' };
+        if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+        return headers;
     }
 
-    // --- Offline handling (relay only, but harmless on local) ---
-    function showOffline() {
-        if (offlineBanner) offlineBanner.classList.remove('hidden');
-        tvIsOffline = true;
-        if (!offlineRetryInterval) {
-            offlineRetryInterval = setInterval(function() {
-                checkOnline();
-            }, 30000);
-        }
-    }
-
-    function hideOffline() {
-        if (offlineBanner) offlineBanner.classList.add('hidden');
-        tvIsOffline = false;
-        if (offlineRetryInterval) {
-            clearInterval(offlineRetryInterval);
-            offlineRetryInterval = null;
-        }
-    }
-
-    function showVersionMismatch() {
-        if (versionBanner) versionBanner.classList.remove('hidden');
-    }
-
-    async function checkOnline() {
+    function readToken() {
         try {
-            var resp = await fetch(API_BASE + '/status', { headers: authHeaders() });
-            if (resp.status !== 503) {
-                hideOffline();
-                loadDashboard();
-            }
-        } catch (err) {
-            // Still offline
+            return window.localStorage.getItem(TOKEN_KEY);
+        } catch (error) {
+            return null;
         }
     }
 
-    // --- API call with offline + auth handling ---
+    function rememberToken(token) {
+        state.token = token;
+        try {
+            window.localStorage.setItem(TOKEN_KEY, token);
+        } catch (error) {
+            // A browser that refuses storage still works for this visit.
+        }
+    }
+
+    /**
+     * One request, in the shape the rest of the file expects: `{ status, data }`.
+     *
+     * A 401 means the TV forgot this browser (it was restarted, or the PIN changed), so the parent
+     * is sent back to the connect screen rather than left with a page that silently does nothing. A
+     * 503 is the TV's own "not ready" answer, and a thrown fetch is the phone having lost the TV -
+     * both are reported as a connection problem, which is something the parent can act on.
+     */
     async function apiCall(method, path, body) {
-        var opts = { method: method, headers: authHeaders() };
-        if (body) opts.body = JSON.stringify(body);
+        var options = { method: method, headers: authHeaders() };
+        if (body !== undefined && body !== null) options.body = JSON.stringify(body);
+
         try {
-            var resp = await fetch(API_BASE + path, opts);
-            if (resp.status === 503) {
-                showOffline();
-                return { status: 503, data: { error: 'TV is offline' } };
+            var response = await fetch(API_BASE + path, options);
+            if (response.status === 503) {
+                return { status: 503, data: { error: 'The TV is busy or offline' } };
             }
-            if (tvIsOffline) hideOffline();
-            if (resp.status === 401) {
-                logout();
-                return { status: 401, data: { error: 'Session expired' } };
+            if (response.status === 401) {
+                forgetSession();
+                return { status: 401, data: { error: 'This browser is no longer connected' } };
             }
-            var data = await resp.json();
-            return { status: resp.status, data: data };
-        } catch (err) {
-            if (isRelay) {
-                showOffline();
-                return { status: 503, data: { error: 'Connection failed' } };
+
+            var text = await response.text();
+            var data = {};
+            try {
+                data = text ? JSON.parse(text) : {};
+            } catch (error) {
+                data = { error: 'The TV sent something this page could not read' };
             }
-            return { status: 0, data: { error: 'Connection failed' } };
+            return { status: response.status, data: data };
+        } catch (error) {
+            return { status: 0, data: { error: 'Could not reach the TV. Is it on the same wifi?' } };
         }
     }
 
-    function formatTime(totalSec) {
-        var mins = Math.floor(totalSec / 60);
-        var secs = totalSec % 60;
-        return mins + ':' + (secs < 10 ? '0' : '') + secs;
-    }
-
-    // --- Token refresh ---
-    async function refreshToken() {
-        if (!sessionToken) return false;
+    async function connect(pin) {
         try {
-            var resp = await fetch(API_BASE + '/auth/refresh', {
-                method: 'POST',
-                headers: authHeaders()
-            });
-            if (resp.status === 503) {
-                showOffline();
-                return true; // Token might still be valid, TV just offline
-            }
-            if (resp.ok) {
-                var data = await resp.json();
-                if (data.token) {
-                    sessionToken = data.token;
-                    localStorage.setItem(STORAGE_KEY, sessionToken);
-                    return true;
-                }
-            }
-            return false;
-        } catch (err) {
-            if (isRelay) {
-                showOffline();
-                return true; // Network error, token might still be valid
-            }
-            return false;
-        }
-    }
-
-    // --- Version check ---
-    async function checkVersion() {
-        try {
-            var result = await apiCall('GET', '/status');
-            if (result.status === 200 && result.data.protocolVersion) {
-                if (result.data.protocolVersion !== 1) {
-                    showVersionMismatch();
-                }
-            }
-        } catch (err) {
-            // Version check is best-effort
-        }
-    }
-
-    // --- Auth ---
-    async function submitPin(pin) {
-        if (!pin) return;
-        authError.classList.add('hidden');
-
-        try {
-            var resp = await fetch(API_BASE + '/auth', {
+            var response = await fetch(API_BASE + '/auth', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ pin: pin })
             });
 
-            if (resp.status === 503) {
-                showOffline();
-                authError.textContent = 'TV is offline';
-                authError.classList.remove('hidden');
-                return;
+            var data = {};
+            try {
+                data = await response.json();
+            } catch (error) {
+                data = {};
             }
 
-            var data = await resp.json();
-
-            if (resp.ok && data.token) {
-                sessionToken = data.token;
-                localStorage.setItem(STORAGE_KEY, sessionToken);
-                // Strip secret and pin from URL for security
+            if (response.ok && data.token) {
+                rememberToken(data.token);
+                // The PIN is a secret: it does not stay in the address bar or in history.
                 if (window.history && window.history.replaceState) {
-                    var cleanUrl = window.location.pathname;
-                    window.history.replaceState({}, document.title, cleanUrl);
+                    window.history.replaceState({}, document.title,
+                        window.location.pathname + window.location.hash);
                 }
-                authScreen.classList.add('hidden');
-                dashboard.classList.remove('hidden');
-                loadDashboard();
-            } else {
-                authError.textContent = data.error || 'Invalid PIN';
-                authError.classList.remove('hidden');
+                return { ok: true };
             }
-        } catch (err) {
-            authError.textContent = 'Connection failed';
-            authError.classList.remove('hidden');
+
+            if (response.status === 429) return { ok: false, reason: 'Too many tries. Wait a minute and try again.' };
+            if (response.status === 503) return { ok: false, reason: 'The TV is busy or offline' };
+            return { ok: false, reason: data.error || 'That PIN was not right' };
+        } catch (error) {
+            return { ok: false, reason: 'Could not reach the TV. Is it on the same wifi?' };
         }
     }
 
-    pinForm.addEventListener('submit', function(e) {
-        e.preventDefault();
-        submitPin(pinInput.value.trim());
-    });
-
-    // --- Playlists ---
-    playlistForm.addEventListener('submit', async function(e) {
-        e.preventDefault();
-        playlistError.classList.add('hidden');
-        var url = playlistUrl.value.trim();
-        if (!url) return;
-
-        try {
-            var result = await apiCall('POST', '/playlists', { url: url });
-            if (result.status === 201) {
-                playlistUrl.value = '';
-                loadPlaylists();
-            } else {
-                playlistError.textContent = result.data.error || 'Failed to add playlist';
-                playlistError.classList.remove('hidden');
-            }
-        } catch (err) {
-            playlistError.textContent = 'Connection failed';
-            playlistError.classList.remove('hidden');
+    async function refreshSession() {
+        if (!state.token) return false;
+        var result = await apiCall('POST', '/auth/refresh');
+        if (result.status === 200 && result.data && result.data.token) {
+            rememberToken(result.data.token);
+            return true;
         }
-    });
-
-    async function deletePlaylist(id) {
-        if (!confirm('Remove this playlist?')) return;
-        await apiCall('DELETE', '/playlists/' + id);
-        loadPlaylists();
+        // Being offline is not a reason to throw the parent out; an explicit 401 already forgot the
+        // token inside `apiCall`.
+        return result.status === 0 || result.status === 503;
     }
 
-    async function loadPlaylists() {
+    function forgetSession() {
+        state.token = null;
+        state.session = null;
+        state.status = null;
+        state.reachable = null;
         try {
-            var result = await apiCall('GET', '/playlists');
-            if (result.status === 200) {
-                // Which sources are approved. The catalog editor reports this; it never changes it -
-                // importing a playlist into the catalog must not approve anything.
-                approvedSourceIds = result.data.map(function (pl) { return pl.sourceId; });
-                playlistList.innerHTML = '';
-                result.data.forEach(function(pl) {
-                    var li = document.createElement('li');
-                    var label = escapeHtml(pl.displayName);
-                    if (pl.videoCount > 0) label += ' \u2014 ' + pl.videoCount + ' videos';
-                    li.innerHTML = '<span>' + label + '</span>';
-                    var btn = document.createElement('button');
-                    btn.className = 'delete-btn';
-                    btn.textContent = 'Remove';
-                    btn.onclick = function() { deletePlaylist(pl.id); };
-                    li.appendChild(btn);
-                    playlistList.appendChild(li);
-                });
-            }
-        } catch (err) {
-            console.error('Load playlists failed:', err);
+            window.localStorage.removeItem(TOKEN_KEY);
+        } catch (error) {
+            // Nothing to clean up.
         }
+        stopPolling();
+        render();
     }
 
-    // --- Export / import the approved library ---
-    // Export downloads what the TV currently has approved; import replays such a file onto this
-    // TV. The file is posted verbatim (not re-encoded) because the server parses the payload it
-    // is given and reports per-source outcomes.
-    var exportButton = document.getElementById('export-sources');
-    var importInput = document.getElementById('import-sources');
-    var transferStatus = document.getElementById('transfer-status');
+    // --- the theme ---------------------------------------------------------------------------
 
-    function showTransfer(message, isError) {
-        transferStatus.textContent = message;
-        transferStatus.classList.remove('hidden');
-        transferStatus.style.color = isError ? '#c0392b' : '';
+    function currentTheme() {
+        return document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
     }
 
-    exportButton.addEventListener('click', async function() {
-        try {
-            var result = await apiCall('GET', '/sources/export');
-            if (result.status !== 200) {
-                showTransfer(result.data.error || 'Export failed', true);
-                return;
+    function applyTheme(theme, remember) {
+        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.setAttribute('data-theme-source', remember ? 'chosen' : 'system');
+        if (remember) {
+            try {
+                window.localStorage.setItem(THEME_KEY, theme);
+            } catch (error) {
+                // The choice simply will not outlive this visit.
             }
-            var blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
-            var url = URL.createObjectURL(blob);
-            var link = document.createElement('a');
-            link.href = url;
-            link.download = 'safetube-for-kids-sources.json';
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            URL.revokeObjectURL(url);
-            showTransfer('Exported ' + result.data.sources.length + ' source(s).', false);
-        } catch (err) {
-            showTransfer('Export failed', true);
         }
-    });
-
-    importInput.addEventListener('change', async function() {
-        var file = importInput.files && importInput.files[0];
-        if (!file) return;
-        try {
-            var text = await file.text();
-            var resp = await fetch(API_BASE + '/sources/import', {
-                method: 'POST',
-                headers: Object.assign({ 'Content-Type': 'application/json' }, authHeaders()),
-                body: text
-            });
-            var summary = await resp.json();
-            if (resp.status !== 200) {
-                showTransfer(summary.error || 'Import failed', true);
-                return;
-            }
-            var failed = (summary.failed || []).length;
-            showTransfer('Imported ' + summary.added.length + ', skipped ' + summary.skipped.length +
-                (failed ? ', failed ' + failed : '') + '.', failed > 0);
-            loadPlaylists();
-        } catch (err) {
-            showTransfer('Import failed', true);
-        } finally {
-            importInput.value = '';
-        }
-    });
-
-    // --- Stats ---
-    async function loadStats() {
-        try {
-            var result = await apiCall('GET', '/stats');
-            if (result.status === 200) {
-                statVideos.textContent = result.data.totalEventsToday;
-                var mins = Math.round(result.data.totalWatchTimeToday / 60);
-                statTime.textContent = mins + 'm';
-            }
-        } catch (err) {
-            console.error('Load stats failed:', err);
-        }
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', theme === 'dark' ? '#0f1216' : '#ffffff');
+        paintThemeControl();
     }
 
-    async function loadRecent() {
-        try {
-            var result = await apiCall('GET', '/stats/recent');
-            if (result.status === 200) {
-                recentList.innerHTML = '';
-                result.data.slice(0, 10).forEach(function(evt) {
-                    var li = document.createElement('li');
-                    var mins = Math.round(evt.durationSec / 60);
-                    var label = evt.title ? escapeHtml(evt.title) : escapeHtml(evt.videoId);
-                    li.innerHTML = '<span>' + label + '</span><span>' + mins + 'm</span>';
-                    recentList.appendChild(li);
-                });
-            }
-        } catch (err) {
-            console.error('Load recent failed:', err);
-        }
+    function toggleTheme() {
+        applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
     }
 
-    // --- Now Playing ---
-    async function loadStatus() {
-        try {
-            var result = await apiCall('GET', '/status');
-            if (result.status === 200 && result.data.currentlyPlaying) {
-                var np = result.data.currentlyPlaying;
-                nowPlaying.classList.remove('hidden');
-                npTitle.textContent = np.title || np.videoId;
-                npPlaylistTitle.textContent = np.playlistTitle || '';
-                var npThumbnail = document.getElementById('np-thumbnail');
-                npThumbnail.src = 'https://img.youtube.com/vi/' + np.videoId + '/mqdefault.jpg';
-                npThumbnail.alt = np.title || np.videoId;
-                npElapsed.textContent = formatTime(np.elapsedSec || 0);
-                npDuration.textContent = formatTime(np.durationSec || 0);
-                npPauseBtn.textContent = np.playing ? 'Pause' : 'Play';
-
-                var pct = 0;
-                if (np.durationSec > 0) {
-                    pct = Math.min(100, Math.round((np.elapsedSec / np.durationSec) * 100));
-                }
-                npProgressFill.style.width = pct + '%';
-
-                if (!isCurrentlyPlaying) {
-                    isCurrentlyPlaying = true;
-                    setPollingRate(30000);
-                }
-            } else {
-                nowPlaying.classList.add('hidden');
-                var npThumbnailHide = document.getElementById('np-thumbnail');
-                npThumbnailHide.src = '';
-                npThumbnailHide.alt = '';
-                if (isCurrentlyPlaying) {
-                    isCurrentlyPlaying = false;
-                    setPollingRate(120000);
-                    loadStats();
-                    loadRecent();
-                }
-            }
-        } catch (err) {
-            console.error('Load status failed:', err);
-        }
+    function paintThemeControl() {
+        var dark = currentTheme() === 'dark';
+        themeIcon.textContent = dark ? '☀️' : '🌙';
+        themeLabel.textContent = dark ? 'Light' : 'Dark';
+        themeToggle.setAttribute('aria-pressed', dark ? 'true' : 'false');
+        themeToggle.setAttribute('aria-label', dark ? 'Switch to the light look' : 'Switch to the dark look');
     }
 
-    // Playback controls
-    npStopBtn.addEventListener('click', function() {
-        apiCall('POST', '/playback/stop');
-    });
-
-    npPauseBtn.addEventListener('click', function() {
-        apiCall('POST', '/playback/pause');
-    });
-
-    npNextBtn.addEventListener('click', function() {
-        apiCall('POST', '/playback/skip');
-    });
-
-    function setPollingRate(ms) {
-        if (statusInterval) clearInterval(statusInterval);
-        statusInterval = setInterval(function() {
-            loadStatus();
-            loadTimeLimits();
-        }, ms);
-    }
-
-    // --- Screen Time ---
-
-    var currentlyLocked = false;
-
-    async function loadTimeLimits() {
-        try {
-            var result = await apiCall('GET', '/time-limits');
-            if (result.status !== 200) return;
-            var d = result.data;
-
-            // Status badge
-            var badge = document.getElementById('st-status-badge');
-            badge.className = 'badge st-badge-' + d.currentStatus;
-            badge.textContent = d.currentStatus === 'allowed' ? 'Allowed'
-                : d.currentStatus === 'warning' ? 'Warning'
-                : 'Blocked';
-
-            // Lock reason
-            var reasonEl = document.getElementById('st-lock-reason');
-            if (d.lockReason) {
-                var reasonText = d.lockReason === 'daily_limit' ? 'Daily limit reached'
-                    : d.lockReason === 'bedtime' ? 'Bedtime'
-                    : 'Manually locked';
-                reasonEl.textContent = reasonText;
-                reasonEl.classList.remove('hidden');
-            } else {
-                reasonEl.classList.add('hidden');
-            }
-
-            // Usage bar
-            var bar = document.getElementById('st-usage-bar');
-            var label = document.getElementById('st-usage-label');
-            var usedMin = d.todayUsedMin || 0;
-
-            if (d.todayLimitMin != null) {
-                var effectiveLimit = d.todayLimitMin + (d.todayBonusMin || 0);
-                var pct = Math.min(100, Math.round((usedMin / effectiveLimit) * 100));
-                bar.style.width = pct + '%';
-                bar.className = 'st-usage-bar' + (d.currentStatus === 'blocked' ? ' st-bar-blocked' : d.currentStatus === 'warning' ? ' st-bar-warning' : '');
-                label.textContent = usedMin + 'm / ' + effectiveLimit + 'm' + (d.todayBonusMin > 0 ? ' (+' + d.todayBonusMin + 'm bonus)' : '');
-            } else {
-                bar.style.width = '0%';
-                label.textContent = usedMin + 'm / No limit';
-            }
-
-            // Lock button
-            var lockBtn = document.getElementById('st-lock-btn');
-            currentlyLocked = d.manuallyLocked;
-            if (d.manuallyLocked) {
-                lockBtn.textContent = 'Unlock TV';
-                lockBtn.className = 'st-unlock';
-                lockBtn.id = 'st-lock-btn';
-            } else {
-                lockBtn.textContent = 'Lock TV';
-                lockBtn.className = '';
-                lockBtn.id = 'st-lock-btn';
-            }
-
-            // Time request banner
-            var requestEl = document.getElementById('st-time-request');
-            if (d.hasTimeRequest) {
-                requestEl.classList.remove('hidden');
-            } else {
-                requestEl.classList.add('hidden');
-            }
-        } catch (err) {
-            console.error('Load time limits failed:', err);
-        }
-    }
-
-    window.toggleLock = async function() {
-        var locked = !currentlyLocked;
-        await apiCall('POST', '/time-limits/lock', { locked: locked });
-        loadTimeLimits();
-    };
-
-    window.grantBonusTime = async function(minutes) {
-        await apiCall('POST', '/time-limits/bonus', { minutes: minutes });
-        loadTimeLimits();
-    };
-
-    // Edit limits modal
-    window.openEditLimits = async function() {
-        var result = await apiCall('GET', '/time-limits');
-        if (result.status !== 200) return;
-        var d = result.data;
-
-        var limitEnabled = document.getElementById('edit-limit-enabled');
-        var limitMinutes = document.getElementById('edit-limit-minutes');
-        var limitRow = document.getElementById('edit-limit-input-row');
-        var bedtimeEnabled = document.getElementById('edit-bedtime-enabled');
-        var bedtimeStart = document.getElementById('edit-bedtime-start');
-        var bedtimeEnd = document.getElementById('edit-bedtime-end');
-        var bedtimeRow = document.getElementById('edit-bedtime-input-row');
-
-        var hasLimit = d.todayLimitMin != null;
-        limitEnabled.checked = hasLimit;
-        limitRow.classList.toggle('hidden', !hasLimit);
-        if (hasLimit) limitMinutes.value = d.todayLimitMin;
-
-        var hasBedtime = d.bedtime != null;
-        bedtimeEnabled.checked = hasBedtime;
-        bedtimeRow.classList.toggle('hidden', !hasBedtime);
-        if (hasBedtime) {
-            bedtimeStart.value = d.bedtime.start;
-            bedtimeEnd.value = d.bedtime.end;
-        }
-
-        limitEnabled.onchange = function() { limitRow.classList.toggle('hidden', !limitEnabled.checked); };
-        bedtimeEnabled.onchange = function() { bedtimeRow.classList.toggle('hidden', !bedtimeEnabled.checked); };
-
-        document.getElementById('edit-limits-modal').classList.remove('hidden');
-    };
-
-    window.saveLimits = async function() {
-        var limitEnabled = document.getElementById('edit-limit-enabled').checked;
-        var bedtimeEnabled = document.getElementById('edit-bedtime-enabled').checked;
-        var body = {};
-
-        if (limitEnabled) {
-            var mins = parseInt(document.getElementById('edit-limit-minutes').value) || 120;
-            body.dailyLimits = {
-                monday: mins, tuesday: mins, wednesday: mins,
-                thursday: mins, friday: mins, saturday: mins, sunday: mins
-            };
-        } else {
-            body.dailyLimits = {};
-        }
-
-        if (bedtimeEnabled) {
-            var start = document.getElementById('edit-bedtime-start').value;
-            var end = document.getElementById('edit-bedtime-end').value;
-            var startParts = start.split(':');
-            var endParts = end.split(':');
-            body.bedtimeStartMin = parseInt(startParts[0]) * 60 + parseInt(startParts[1]);
-            body.bedtimeEndMin = parseInt(endParts[0]) * 60 + parseInt(endParts[1]);
-        } else {
-            body.bedtimeStartMin = -1;
-            body.bedtimeEndMin = -1;
-        }
-
-        await apiCall('PUT', '/time-limits', body);
-        closeEditLimits();
-        loadTimeLimits();
-    };
-
-    window.closeEditLimits = function() {
-        document.getElementById('edit-limits-modal').classList.add('hidden');
-    };
-
-    // --- Version footer + feedback ---
-    var footerVersion = document.getElementById('footer-version');
-    var updateBadge = document.getElementById('update-badge');
-    var feedbackLink = document.getElementById('feedback-link');
-    var crashSection = document.getElementById('crash-section');
-    var crashLog = document.getElementById('crash-log');
-    var copyCrashBtn = document.getElementById('copy-crash');
-
-    function updateVersionFooter(version) {
-        if (footerVersion) footerVersion.textContent = 'v' + version;
-        if (feedbackLink) {
-            feedbackLink.href = 'mailto:hello@parentapproved.tv?subject='
-                + encodeURIComponent('[SafeTube v' + version + '] Feedback')
-                + '&body=' + encodeURIComponent('Device: \nIssue: \n\n');
-        }
-    }
-
-    async function checkUpdateAvailable(version) {
-        try {
-            var resp = await fetch('https://parentapproved.tv/version.json');
-            if (resp.ok) {
-                var data = await resp.json();
-                if (data.latestCode && data.latest) {
-                    var current = parseInt(version.replace(/[^0-9]/g, ''));
-                    if (data.latestCode > current && updateBadge) {
-                        updateBadge.textContent = 'Update: v' + data.latest;
-                        updateBadge.classList.remove('hidden');
-                    }
-                }
-            }
-        } catch (err) {
-            // Best-effort
-        }
-    }
-
-    async function loadCrashLog() {
-        try {
-            var result = await apiCall('GET', '/crash-log');
-            if (result.status === 200 && result.data.hasCrash) {
-                if (crashSection) crashSection.classList.remove('hidden');
-                if (crashLog) crashLog.textContent = result.data.log;
-            }
-        } catch (err) {
-            // Best-effort
-        }
-    }
-
-    if (copyCrashBtn) {
-        copyCrashBtn.addEventListener('click', function() {
-            var text = crashLog ? crashLog.textContent : '';
-            navigator.clipboard.writeText(text).then(function() {
-                copyCrashBtn.textContent = 'Copied!';
-                setTimeout(function() { copyCrashBtn.textContent = 'Copy to clipboard'; }, 2000);
-            });
-        });
-    }
-
-    // --- Kiosk / Apps management ---
-
-    async function loadKioskConfig() {
-        try {
-            var result = await apiCall('GET', '/apps/kiosk');
-            if (result.status !== 200) return;
-            var data = result.data;
-
-            var section = document.getElementById('kiosk-section');
-            section.classList.remove('hidden');
-
-            var badge = document.getElementById('kiosk-status-badge');
-            var controls = document.getElementById('kiosk-controls');
-            var setupHint = document.getElementById('kiosk-setup-hint');
-            var toggleBtn = document.getElementById('kiosk-toggle-btn');
-            var enforceCheck = document.getElementById('kiosk-enforce-time');
-            var deviceOwnerStatus = document.getElementById('kiosk-device-owner-status');
-
-            setupHint.classList.add('hidden');
-            controls.classList.remove('hidden');
-            deviceOwnerStatus.textContent = data.isDeviceOwner ? '' : 'Launcher mode (no device owner)';
-
-            if (data.kioskEnabled) {
-                badge.textContent = 'Active';
-                badge.className = 'badge st-badge-warning';
-                toggleBtn.textContent = 'Disable Kiosk Mode';
-                toggleBtn.className = 'st-lock-btn-locked';
-            } else {
-                badge.textContent = 'Off';
-                badge.className = 'badge st-badge-allowed';
-                toggleBtn.textContent = 'Enable Kiosk Mode';
-                toggleBtn.className = '';
-            }
-            enforceCheck.checked = data.enforceTimeLimitsOnAllApps;
-
-            loadAppsList();
-        } catch (err) {
-            console.error('Failed to load kiosk config', err);
-        }
-    }
-
-    async function loadAppsList() {
-        try {
-            var result = await apiCall('GET', '/apps');
-            if (result.status !== 200) return;
-            var apps = result.data;
-
-            var card = document.getElementById('apps-list-card');
-            card.classList.remove('hidden');
-            var list = document.getElementById('apps-list');
-            list.innerHTML = '';
-
-            apps.forEach(function(app) {
-                var li = document.createElement('li');
-                li.className = 'app-item';
-                var label = document.createElement('label');
-                label.className = 'app-label';
-                var checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                checkbox.checked = app.whitelisted;
-                checkbox.onchange = function() {
-                    toggleAppWhitelist(app.packageName, checkbox.checked);
-                };
-                var nameSpan = document.createElement('span');
-                nameSpan.className = 'app-name';
-                nameSpan.textContent = app.displayName;
-                var pkgSpan = document.createElement('span');
-                pkgSpan.className = 'app-pkg';
-                pkgSpan.textContent = app.packageName;
-                label.appendChild(checkbox);
-                label.appendChild(nameSpan);
-                li.appendChild(label);
-                li.appendChild(pkgSpan);
-                list.appendChild(li);
-            });
-        } catch (err) {
-            console.error('Failed to load apps list', err);
-        }
-    }
-
-    window.toggleKiosk = async function() {
-        try {
-            var result = await apiCall('GET', '/apps/kiosk');
-            if (result.status !== 200) return;
-            var currentEnabled = result.data.kioskEnabled;
-            var enforceTime = document.getElementById('kiosk-enforce-time').checked;
-
-            await apiCall('POST', '/apps/kiosk', {
-                enabled: !currentEnabled,
-                enforceTimeLimitsOnAllApps: enforceTime,
-            });
-            loadKioskConfig();
-        } catch (err) {
-            console.error('Failed to toggle kiosk', err);
-        }
-    };
-
-    window.toggleAppWhitelist = async function(packageName, whitelisted) {
-        try {
-            await apiCall('PUT', '/apps/whitelist', {
-                packageName: packageName,
-                whitelisted: whitelisted,
-            });
-        } catch (err) {
-            console.error('Failed to toggle app whitelist', err);
-        }
-    };
-
-    window.updateKioskEnforceTime = async function() {
-        var enforce = document.getElementById('kiosk-enforce-time').checked;
-        try {
-            var result = await apiCall('GET', '/apps/kiosk');
-            if (result.status !== 200) return;
-            if (result.data.kioskEnabled) {
-                await apiCall('POST', '/apps/kiosk', {
-                    enabled: true,
-                    enforceTimeLimitsOnAllApps: enforce,
-                });
-            }
-        } catch (err) {
-            console.error('Failed to update enforce time', err);
-        }
-    };
-
-    // --- Catalog editor ---
+    // --- dialogs -----------------------------------------------------------------------------
     //
-    // The tree comes from the TV's own server and the edits live here until Save publishes them as one
-    // document. Nothing about the catalog is written to localStorage or any other browser storage: the
-    // server's document is the authoritative catalog, and a browser holding its own copy could show a
-    // parent a tree the TV is not showing. The consequence - a refresh discards unsaved edits - is
-    // stated in the UI rather than hidden.
-    //
-    // The model (every mutation, and the save/reload conversation with the server) lives in
-    // catalog-editor.js, which touches no DOM. This file only moves between that model and the page.
+    // The browser's own <dialog>, so focus trapping, Escape and the backdrop come for free. Each
+    // dialog is built when it opens and removed when it closes, which keeps a screen's DOM from
+    // quietly going stale.
 
-    var editorSession = null;
-    var editorConflict = null;   // {serverVersion} while a save is blocked by a stale working copy
-    var selectedNodeId = null;
-    var editorNewId = null;      // kept so a reload keeps generating ids the same way
-    var approvedSourceIds = [];  // the parent's approved Content Sources, for the import hint only
+    /**
+     * Opens a modal, calls `build(inner, close)`, and resolves with whatever `close` was given.
+     * Closing happens exactly once, whichever way the dialog went away.
+     */
+    function openModal(build) {
+        var dialog = h('dialog', { class: 'dialog' });
+        var inner = h('div', { class: 'dialog__inner' });
+        dialog.appendChild(inner);
+        document.body.appendChild(dialog);
 
-    function catalogError(message) {
-        var box = document.getElementById('catalog-error');
-        if (!box) return;
-        if (!message) {
-            box.classList.add('hidden');
-            box.textContent = '';
-            return;
-        }
-        box.textContent = message;
-        box.classList.remove('hidden');
-    }
+        var settled = false;
+        var resolveClosed = null;
+        var closed = new Promise(function (resolve) { resolveClosed = resolve; });
 
-    function setCatalogStatus(kind, message) {
-        var el = document.getElementById('catalog-status');
-        if (!el) return;
-        el.className = 'catalog-status status-' + kind;
-        el.textContent = message;
-    }
-
-    function selectedNode() {
-        return editorSession && selectedNodeId ? CatalogEditor.nodeById(editorSession, selectedNodeId) : null;
-    }
-
-    /** Which of the four states the parent needs to be able to tell apart. */
-    function refreshCatalogNotices() {
-        var unsaved = document.getElementById('catalog-unsaved');
-        var saveBtn = document.getElementById('catalog-save-btn');
-        var dirty = !!(editorSession && CatalogEditor.isDirty(editorSession));
-
-        if (saveBtn) saveBtn.disabled = !editorSession || !!editorConflict || !dirty;
-        if (!unsaved) return;
-
-        if (editorConflict) {
-            unsaved.textContent = 'Your unsaved changes were not applied: the catalog changed on the server. ' +
-                'Reload to take the server version (which discards what is here), then edit and save again.';
-            unsaved.classList.remove('hidden');
-        } else if (dirty) {
-            unsaved.textContent = 'Unsaved changes — they exist only in this browser. Press Save to publish ' +
-                'them; a page refresh would discard them.';
-            unsaved.classList.remove('hidden');
-        } else {
-            unsaved.classList.add('hidden');
-        }
-    }
-
-    function renderCatalog() {
-        var container = document.getElementById('catalog-tree');
-        var meta = document.getElementById('catalog-meta');
-        if (!container) return;
-
-        if (!editorSession) {
-            container.innerHTML = '';
-            if (meta) meta.textContent = 'Not available';
-            refreshCatalogNotices();
-            return;
+        function close(value) {
+            if (settled) return;
+            settled = true;
+            if (dialog.open) dialog.close();
+            if (dialog.parentNode) dialog.parentNode.removeChild(dialog);
+            resolveClosed(value);
         }
 
-        container.innerHTML = CatalogTree.render(editorSession.nodes, { selectedId: selectedNodeId });
-        var counts = CatalogTree.summary(editorSession.nodes);
-        if (meta) {
-            meta.textContent = 'Version ' + editorSession.catalogVersion + ' — ' + counts.total + ' nodes (' +
-                counts.categories + ' categories, ' + counts.subcategories + ' subcategories, ' +
-                counts.videos + ' videos' + (counts.disabled ? ', ' + counts.disabled + ' disabled' : '') + ')';
-        }
-        renderCatalogPanel();
-        refreshAddForm();
-        refreshImportForm();
-        refreshCatalogNotices();
-    }
-
-    function renderCatalogPanel() {
-        var panel = document.getElementById('catalog-panel');
-        var empty = document.getElementById('catalog-panel-empty');
-        if (!panel || !empty) return;
-
-        var node = selectedNode();
-        if (!node) {
-            panel.classList.add('hidden');
-            empty.classList.remove('hidden');
-            return;
-        }
-        panel.classList.remove('hidden');
-        empty.classList.add('hidden');
-
-        document.getElementById('panel-type').textContent = node.nodeType;
-        document.getElementById('panel-type').className = 'catalog-node-type catalog-type-' + node.nodeType.toLowerCase();
-        document.getElementById('panel-id').textContent = node.id;
-        document.getElementById('panel-title').value = node.title;
-        document.getElementById('panel-enabled').checked = node.enabled !== false;
-
-        var detail = [];
-        if (node.youtubeVideoId) detail.push('video ' + node.youtubeVideoId);
-        if (node.youtubePlaylistId) detail.push('playlist ' + node.youtubePlaylistId);
-        detail.push('position #' + node.position);
-        document.getElementById('panel-detail').textContent = detail.join(' · ');
-
-        // A video keeps the name it was added with; the parent renames shelves and subcategories.
-        var renameHint = document.getElementById('panel-rename-hint');
-        var titleInput = document.getElementById('panel-title');
-        var renameable = node.nodeType !== 'VIDEO';
-        titleInput.disabled = !renameable;
-        renameHint.textContent = renameable
-            ? ''
-            : 'A video keeps its name; rename the shelf or subcategory it sits in.';
-
-        // Moving is only offered where it is possible: a shelf always sits at the top level.
-        var select = document.getElementById('panel-parent');
-        var options = CatalogEditor.validParentsFor(editorSession, node.nodeType).filter(function (parentId) {
-            if (parentId === node.id) return false;
-            if (parentId === null) return node.nodeType === 'CATEGORY';
-            return CatalogEditor.subtreeIds(editorSession, node.id).indexOf(parentId) === -1;
+        dialog.addEventListener('cancel', function (event) {
+            event.preventDefault();
+            close(null);
         });
-        select.innerHTML = options.map(function (parentId) {
-            var label = parentId === null ? 'Top level' : parentLabel(parentId);
-            return '<option value="' + (parentId === null ? '' : parentId) + '"' +
-                (parentId === (node.parentId || null) ? ' selected' : '') + '>' + label + '</option>';
-        }).join('');
-        select.disabled = options.length <= 1;
 
-        renderThumbnailControls(node);
+        build(inner, close);
+        dialog.showModal();
+
+        return { inner: inner, closed: closed, close: close };
+    }
+
+    /** Yes/no, with the destructive answer marked as such. Resolves true or false. */
+    function confirmDialog(options) {
+        var modal = openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: options.title }));
+            if (options.body) inner.appendChild(h('p', { class: 'dialog__body', text: options.body }));
+
+            var go = withListener(h('button', {
+                type: 'button',
+                class: 'btn ' + (options.danger ? 'btn--danger' : 'btn--primary'),
+                text: options.confirmLabel || 'Yes'
+            }), 'click', function () { close(true); });
+
+            var cancel = withListener(h('button', {
+                type: 'button',
+                class: 'btn',
+                text: options.cancelLabel || 'Cancel'
+            }), 'click', function () { close(false); });
+
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [go, cancel]));
+            setTimeout(function () { cancel.focus(); }, 30);
+        });
+
+        return modal.closed.then(function (value) { return value === true; });
+    }
+
+    /** One line of text. Resolves with the trimmed value, or null when dismissed. */
+    function askForText(options) {
+        var modal = openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: options.title }));
+            if (options.body) inner.appendChild(h('p', { class: 'dialog__body', text: options.body }));
+
+            var input = h('input', {
+                class: 'input',
+                type: 'text',
+                value: options.value || '',
+                maxlength: '200',
+                'aria-label': options.label || 'Name'
+            });
+            var error = h('p', { class: 'field__error', hidden: true });
+
+            inner.appendChild(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: options.label || 'Name' }),
+                input
+            ]));
+            inner.appendChild(error);
+
+            var confirm = withListener(h('button', {
+                type: 'button',
+                class: 'btn btn--primary',
+                text: options.confirmLabel || 'Save'
+            }), 'click', function () {
+                var value = input.value.trim();
+                if (!value) {
+                    error.textContent = options.requiredMessage || 'Please type a name';
+                    error.hidden = false;
+                    input.focus();
+                    return;
+                }
+                close(value);
+            });
+
+            var cancel = withListener(h('button', { type: 'button', class: 'btn', text: 'Cancel' }),
+                'click', function () { close(null); });
+
+            input.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter') confirm.click();
+            });
+
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [confirm, cancel]));
+            setTimeout(function () { input.focus(); input.select(); }, 30);
+        });
+
+        return modal.closed;
     }
 
     /**
-     * The picture a shelf or subcategory shows in the grid on the TV.
-     *
-     * Only two answers exist, and neither is a URL: the app picks the first video inside (`AUTO`), or
-     * the parent names one of the videos inside it (`VIDEO`). The reserved `CUSTOM` mode is not offered
-     * at all, because no screen can render one - and the editor never sends a thumbnail URL, since the
-     * artwork the TV has is the artwork its own approved sources provided.
-     *
-     * Hidden videos are never offered as a choice: a hidden video cannot stand for a container, and
-     * offering one would store a picture that renders as something else.
+     * A list of choices - the item menu, "move to", and choosing a picture all use it.
+     * Resolves with the chosen option's id, or null when dismissed.
      */
-    function renderThumbnailControls(node) {
-        var block = document.getElementById('panel-thumbnail');
-        var modeSelect = document.getElementById('panel-thumbnail-mode');
-        var videoField = document.getElementById('panel-thumbnail-video-field');
-        var videoSelect = document.getElementById('panel-thumbnail-video');
-        var hint = document.getElementById('panel-thumbnail-hint');
-        if (!block || !modeSelect || !videoField || !videoSelect || !hint) return;
+    function chooseFrom(options) {
+        var modal = openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: options.title }));
+            if (options.body) inner.appendChild(h('p', { class: 'dialog__body', text: options.body }));
+            if (options.image) {
+                inner.appendChild(h('img', { class: 'dialog__image', src: options.image, alt: '', loading: 'lazy' }));
+            }
 
-        // A video is its own picture; only a container chooses one.
-        var container = node.nodeType === 'CATEGORY' || node.nodeType === 'SUBCATEGORY';
-        block.classList.toggle('hidden', !container);
-        if (!container) return;
+            var list = h('div', { class: 'pick-list' });
+            options.options.forEach(function (option) {
+                var item = h('button', {
+                    type: 'button',
+                    class: 'pick-item' + (option.selected ? ' is-selected' : '') +
+                        (option.danger ? ' pick-item--danger' : ''),
+                    disabled: option.disabled || false
+                }, [
+                    h('span', { class: 'pick-item__body' }, [
+                        h('span', { class: 'pick-item__title', text: option.title }),
+                        option.meta ? h('span', { class: 'pick-item__meta', text: option.meta }) : null
+                    ]),
+                    option.selected ? h('span', { class: 'pick-item__tick', text: '✓', 'aria-hidden': 'true' }) : null
+                ]);
 
-        var mode = CatalogEditor.thumbnailModeOf(node) || CatalogEditor.THUMBNAIL_AUTO;
-        modeSelect.value = mode;
+                if (option.disabled) item.setAttribute('aria-disabled', 'true');
+                item.addEventListener('click', function () {
+                    if (option.disabled) return;
+                    close(option.id);
+                });
+                list.appendChild(item);
+            });
+            inner.appendChild(list);
 
-        var videos = CatalogEditor.descendantVideos(editorSession, node.id);
-        var usable = videos.filter(function (video) { return video.usable; });
-        var selected = mode === CatalogEditor.THUMBNAIL_VIDEO && node.thumbnailVideoId ? node.thumbnailVideoId : '';
-
-        // A choice that no longer qualifies is shown as itself rather than silently swapped: the parent
-        // is the one who decides which video it becomes.
-        var dangling = !!selected && !usable.some(function (video) { return video.id === selected; });
-
-        var html = usable.map(function (video) {
-            return '<option value="' + escapeHtml(video.id) + '">' + escapeHtml(video.path) + '</option>';
-        }).join('');
-        if (dangling) {
-            html += '<option value="' + escapeHtml(selected) + '">' + escapeHtml(selected) + ' — not available any more</option>';
-        }
-        videoSelect.innerHTML = html;
-        if (selected) videoSelect.value = selected;
-
-        videoField.classList.toggle('hidden', mode !== CatalogEditor.THUMBNAIL_VIDEO);
-        videoSelect.disabled = usable.length === 0 && !dangling;
-
-        hint.textContent = thumbnailHint(node, mode, usable.length, dangling);
-    }
-
-    function thumbnailHint(node, mode, usableCount, dangling) {
-        var kind = node.nodeType === 'CATEGORY' ? 'shelf' : 'subcategory';
-
-        if (mode !== CatalogEditor.THUMBNAIL_VIDEO) {
-            var auto = CatalogEditor.autoVideo(editorSession, node.id);
-            return auto
-                ? 'Automatic: the first video inside is used — currently "' + auto.title + '".'
-                : 'Automatic: this ' + kind + ' has no video inside yet, so its tile keeps the artwork its source provided.';
-        }
-        if (dangling) {
-            return 'The chosen video is not available any more, so this ' + kind +
-                ' falls back to Automatic until you choose another.';
-        }
-        if (usableCount === 0) {
-            return 'This ' + kind + ' has no video inside yet — add or import a video before choosing it as the picture.';
-        }
-        return 'The picture is taken from the video you choose. Hidden videos are not offered.';
-    }
-
-    function changeThumbnailMode() {
-        if (!editorSession || !selectedNodeId) return;
-        var mode = document.getElementById('panel-thumbnail-mode').value;
-
-        if (mode === CatalogEditor.THUMBNAIL_AUTO) {
-            applyEditorResult(CatalogEditor.setThumbnail(editorSession, { id: selectedNodeId, mode: mode }));
-            return;
-        }
-
-        // Choosing "a video I choose" selects the first video that qualifies, so the mode is never
-        // stored with an empty selection; the list beside it refines which one.
-        var node = selectedNode();
-        var usable = CatalogEditor.descendantVideos(editorSession, node.id).filter(function (video) {
-            return video.usable;
+            var cancel = withListener(h('button', {
+                type: 'button',
+                class: 'btn',
+                text: options.cancelLabel || 'Close'
+            }), 'click', function () { close(null); });
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [cancel]));
         });
-        var keep = usable.some(function (video) { return video.id === node.thumbnailVideoId; });
-        var videoNodeId = keep ? node.thumbnailVideoId : (usable.length ? usable[0].id : '');
-        applyEditorResult(CatalogEditor.setThumbnail(editorSession, {
-            id: selectedNodeId,
-            mode: mode,
-            videoNodeId: videoNodeId,
-        }));
+
+        return modal.closed;
     }
 
-    function changeThumbnailVideo() {
-        if (!editorSession || !selectedNodeId) return;
-        applyEditorResult(CatalogEditor.setThumbnail(editorSession, {
-            id: selectedNodeId,
-            mode: CatalogEditor.THUMBNAIL_VIDEO,
-            videoNodeId: document.getElementById('panel-thumbnail-video').value,
-        }));
+    /** A short-lived message. Errors stay longer, because they ask the parent to do something. */
+    function toast(message, kind) {
+        if (!message) return;
+        if (toastTimer) clearTimeout(toastTimer);
+        clear(toasts);
+        toasts.appendChild(h('p', { class: 'toast' + (kind ? ' toast--' + kind : ''), role: 'status', text: message }));
+        toastTimer = setTimeout(function () { clear(toasts); }, kind === 'error' ? 6500 : 4200);
     }
 
-    function parentLabel(id) {
-        var parent = CatalogEditor.nodeById(editorSession, id);
-        return parent ? parent.title + ' (' + parent.nodeType.toLowerCase() + ')' : id;
-    }
+    // --- reading the library -----------------------------------------------------------------
 
-    function refreshAddForm() {
-        var kindSelect = document.getElementById('add-kind');
-        var parentSelect = document.getElementById('add-parent');
-        var videoInput = document.getElementById('add-video');
-        var hint = document.getElementById('add-hint');
-        if (!kindSelect || !parentSelect || !editorSession) return;
-
-        var kind = kindSelect.value;
-        var parents = kind === 'CATEGORY' ? [] : editorSession.nodes
-            .filter(function (node) { return CatalogEditor.childTypesOf(node.nodeType).indexOf(kind) !== -1; })
-            .sort(function (a, b) { return a.title < b.title ? -1 : 1; });
-
-        if (kind === 'CATEGORY') {
-            parentSelect.innerHTML = '<option value="">Top level</option>';
-            parentSelect.disabled = true;
-        } else {
-            parentSelect.innerHTML = parents.map(function (node) {
-                return '<option value="' + node.id + '">' + node.title + '</option>';
-            }).join('');
-            parentSelect.disabled = parents.length === 0;
-        }
-
-        var needsVideo = kind === 'VIDEO';
-        videoInput.classList.toggle('hidden', !needsVideo);
-        if (hint) {
-            hint.textContent = kind === 'CATEGORY'
-                ? 'A category is a shelf at the top level of the home screen.'
-                : (parents.length === 0
-                    ? 'There is nothing to put this in yet — add a category first.'
-                    : (kind === 'VIDEO'
-                        ? 'The parent names the video; the YouTube id is only the source.'
-                        : 'A subcategory holds videos you add to it.'));
-        }
-    }
-
+    /** Reads the parent's document and opens it as a working copy. */
     async function loadCatalog() {
-        setCatalogStatus('saving', 'Loading…');
-        var result = await CatalogEditor.reload(
-            function () { return apiCall('GET', '/catalog'); },
-            { newId: editorNewId || undefined },
-        );
+        var result = await CatalogEditor.reload(function () {
+            return apiCall('GET', '/catalog');
+        });
 
         if (result.outcome !== 'reloaded') {
-            editorSession = null;
-            catalogError('Catalog unavailable: ' + result.reason);
-            setCatalogStatus('error', 'Error');
-            renderCatalog();
-            return;
+            return { ok: false, reason: result.reason || 'The library could not be read' };
         }
 
-        editorSession = result.session;
-        editorNewId = editorSession.newId;
-        editorConflict = null;
-        if (!CatalogEditor.nodeById(editorSession, selectedNodeId)) selectedNodeId = null;
-        var conflictBox = document.getElementById('catalog-conflict');
-        if (conflictBox) conflictBox.classList.add('hidden');
-        catalogError('');
-        setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
-        renderCatalog();
+        state.session = result.session;
+        return { ok: true };
     }
 
-    /** Every edit goes through here: a refused one changes nothing and says why. */
-    function applyEditorResult(result) {
-        if (!result.ok) {
-            catalogError('Not changed: ' + result.reason);
+    /**
+     * The pictures and counts only the TV knows: what each card shows, and how many videos are
+     * really inside each folder (an imported playlist's episodes live on the TV, not in the
+     * document). Best effort: a library without pictures still works.
+     */
+    async function loadArtwork() {
+        var result = await apiCall('GET', '/catalog/artwork');
+        if (result.status === 200 && result.data) {
+            state.artwork = {
+                videos: result.data.videos || {},
+                containers: result.data.containers || {},
+                installedCatalogVersion: result.data.installedCatalogVersion || 0
+            };
+        } else {
+            state.artwork = { videos: {}, containers: {}, installedCatalogVersion: 0 };
+        }
+    }
+
+    async function loadPlaylists() {
+        var result = await apiCall('GET', '/playlists');
+        state.playlists = result.status === 200 && Array.isArray(result.data) ? result.data : [];
+    }
+
+    async function loadStatus() {
+        var result = await apiCall('GET', '/status');
+        if (result.status === 200) {
+            state.status = result.data;
+            state.reachable = true;
+            if (result.data.protocolVersion && result.data.protocolVersion !== PROTOCOL_VERSION) {
+                state.versionMismatch = true;
+            }
+        } else {
+            state.status = null;
+            state.reachable = false;
+        }
+        paintStatusPill();
+    }
+
+    async function loadLimits() {
+        var result = await apiCall('GET', '/time-limits');
+        state.limits = result.status === 200 ? result.data : null;
+    }
+
+    async function loadStats() {
+        var stats = await apiCall('GET', '/stats');
+        var recent = await apiCall('GET', '/stats/recent');
+        state.stats = stats.status === 200 ? stats.data : null;
+        state.recent = recent.status === 200 && Array.isArray(recent.data) ? recent.data : [];
+    }
+
+    async function loadCrash() {
+        var result = await apiCall('GET', '/crash-log');
+        state.crash = result.status === 200
+            ? (result.data.log || result.data.crashLog || JSON.stringify(result.data))
+            : '';
+    }
+
+    /** Everything the library screen needs, in the order that lets it paint once. */
+    async function loadLibrary() {
+        var loaded = await loadCatalog();
+        if (!loaded.ok) return loaded;
+        await Promise.all([loadArtwork(), loadPlaylists()]);
+        return loaded;
+    }
+
+    // --- writing the library -----------------------------------------------------------------
+
+    function explainProblems(problems, title) {
+        openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: title || 'This cannot be saved yet' }));
+            inner.appendChild(h('p', {
+                class: 'dialog__body',
+                text: problems.length === 1
+                    ? 'Nothing was changed on the TV. This is what is wrong:'
+                    : 'Nothing was changed on the TV. This is what is wrong:'
+            }));
+
+            var list = h('ul', { class: 'dialog__list' });
+            problems.forEach(function (problem) {
+                list.appendChild(h('li', { class: 'dialog__list-item', text: problem }));
+            });
+            inner.appendChild(list);
+
+            var ok = withListener(h('button', { type: 'button', class: 'btn btn--primary', text: 'OK' }),
+                'click', function () { close(null); });
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [ok]));
+        });
+    }
+
+    /**
+     * Asks the TV to fetch the library it has just been sent.
+     *
+     * This is the same work the TV's own Refresh button does. It exists because the TV would
+     * otherwise wait up to fifteen minutes, which is a long time to stand next to a television
+     * wondering whether the change worked.
+     */
+    async function refreshTv() {
+        var result = await apiCall('POST', '/catalog/refresh');
+        return {
+            ok: result.status === 200,
+            message: (result.data && result.data.message) || ''
+        };
+    }
+
+    function paintSaving(active) {
+        saving = active;
+        if (saving) {
+            tvState.hidden = false;
+            tvState.className = 'pill';
+            tvState.textContent = 'Saving…';
+        } else {
+            paintStatusPill();
+        }
+    }
+
+    /** Publishes the working copy as one document, at the version it was read from. */
+    async function publish(reason) {
+        if (saving || !state.session) return false;
+
+        var problems = CatalogEditor.problems(state.session);
+        if (problems.length) {
+            explainProblems(problems);
             return false;
         }
-        editorSession = result.session;
-        catalogError('');
-        setCatalogStatus('editing', 'Editing — not saved yet');
-        renderCatalog();
-        return true;
-    }
 
-    function selectNode(id) {
-        selectedNodeId = id;
-        renderCatalog();
-    }
+        paintSaving(true);
 
-    function addNode() {
-        if (!editorSession) return;
-        var kind = document.getElementById('add-kind').value;
-        var parentId = document.getElementById('add-parent').value || null;
-        var title = document.getElementById('add-title').value;
-        var videoId = document.getElementById('add-video').value;
-
-        // Remembered before the edit so the node that was just added can be recognised afterwards.
-        var beforeIds = editorSession.nodes.map(function (node) { return node.id; });
-
-        var result;
-        if (kind === 'CATEGORY') result = CatalogEditor.addCategory(editorSession, { title: title });
-        else if (kind === 'SUBCATEGORY') result = CatalogEditor.addSubcategory(editorSession, { parentId: parentId, title: title });
-        else result = CatalogEditor.addVideo(editorSession, { parentId: parentId, title: title, youtubeVideoId: videoId });
-
-        if (!applyEditorResult(result)) return;
-
-        // Select what was just added, so the panel is ready for the next edit.
-        var added = result.session.nodes.filter(function (node) { return beforeIds.indexOf(node.id) === -1; });
-        document.getElementById('add-title').value = '';
-        document.getElementById('add-video').value = '';
-        if (added.length === 1) {
-            selectedNodeId = added[0].id;
-            renderCatalog();
-        }
-    }
-
-    function renameSelected() {
-        if (!editorSession || !selectedNodeId) return;
-        var title = document.getElementById('panel-title').value;
-        applyEditorResult(CatalogEditor.rename(editorSession, { id: selectedNodeId, title: title }));
-    }
-
-    function toggleSelectedEnabled() {
-        if (!editorSession || !selectedNodeId) return;
-        var enabled = document.getElementById('panel-enabled').checked;
-        applyEditorResult(CatalogEditor.setEnabled(editorSession, { id: selectedNodeId, enabled: enabled }));
-    }
-
-    function moveSelectedUp() {
-        if (!editorSession || !selectedNodeId) return;
-        applyEditorResult(CatalogEditor.moveUp(editorSession, { id: selectedNodeId }));
-    }
-
-    function moveSelectedDown() {
-        if (!editorSession || !selectedNodeId) return;
-        applyEditorResult(CatalogEditor.moveDown(editorSession, { id: selectedNodeId }));
-    }
-
-    function moveSelectedTo() {
-        if (!editorSession || !selectedNodeId) return;
-        var parentId = document.getElementById('panel-parent').value || null;
-        applyEditorResult(CatalogEditor.moveTo(editorSession, { id: selectedNodeId, parentId: parentId }));
-    }
-
-    function deleteSelected() {
-        if (!editorSession || !selectedNodeId) return;
-        var node = selectedNode();
-        if (!node) return;
-
-        var removed = CatalogEditor.subtreeIds(editorSession, selectedNodeId).length - 1;
-        var question = removed > 0
-            ? 'Delete "' + node.title + '" and the ' + removed + ' node(s) inside it? This cannot be undone.'
-            : 'Delete "' + node.title + '"? This cannot be undone.';
-        if (!window.confirm(question)) return;
-
-        var parentId = node.parentId || null;
-        if (applyEditorResult(CatalogEditor.remove(editorSession, { id: selectedNodeId }))) {
-            selectedNodeId = parentId;
-            renderCatalog();
-        }
-    }
-
-    async function saveCatalog() {
-        if (!editorSession || editorConflict) return;
-
-        if (!CatalogEditor.isDirty(editorSession)) {
-            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
-            return;
-        }
-
-        setCatalogStatus('saving', 'Saving…');
-        catalogError('');
-
-        var result = await CatalogEditor.save(editorSession, function (body) {
+        var outcome = await CatalogEditor.save(state.session, function (body) {
             return apiCall('PUT', '/catalog', body);
         });
 
-        if (result.outcome === 'saved') {
-            // Only here, after the server answered 200, is anything called saved.
-            editorSession = result.session;
-            editorConflict = null;
-            var box = document.getElementById('catalog-conflict');
-            if (box) box.classList.add('hidden');
-            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
-            renderCatalog();
-            return;
+        paintSaving(false);
+
+        if (outcome.outcome === 'saved') {
+            state.session = outcome.session;
+            await afterPublish(reason);
+            return true;
         }
 
-        if (result.outcome === 'conflict') {
-            editorSession = result.session;   // the unsaved edits, untouched
-            editorConflict = { serverVersion: result.serverVersion };
-            setCatalogStatus('conflict', 'Conflict');
-            showCatalogConflict(result.serverVersion);
-            renderCatalog();
-            return;
+        if (outcome.outcome === 'conflict') {
+            state.session = outcome.session;
+            openConflictDialog(outcome, reason);
+            return false;
         }
 
-        if (result.outcome === 'rejected') {
-            setCatalogStatus('error', 'Error');
-            catalogError('The server refused the catalog: ' + result.reasons.join('; '));
-            return;
+        if (outcome.outcome === 'rejected') {
+            explainProblems(outcome.reasons, 'The TV would not accept this');
+            return false;
         }
 
-        setCatalogStatus('error', 'Error');
-        catalogError('Not saved — ' + result.reason + '. Your changes are still here; press Save to try again.');
+        toast(outcome.reason || 'The change could not be saved', 'error');
+        return false;
     }
 
-    function showCatalogConflict(serverVersion) {
-        var box = document.getElementById('catalog-conflict');
-        var text = document.getElementById('catalog-conflict-text');
-        if (!box || !text) return;
-        text.textContent = 'Catalog changed on the server' +
-            (serverVersion === null || serverVersion === undefined ? '' : ' (now version ' + serverVersion + ')') +
-            '. Your unsaved changes were not applied.';
-        box.classList.remove('hidden');
+    /**
+     * After a write the server accepted: tell the TV, then say truthfully what happened.
+     *
+     * "Saved" on its own is not the whole truth from the parent's point of view - the TV is what
+     * their child actually watches - so the message distinguishes "your TV has it now" from "your TV
+     * will pick it up on its own", rather than leaving the difference to be discovered later.
+     */
+    async function afterPublish(reason) {
+        var refreshed = await refreshTv();
+        var said = reason ? reason + ' — saved.' : 'Saved.';
+
+        toast(said + (refreshed.ok ? ' Your TV has it now.' : ' Your TV will pick it up within 15 minutes.'),
+            'ok');
+
+        await loadArtwork();
+        render();
     }
 
-    async function reloadCatalogFromServer() {
-        if (!editorSession) return;
+    function openConflictDialog(outcome, reason) {
+        var theirs = outcome.serverVersion;
 
-        if (CatalogEditor.isDirty(editorSession) && !editorConflict) {
-            if (!window.confirm('Discard your unsaved changes and reload the catalog from the server?')) return;
-        }
+        openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: 'The library changed somewhere else' }));
+            inner.appendChild(h('p', {
+                class: 'dialog__body',
+                text: 'Another phone or browser saved a change first' +
+                    (typeof theirs === 'number' ? ' (the TV is now on version ' + theirs + ')' : '') +
+                    ', so this change was not saved. Nothing on the TV changed.'
+            }));
 
-        setCatalogStatus('saving', 'Loading…');
-        var result = await CatalogEditor.reload(
-            function () { return apiCall('GET', '/catalog'); },
-            { newId: editorNewId || undefined },
-        );
+            var reload = withListener(h('button', {
+                type: 'button',
+                class: 'btn btn--primary',
+                text: 'Load the latest and start again'
+            }), 'click', async function () {
+                close(null);
+                var loaded = await loadLibrary();
+                if (!loaded.ok) toast(loaded.reason, 'error');
+                toast('Loaded the latest library. Your change was not applied.', 'ok');
+                render();
+            });
 
-        if (result.outcome !== 'reloaded') {
-            setCatalogStatus('error', 'Error');
-            catalogError('Could not reload: ' + result.reason);
-            return;
-        }
+            var retry = withListener(h('button', {
+                type: 'button',
+                class: 'btn',
+                text: 'Keep my change and save again'
+            }), 'click', async function () {
+                close(null);
+                await publish(reason);
+            });
 
-        editorSession = result.session;
-        editorNewId = editorSession.newId;
-        editorConflict = null;
-        if (!CatalogEditor.nodeById(editorSession, selectedNodeId)) selectedNodeId = null;
-        var box = document.getElementById('catalog-conflict');
-        if (box) box.classList.add('hidden');
-        catalogError('');
-        setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
-        renderCatalog();
-    }
+            var stop = withListener(h('button', { type: 'button', class: 'btn btn--quiet', text: 'Leave it for now' }),
+                'click', function () { close(null); });
 
-    /** Keep looking at your edits without pretending they can be published as they are. */
-    function keepEditing() {
-        var box = document.getElementById('catalog-conflict');
-        if (box) box.classList.add('hidden');
-        setCatalogStatus('conflict', 'Conflict — reload before saving again');
-        refreshCatalogNotices();
-    }
-
-    // --- importing a YouTube playlist ---------------------------------------------------------
-    //
-    // The playlist is resolved by the TV's own server (the one piece of this app that can talk to
-    // YouTube) and the *catalog* is then changed by the same single document write every other edit
-    // uses. Resolving writes nothing: importing into the catalog never approves a source, so an
-    // imported video that has not been added as a Content Source becomes a visible entry that cannot
-    // play until the parent approves it - and the editor says so.
-
-    function importStatus(kind, message) {
-        var el = document.getElementById('import-status');
-        if (!el) return;
-        el.className = 'catalog-import-status status-' + kind;
-        el.textContent = message;
-        el.classList.remove('hidden');
-    }
-
-    function clearImportStatus() {
-        var el = document.getElementById('import-status');
-        if (el) el.classList.add('hidden');
-    }
-
-    /** Only a category or a subcategory may hold videos, so only those can be imported into. */
-    function refreshImportForm() {
-        var select = document.getElementById('import-parent');
-        var hint = document.getElementById('import-hint');
-        if (!select || !editorSession) return;
-
-        var targets = editorSession.nodes.filter(function (node) {
-            return CatalogEditor.childTypesOf(node.nodeType).indexOf('VIDEO') !== -1;
-        }).sort(function (a, b) {
-            if (a.parentId === b.parentId) return a.position - b.position;
-            return a.parentId === null ? -1 : (b.parentId === null ? 1 : (a.parentId < b.parentId ? -1 : 1));
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [reload, retry, stop]));
         });
-
-        var previous = select.value;
-        select.innerHTML = targets.map(function (node) {
-            var kind = node.nodeType === 'CATEGORY' ? 'category' : 'subcategory';
-            var parent = node.parentId ? CatalogEditor.nodeById(editorSession, node.parentId) : null;
-            var where = parent ? parent.title + ' › ' : '';
-            return '<option value="' + node.id + '">' + where + node.title + ' (' + kind + ')</option>';
-        }).join('');
-        if (targets.some(function (node) { return node.id === previous; })) select.value = previous;
-        select.disabled = targets.length === 0;
-
-        var button = document.getElementById('import-btn');
-        if (button) button.disabled = targets.length === 0;
-
-        if (hint) {
-            hint.textContent = targets.length === 0
-                ? 'Add a category or a subcategory first — that is what a playlist imports into.'
-                : 'The playlist\'s videos become normal videos under the target. The playlist itself is never shown to your child.';
-        }
-
-        // A raw playlist URL/id needs no approval; the videos are imported either way. If that
-        // playlist is already an approved Content Source, its videos can also play.
-        if (approvedSourceIds.length > 0) {
-            hint.textContent += ' Videos from an approved Content Source can play; the rest appear but stay blocked until you approve that source.';
-        }
     }
 
-    function importSummaryText(summary) {
+    // --- the parent's words ------------------------------------------------------------------
+
+    var TYPE_WORDS = { CATEGORY: 'Shelf', SUBCATEGORY: 'Folder', VIDEO: 'Video' };
+
+    function isContainer(node) {
+        return node.nodeType === CatalogEditor.SUBCATEGORY;
+    }
+
+    function nodeById(id) {
+        return state.session ? CatalogEditor.nodeById(state.session, id) : null;
+    }
+
+    function childrenOf(parentId) {
+        return state.session ? CatalogEditor.childrenOf(state.session, parentId) : [];
+    }
+
+    function descendantsOf(nodeId) {
+        var found = [];
+        (function walk(parentId) {
+            childrenOf(parentId).forEach(function (child) {
+                found.push(child);
+                if (child.nodeType !== CatalogEditor.VIDEO) walk(child.id);
+            });
+        })(nodeId);
+        return found;
+    }
+
+    function pathOf(nodeId) {
         var parts = [];
-        if (summary.added.length) parts.push(summary.added.length + ' added');
-        if (summary.kept.length) parts.push(summary.kept.length + ' already there');
-        if (summary.sourcesRecorded.length) parts.push(summary.sourcesRecorded.length + ' source recorded');
-        if (summary.hidden.length) parts.push(summary.hidden.length + ' hidden (no longer in the playlist)');
-        if (summary.skipped) parts.push(summary.skipped + ' skipped');
-        if (summary.unusableItems) parts.push(summary.unusableItems + ' unavailable');
-        return parts.length ? parts.join(', ') : 'nothing to change';
+        var node = nodeById(nodeId);
+        var guard = 0;
+        while (node && guard++ < 32) {
+            parts.unshift(node.title);
+            node = node.parentId ? nodeById(node.parentId) : null;
+        }
+        return parts.join(' / ');
     }
 
-    async function importPlaylistNow() {
-        if (!editorSession) return;
-        if (editorConflict) {
-            importStatus('conflict', 'Reload the server version before importing.');
-            return;
-        }
-
-        var url = document.getElementById('import-url').value;
-        var parentId = document.getElementById('import-parent').value || null;
-        if (!url || !url.trim()) {
-            importStatus('error', 'Paste a YouTube playlist URL or id.');
-            return;
-        }
-
-        importStatus('saving', 'Importing…');
-        var result = await CatalogEditor.importPlaylistFrom(
-            editorSession,
-            { url: url, parentId: parentId },
-            function (target) { return apiCall('POST', '/catalog/import/resolve', { url: target }); },
-            function (body) { return apiCall('PUT', '/catalog', body); },
-        );
-
-        if (result.session) editorSession = result.session;
-
-        if (result.outcome === 'imported') {
-            editorConflict = null;
-            document.getElementById('catalog-conflict').classList.add('hidden');
-            catalogError('');
-            setCatalogStatus('saved', 'Saved (version ' + editorSession.catalogVersion + ')');
-            var text = 'Imported “' + result.summary.playlistTitle + '”: ' + importSummaryText(result.summary) +
-                ' — version ' + editorSession.catalogVersion + '.';
-            if (result.summary.existingContainerId) {
-                text += ' Note: this shelf already has a subcategory for that playlist, so those videos may now appear twice.';
-            }
-            if (result.summary.truncated) {
-                text += ' The playlist has more videos than one import takes; import it again to continue.';
-            }
-            if (!result.summary.approved) {
-                text += ' This playlist is not an approved Content Source yet, so these videos appear but cannot play until you add it under Content Sources.';
-            }
-            importStatus('saved', text);
-            document.getElementById('import-url').value = '';
-            renderCatalog();
-            return;
-        }
-
-        if (result.outcome === 'no-changes') {
-            catalogError('');
-            importStatus('saved', 'No changes: every video in “' + result.summary.playlistTitle +
-                '” is already under that target, so nothing was published and the version did not move.');
-            renderCatalog();
-            return;
-        }
-
-        if (result.outcome === 'conflict') {
-            editorConflict = { serverVersion: result.serverVersion };
-            setCatalogStatus('conflict', 'Conflict');
-            showCatalogConflict(result.serverVersion);
-            importStatus('conflict', 'The catalog changed on the server while the playlist was being resolved. ' +
-                'Nothing was imported. Reload the server version, then import again.');
-            renderCatalog();
-            return;
-        }
-
-        if (result.outcome === 'rejected') {
-            setCatalogStatus('error', 'Error');
-            var reasons = (result.reasons || []).join('; ');
-            catalogError('The server refused the catalog: ' + reasons);
-            importStatus('error', 'The import was refused: ' + reasons);
-            return;
-        }
-
-        setCatalogStatus('error', 'Error');
-        catalogError('Import not saved — ' + result.reason + '. Your changes are still here; press Save to try again.');
-        importStatus('error', 'Import failed: ' + result.reason);
+    function words(count, singular, plural) {
+        return count + ' ' + (count === 1 ? singular : (plural || singular + 's'));
     }
 
-    window.loadCatalog = loadCatalog;
-    window.reloadCatalogFromServer = reloadCatalogFromServer;
-    window.saveCatalog = saveCatalog;
-    window.keepEditing = keepEditing;
-    window.refreshAddForm = refreshAddForm;
-    window.refreshImportForm = refreshImportForm;
-    window.importPlaylistNow = importPlaylistNow;
-    window.addNode = addNode;
-    window.renameSelected = renameSelected;
-    window.toggleSelectedEnabled = toggleSelectedEnabled;
-    window.moveSelectedUp = moveSelectedUp;
-    window.moveSelectedDown = moveSelectedDown;
-    window.moveSelectedTo = moveSelectedTo;
-    window.deleteSelected = deleteSelected;
-    window.changeThumbnailMode = changeThumbnailMode;
-    window.changeThumbnailVideo = changeThumbnailVideo;
+    /** How many videos, folders and hidden things a shelf or folder holds. */
+    function countsFor(nodeId) {
+        var inside = descendantsOf(nodeId);
+        var videos = inside.filter(function (child) { return child.nodeType === CatalogEditor.VIDEO; });
+        return {
+            folders: inside.filter(function (child) { return child.nodeType === CatalogEditor.SUBCATEGORY; }).length,
+            videos: videos.length,
+            hidden: inside.filter(function (child) { return child.enabled === false; }).length,
+            videosList: videos
+        };
+    }
 
-    // Selecting a row: delegated, so re-rendering the tree never leaves a stale handler behind.
-    (function () {
-        var container = document.getElementById('catalog-tree');
-        if (!container) return;
-        container.addEventListener('click', function (event) {
-            var target = event.target;
-            while (target && target !== container && !target.getAttribute('data-node-id')) {
-                target = target.parentNode;
+    /** The TV's own count, which knows about episodes the document has never seen. */
+    function containerVideoCount(node) {
+        var fromDocument = countsFor(node.id).videos;
+        var fromTv = state.artwork.containers[node.id];
+        if (fromTv && typeof fromTv.videoCount === 'number' && fromTv.videoCount > fromDocument) {
+            return fromTv.videoCount;
+        }
+        return fromDocument;
+    }
+
+    function artworkFor(node) {
+        if (node.nodeType === CatalogEditor.VIDEO) {
+            return state.artwork.videos[node.youtubeVideoId] || '';
+        }
+        if (isContainer(node)) {
+            var art = state.artwork.containers[node.id];
+            if (art && art.thumbnailUrl) return art.thumbnailUrl;
+            // A folder whose videos are not on the TV yet borrows its first child's picture rather
+            // than showing nothing.
+            var children = childrenOf(node.id);
+            for (var i = 0; i < children.length; i++) {
+                var picture = artworkFor(children[i]);
+                if (picture) return picture;
             }
-            if (!target || target === container) return;
-            selectNode(target.getAttribute('data-node-id'));
+        }
+        return '';
+    }
+
+    /**
+     * Whether a video can actually play, mirroring the rule the TV enforces.
+     *
+     * The app approves a video only while its *source* is allowed, so a video is playable when its
+     * playlist is allowed, or when it was allowed on its own. Nothing about being in the library
+     * makes a video playable - which is exactly why this is computed from the allowed sources rather
+     * than from the library.
+     */
+    function allowedSourceMaps() {
+        var playlists = {};
+        var videos = {};
+        state.playlists.forEach(function (source) {
+            if (source.sourceType === 'yt_playlist') playlists[source.sourceId] = true;
+            if (source.sourceType === 'yt_video') videos[source.sourceId] = true;
         });
-    })();
+        return { playlists: playlists, videos: videos };
+    }
 
-    // A refresh with unsaved edits loses them. Say so before it happens rather than after.
-    window.addEventListener('beforeunload', function (event) {
-        if (editorSession && CatalogEditor.isDirty(editorSession)) {
-            event.preventDefault();
-            event.returnValue = '';
-            return '';
+    function canPlay(node, maps) {
+        if (node.nodeType !== CatalogEditor.VIDEO) return true;
+        if (!node.youtubeVideoId) return false;
+        var allowed = maps || allowedSourceMaps();
+        if (node.youtubePlaylistId && allowed.playlists[node.youtubePlaylistId]) return true;
+        return !!allowed.videos[node.youtubeVideoId];
+    }
+
+    function sourceNameFor(node) {
+        if (!node.youtubePlaylistId) return 'Added by you';
+        var found = null;
+        state.playlists.forEach(function (source) {
+            if (source.sourceType === 'yt_playlist' && source.sourceId === node.youtubePlaylistId) {
+                found = source.displayName || source.sourceId;
+            }
+        });
+        return found ? 'From ' + found : 'From a playlist you have not allowed yet';
+    }
+
+    function nodeMeta(node, maps) {
+        if (node.nodeType === CatalogEditor.VIDEO) {
+            var parts = [sourceNameFor(node)];
+            if (node.enabled === false) parts.push('hidden');
+            if (!canPlay(node, maps)) parts.push('cannot play yet');
+            return parts.join(' · ');
         }
+
+        var videos = isContainer(node) ? containerVideoCount(node) : countsFor(node.id).videos;
+        var folders = isContainer(node) ? 0 : countsFor(node.id).folders;
+        var hidden = countsFor(node.id).hidden;
+
+        var pieces = [];
+        if (folders) pieces.push(words(folders, 'folder'));
+        pieces.push(words(videos, 'video'));
+        if (hidden) pieces.push(words(hidden, 'hidden item', 'hidden items'));
+        return pieces.join(' · ');
+    }
+
+    // --- the router --------------------------------------------------------------------------
+
+    function parseHash() {
+        var raw = (window.location.hash || '').replace(/^#\/?/, '');
+        var parts = raw.split('/').filter(function (part) { return part.length > 0; });
+        var name = parts[0] || 'library';
+
+        if (name === 'shelf' || name === 'folder') {
+            return { name: name, id: parts[1] ? decodeURIComponent(parts[1]) : null };
+        }
+        if (name === 'add') {
+            return { name: 'add', id: parts[1] ? decodeURIComponent(parts[1]) : null };
+        }
+        if (name === 'settings') return { name: 'settings', id: null };
+        return { name: 'library', id: null };
+    }
+
+    function go(hash) {
+        if (window.location.hash === hash) {
+            render();
+            return;
+        }
+        window.location.hash = hash;
+    }
+
+    /** Where a node lives: a folder opens its own screen, everything else opens its shelf. */
+    function routeFor(node) {
+        if (!node) return '#/library';
+        if (node.nodeType === CatalogEditor.SUBCATEGORY) return '#/folder/' + encodeURIComponent(node.id);
+        if (node.nodeType === CatalogEditor.VIDEO) {
+            var parent = node.parentId ? nodeById(node.parentId) : null;
+            return routeFor(parent);
+        }
+        return '#/shelf/' + encodeURIComponent(node.id);
+    }
+
+    function render() {
+        if (!state.token) {
+            topbar.hidden = true;
+            tabbar.hidden = true;
+            clear(view).appendChild(screenConnect());
+            return;
+        }
+
+        topbar.hidden = false;
+        tabbar.hidden = false;
+        state.route = parseHash();
+        paintTabs();
+
+        var screen;
+        if (state.route.name === 'settings') {
+            screen = screenSettings();
+        } else if (!state.session) {
+            screen = screenNotLoaded();
+        } else if (state.route.name === 'add') {
+            screen = screenAdd(state.route.id);
+        } else if (state.route.name === 'shelf') {
+            screen = screenShelf(state.route.id);
+        } else if (state.route.name === 'folder') {
+            screen = screenFolder(state.route.id);
+        } else {
+            screen = screenLibrary();
+        }
+
+        clear(view).appendChild(screen);
+        paintStatusPill();
+    }
+
+    function paintTabs() {
+        var onSettings = state.route.name === 'settings';
+        tabLibrary.classList.toggle('is-active', !onSettings);
+        tabSettings.classList.toggle('is-active', onSettings);
+        tabLibrary.setAttribute('aria-current', onSettings ? 'false' : 'page');
+        tabSettings.setAttribute('aria-current', onSettings ? 'page' : 'false');
+    }
+
+    function paintStatusPill() {
+        if (saving) return;
+        if (state.reachable === null) {
+            tvState.hidden = true;
+            return;
+        }
+
+        tvState.hidden = false;
+        tvState.classList.remove('pill--ok', 'pill--warn', 'pill--off');
+
+        if (!state.reachable) {
+            tvState.classList.add('pill--off');
+            tvState.textContent = 'TV offline';
+            tvState.title = 'The TV is not answering this page';
+            return;
+        }
+
+        var playing = state.status && state.status.currentlyPlaying;
+        if (playing && playing.title) {
+            tvState.classList.add('pill--ok');
+            tvState.textContent = '▶ ' + playing.title;
+            tvState.title = 'Playing on the TV right now';
+            return;
+        }
+
+        tvState.classList.add('pill--warn');
+        tvState.textContent = 'TV on';
+        tvState.title = 'Nothing is playing on the TV';
+    }
+
+    function screenNotLoaded() {
+        return h('div', { class: 'screen' }, [
+            screenHead('Connecting to your TV', null, 'Reading your library…', []),
+            h('p', { class: 'inline-status' }, [h('span', { class: 'spinner' }), 'One moment…']),
+            h('div', { class: 'btn-group' }, [
+                actionButton('Try again', 'reload-catalog', {}, 'btn--primary'),
+                actionButton('Disconnect this phone', 'disconnect', {})
+            ])
+        ]);
+    }
+
+    // --- the connect screen ------------------------------------------------------------------
+
+    function screenConnect() {
+        var pinInput = h('input', {
+            class: 'input',
+            type: 'text',
+            inputmode: 'numeric',
+            autocomplete: 'one-time-code',
+            maxlength: '8',
+            'aria-label': 'PIN shown on the TV'
+        });
+        var error = h('p', { class: 'field__error', hidden: true });
+        var submit = h('button', { type: 'button', class: 'btn btn--primary btn--block', text: 'Connect' });
+
+        async function attempt() {
+            var pin = pinInput.value.trim();
+            if (!pin) return;
+            error.hidden = true;
+            submit.disabled = true;
+            submit.textContent = 'Connecting…';
+
+            var result = await connect(pin);
+
+            submit.disabled = false;
+            submit.textContent = 'Connect';
+
+            if (!result.ok) {
+                error.textContent = result.reason;
+                error.hidden = false;
+                pinInput.select();
+                return;
+            }
+
+            var loaded = await loadLibrary();
+            if (!loaded.ok) toast(loaded.reason, 'error');
+            startPolling();
+            loadStats();
+            loadLimits();
+            loadCrash();
+            render();
+        }
+
+        submit.addEventListener('click', attempt);
+        pinInput.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') attempt();
+        });
+
+        var children = [
+            h('h1', { class: 'screen__title', text: 'SafeTube' }),
+            h('p', {
+                class: 'screen__sub',
+                text: 'Type the PIN your TV is showing. This page is how you choose what your child can watch.'
+            }),
+            h('div', { class: 'panel' }, [
+                h('label', { class: 'field' }, [
+                    h('span', { class: 'field__label', text: 'PIN from the TV' }),
+                    pinInput
+                ]),
+                error,
+                submit
+            ])
+        ];
+
+        if (state.versionMismatch) {
+            children.splice(1, 0, banner('warn', 'This page is out of date',
+                'Reload the page to get the version that matches your TV.', []));
+        }
+
+        setTimeout(function () { pinInput.focus(); }, 40);
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    // --- shared pieces of a screen -----------------------------------------------------------
+
+    function screenHead(title, crumbs, subtitle, actions) {
+        return h('div', { class: 'screen__head' }, [
+            crumbs && crumbs.length ? h('div', { class: 'crumbs' }, crumbs) : null,
+            h('h1', { class: 'screen__title', text: title }),
+            subtitle ? h('p', { class: 'screen__sub', text: subtitle }) : null,
+            actions && actions.length ? h('div', { class: 'screen__actions' }, actions) : null
+        ]);
+    }
+
+    function crumb(label, route) {
+        if (!route) return h('span', { class: 'crumb crumb--here', text: label });
+        return withListener(h('button', { type: 'button', class: 'crumb', text: label }),
+            'click', function () { go(route); });
+    }
+
+    function artworkNode(node, className) {
+        var url = artworkFor(node);
+        if (!url) {
+            return h('div', {
+                class: className + ' ' + className + '--placeholder',
+                'aria-hidden': 'true',
+                text: node.nodeType === CatalogEditor.VIDEO ? '▶' : '🗂'
+            });
+        }
+        return h('img', { class: className, src: url, alt: '', loading: 'lazy' });
+    }
+
+    /** One shelf, as a line: a shelf is a row on the TV, and it has no picture of its own. */
+    function shelfRow(node) {
+        var main = withListener(h('button', { type: 'button', class: 'row__main' }, [
+            h('span', { class: 'row__body' }, [
+                h('span', { class: 'row__title', text: node.title }),
+                h('span', { class: 'row__meta', text: nodeMeta(node) })
+            ]),
+            h('span', { class: 'row__chevron', 'aria-hidden': 'true', text: '›' })
+        ]), 'click', function () { go('#/shelf/' + encodeURIComponent(node.id)); });
+        main.setAttribute('aria-label', 'Open ' + node.title);
+
+        return h('li', { class: 'row' + (node.enabled === false ? ' row--hidden' : '') }, [
+            main,
+            menuButton(node)
+        ]);
+    }
+
+    function menuButton(node) {
+        return withListener(h('button', {
+            type: 'button',
+            class: 'btn btn--icon',
+            'aria-label': 'More options for ' + node.title,
+            text: '⋯'
+        }), 'click', function () { openItemSheet(node.id); });
+    }
+
+    /** One folder or video, as a line with its picture: parents recognise these by sight. */
+    function itemRow(node, maps) {
+        var badges = [];
+        if (node.enabled === false) badges.push(h('span', { class: 'badge badge--hidden', text: 'Hidden' }));
+        if (node.nodeType === CatalogEditor.VIDEO && !canPlay(node, maps)) {
+            badges.push(h('span', { class: 'badge badge--blocked', text: 'Cannot play yet' }));
+        }
+
+        var main = withListener(h('button', { type: 'button', class: 'row__main' }, [
+            artworkNode(node, 'row__art'),
+            h('span', { class: 'row__body' }, [
+                h('span', { class: 'row__title', text: node.title }),
+                h('span', { class: 'row__meta', text: nodeMeta(node, maps) }),
+                badges.length ? h('span', { class: 'badges' }, badges) : null
+            ])
+        ]), 'click', function () {
+            if (isContainer(node)) go('#/folder/' + encodeURIComponent(node.id));
+            else openItemSheet(node.id);
+        });
+        main.setAttribute('aria-label', 'Open ' + node.title);
+
+        return h('li', { class: 'row' + (node.enabled === false ? ' row--hidden' : '') }, [
+            main,
+            menuButton(node)
+        ]);
+    }
+
+    function emptyState(icon, title, note, actions) {
+        return h('div', { class: 'empty' }, [
+            h('p', { class: 'empty__icon', 'aria-hidden': 'true', text: icon }),
+            h('p', { class: 'empty__title', text: title }),
+            h('p', { class: 'empty__note', text: note }),
+            actions && actions.length ? h('div', { class: 'btn-group' }, actions) : null
+        ]);
+    }
+
+    function banner(kind, title, text, actions) {
+        return h('div', { class: 'banner banner--' + kind }, [
+            title ? h('p', { class: 'banner__title', text: title }) : null,
+            text ? h('p', { text: text }) : null,
+            actions && actions.length ? h('div', { class: 'banner__actions' }, actions) : null
+        ]);
+    }
+
+    function addActions(parentId) {
+        return [
+            actionButton('Add from YouTube', 'add-from-youtube', { 'data-parent': parentId || '' }, 'btn--primary'),
+            parentId
+                ? actionButton('New folder', 'new-folder', { 'data-parent': parentId })
+                : actionButton('New shelf', 'new-shelf', {})
+        ];
+    }
+
+    /** Every video below these nodes that cannot play yet, and the sources that would fix it. */
+    function unplayableBanner(nodes) {
+        var maps = allowedSourceMaps();
+        var videos = [];
+        nodes.forEach(function (node) {
+            videos = videos.concat(descendantsOf(node.id).filter(function (child) {
+                return child.nodeType === CatalogEditor.VIDEO;
+            }));
+        });
+
+        var stuck = videos.filter(function (video) { return !canPlay(video, maps); });
+        if (!stuck.length) return null;
+
+        var sources = {};
+        stuck.forEach(function (video) {
+            if (video.youtubePlaylistId) sources[video.youtubePlaylistId] = 'playlist';
+            else if (video.youtubeVideoId) sources[video.youtubeVideoId] = 'video';
+        });
+
+        return banner('warn', words(stuck.length, 'video') + ' cannot play yet',
+            'Your child can see them, but nothing plays until you allow the playlist they came from.',
+            [actionButton('Allow ' + words(Object.keys(sources).length, 'source'),
+                'allow-sources', { 'data-sources': JSON.stringify(sources) }, 'btn--primary')]);
+    }
+
+    // --- the library -------------------------------------------------------------------------
+
+    function screenLibrary() {
+        var shelves = CatalogEditor.roots(state.session);
+        var children = [
+            screenHead('Library', null, 'This is what your child sees on the TV.', addActions(null))
+        ];
+
+        if (state.versionMismatch) {
+            children.push(banner('warn', 'This page is out of date',
+                'Reload the page to get the version that matches your TV.', []));
+        }
+
+        if (homescreenHintWanted()) children.push(homescreenBanner());
+        children.push(unplayableBanner(shelves));
+
+        if (!shelves.length) {
+            children.push(emptyState('🎬', 'Your library is empty',
+                'Start with a shelf — a row of videos on the TV, like “Cartoons” or “Bedtime”.',
+                [
+                    actionButton('Add from YouTube', 'add-from-youtube', {}, 'btn--primary'),
+                    actionButton('New shelf', 'new-shelf', {})
+                ]));
+        } else {
+            children.push(h('ul', { class: 'panel panel--flush' }, shelves.map(shelfRow)));
+            children.push(h('div', { class: 'screen__actions' }, [
+                actionButton('Send to TV now', 'send-to-tv', {}, 'btn--quiet')
+            ]));
+        }
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    function homescreenHintWanted() {
+        var standalone = (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) ||
+            window.navigator.standalone;
+        var mobile = 'ontouchstart' in window || window.innerWidth <= 768;
+        if (standalone || !mobile) return false;
+        try {
+            return !window.localStorage.getItem(HOMESCREEN_KEY);
+        } catch (error) {
+            return false;
+        }
+    }
+
+    function homescreenBanner() {
+        var isIOS = /iPhone|iPad/.test(navigator.userAgent);
+        var actions = [actionButton('Not now', 'dismiss-homescreen', {}, 'btn--quiet')];
+        if (!isIOS) {
+            actions.unshift(actionButton('Add to home screen', 'install-homescreen', {}, 'btn--primary'));
+        }
+
+        return banner('info', 'Keep SafeTube handy',
+            isIOS
+                ? 'Tap Share, then “Add to Home Screen”, so this page is one tap away.'
+                : 'Add this page to your home screen, so it is one tap away next time.',
+            actions);
+    }
+
+    // --- a shelf, and a folder ---------------------------------------------------------------
+
+    function screenShelf(shelfId) {
+        var shelf = nodeById(shelfId);
+
+        if (!shelf || shelf.nodeType !== CatalogEditor.CATEGORY) {
+            return goneScreen('That shelf is gone');
+        }
+
+        var children = [
+            screenHead(shelf.title, [crumb('Library', '#/library'), crumb(shelf.title, null)],
+                nodeMeta(shelf), addActions(shelf.id).concat([menuButton(shelf)]))
+        ];
+
+        if (shelf.enabled === false) {
+            children.push(banner('warn', 'This shelf is hidden',
+                'Your child cannot see it on the TV until you show it again.',
+                [actionButton('Show this shelf', 'show-node', { 'data-id': shelf.id }, 'btn--primary')]));
+        }
+
+        children.push(unplayableBanner([shelf]));
+        children.push(listOf(childrenOf(shelf.id), shelf));
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    function screenFolder(folderId) {
+        var folder = nodeById(folderId);
+
+        if (!folder || folder.nodeType !== CatalogEditor.SUBCATEGORY) {
+            return goneScreen('That folder is gone');
+        }
+
+        var crumbs = [crumb('Library', '#/library')];
+        var parent = folder.parentId ? nodeById(folder.parentId) : null;
+        if (parent) crumbs.push(crumb(parent.title, '#/shelf/' + encodeURIComponent(parent.id)));
+        crumbs.push(crumb(folder.title, null));
+
+        var children = [
+            screenHead(folder.title, crumbs, nodeMeta(folder),
+                addActions(folder.id).concat([menuButton(folder)]))
+        ];
+
+        if (folder.enabled === false) {
+            children.push(banner('warn', 'This folder is hidden',
+                'Your child cannot see it on the TV until you show it again.',
+                [actionButton('Show this folder', 'show-node', { 'data-id': folder.id }, 'btn--primary')]));
+        }
+
+        children.push(unplayableBanner([folder]));
+        children.push(listOf(childrenOf(folder.id), folder));
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    function goneScreen(title) {
+        return h('div', { class: 'screen' }, [
+            screenHead(title, [crumb('Library', '#/library')],
+                'It may have been deleted from another phone or browser.', [
+                    actionButton('Back to the library', 'go-library', {}, 'btn--primary'),
+                    actionButton('Reload from the TV', 'reload-catalog', {})
+                ])
+        ]);
+    }
+
+    function listOf(items, parent) {
+        if (!items.length) {
+            // A folder can legitimately have nothing in the *document* while the TV shows a great
+            // many videos: episodes of a playlist the TV materialises itself. Saying "nothing here
+            // yet" over a folder whose own heading says how many videos it holds would be a lie, so
+            // that case is explained instead.
+            var fromTv = state.artwork.containers[parent.id];
+            if (fromTv && fromTv.videoCount > 0) {
+                return emptyState('📺', 'These videos come from the TV',
+                    'This folder plays ' + words(fromTv.videoCount, 'video') +
+                    ' that the TV keeps up to date from the playlist itself, so there is nothing to ' +
+                    'list here. Anything you add sits alongside them.',
+                    [actionButton('Add from YouTube', 'add-from-youtube',
+                        { 'data-parent': parent.id }, 'btn--primary')]);
+            }
+
+            return emptyState('📼', 'Nothing here yet',
+                'Add videos from YouTube, or make a folder to group them.',
+                [actionButton('Add from YouTube', 'add-from-youtube',
+                    { 'data-parent': parent.id }, 'btn--primary')]);
+        }
+
+        var maps = allowedSourceMaps();
+        return h('ul', { class: 'panel panel--flush' }, items.map(function (node) {
+            return itemRow(node, maps);
+        }));
+    }
+
+    // --- adding from YouTube -----------------------------------------------------------------
+
+    function screenAdd(parentId) {
+        fields = {};
+
+        var urlInput = h('input', {
+            class: 'input',
+            type: 'url',
+            inputmode: 'url',
+            autocapitalize: 'off',
+            autocorrect: 'off',
+            spellcheck: 'false',
+            placeholder: 'https://www.youtube.com/playlist?list=…',
+            'aria-label': 'YouTube link'
+        });
+        var status = h('div', { class: 'inline-status' });
+        var error = h('p', { class: 'field__error', hidden: true });
+        var preview = h('div', { class: 'screen' });
+
+        fields.addUrl = urlInput;
+        fields.addStatus = status;
+        fields.addError = error;
+        fields.addPreview = preview;
+
+        var check = withListener(h('button', {
+            type: 'button',
+            class: 'btn btn--primary btn--block',
+            text: 'Check this link'
+        }), 'click', checkLink);
+
+        urlInput.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') checkLink();
+        });
+
+        var crumbs = [crumb('Library', '#/library')];
+        var parent = parentId ? nodeById(parentId) : null;
+        if (parent) crumbs.push(crumb(parent.title, routeFor(parent)));
+        crumbs.push(crumb('Add from YouTube', null));
+
+        setTimeout(function () { urlInput.focus(); }, 40);
+
+        return h('div', { class: 'screen' }, [
+            screenHead('Add from YouTube', crumbs,
+                'Paste a link to a playlist or a single video, then choose where it goes.', null),
+            h('div', { class: 'panel' }, [
+                h('label', { class: 'field' }, [
+                    h('span', { class: 'field__label', text: 'YouTube link' }),
+                    urlInput,
+                    h('span', { class: 'field__hint', text: 'A playlist link, or a link to one video.' })
+                ]),
+                error,
+                check
+            ]),
+            status,
+            preview
+        ]);
+    }
+
+    async function checkLink() {
+        var url = (fields.addUrl && fields.addUrl.value || '').trim();
+
+        fields.addError.hidden = true;
+        clear(fields.addPreview);
+
+        if (!url) {
+            fields.addError.textContent = 'Paste a YouTube link first.';
+            fields.addError.hidden = false;
+            return;
+        }
+
+        clear(fields.addStatus).appendChild(h('span', { class: 'spinner' }));
+        fields.addStatus.appendChild(document.createTextNode('Looking this up on YouTube…'));
+
+        var result = await apiCall('POST', '/catalog/import/resolve', { url: url });
+        clear(fields.addStatus);
+
+        if (result.status !== 200 || !result.data || !result.data.kind) {
+            fields.addError.textContent = (result.data && result.data.error) || 'That link could not be read.';
+            fields.addError.hidden = false;
+            return;
+        }
+
+        fields.link = { url: url, resolved: result.data };
+        fields.addPreview.appendChild(addPreviewCard(result.data, url));
+    }
+
+    function addPreviewCard(resolved, url) {
+        var isVideo = resolved.kind === 'video';
+        var first = (resolved.videos || [])[0] || {};
+        var picture = resolved.thumbnailUrl || first.thumbnailUrl || '';
+
+        var art = picture
+            ? h('img', { class: 'card__art', src: picture, alt: '', loading: 'lazy' })
+            : h('div', { class: 'card__art card__art--placeholder', 'aria-hidden': 'true', text: '▶' });
+
+        var facts = isVideo ? ['One video'] : [words(resolved.videos.length, 'video')];
+
+        var destinationSelect = h('select', { class: 'select', 'aria-label': 'Where this goes' });
+        var destinations = addDestinations();
+        destinations.forEach(function (option) {
+            destinationSelect.appendChild(h('option', { value: option.id, text: option.title }));
+        });
+        if (state.route.id && destinations.some(function (option) { return option.id === state.route.id; })) {
+            destinationSelect.value = state.route.id;
+        }
+        fields.addParent = destinationSelect;
+
+        var titleInput = h('input', {
+            class: 'input',
+            type: 'text',
+            maxlength: '200',
+            value: isVideo ? (first.title || resolved.title || '') : '',
+            'aria-label': 'Name on the TV'
+        });
+        fields.addTitle = titleInput;
+
+        var allowSwitch = h('input', { type: 'checkbox', checked: !resolved.approved });
+        fields.addAllow = allowSwitch;
+
+        var confirm = withListener(h('button', {
+            type: 'button',
+            class: 'btn btn--primary btn--block',
+            text: isVideo ? 'Add this video' : 'Add ' + words(resolved.videos.length, 'video')
+        }), 'click', confirmAdd);
+
+        var children = [
+            h('div', { class: 'panel' }, [
+                art,
+                h('div', { class: 'card__body' }, [
+                    h('p', { class: 'card__title', text: resolved.title || first.title || 'This link' }),
+                    h('p', { class: 'card__meta', text: facts.join(' · ') })
+                ])
+            ])
+        ];
+
+        if (resolved.truncated) {
+            children.push(banner('warn', 'A long playlist',
+                'Only the first ' + resolved.videos.length + ' videos can be added at once. ' +
+                'Add it again later for the rest.', []));
+        }
+        if (resolved.unusableItems) {
+            children.push(banner('info', null,
+                words(resolved.unusableItems, 'item') + ' in this link cannot be added (deleted or private).', []));
+        }
+
+        var form = [];
+
+        if (destinations.length) {
+            form.push(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'Add to' }),
+                destinationSelect
+            ]));
+        } else {
+            form.push(banner('warn', 'Make a shelf first',
+                'A video has to go inside a shelf or a folder. Make one, then come back to this link.', [
+                    actionButton('New shelf', 'new-shelf', {}, 'btn--primary')
+                ]));
+        }
+
+        if (isVideo) {
+            form.push(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'Name on the TV' }),
+                titleInput,
+                h('span', { class: 'field__hint', text: 'YouTube’s title, which you can change.' })
+            ]));
+        }
+
+        if (resolved.approved) {
+            allowSwitch.checked = false;
+            form.push(banner('info', null,
+                'This is already one of your allowed sources, so it will play as soon as the TV gets it.', []));
+        } else {
+            form.push(h('label', { class: 'switch' }, [
+                allowSwitch,
+                h('span', { class: 'switch__track', 'aria-hidden': 'true' }),
+                h('span', { class: 'switch__text' }, [
+                    h('span', { class: 'switch__title', text: 'Let my child watch it' }),
+                    h('span', { class: 'field__hint', text: 'Adds this to your allowed sources, so its videos can play.' })
+                ])
+            ]));
+        }
+
+        if (destinations.length) form.push(confirm);
+
+        children.push(h('div', { class: 'panel' }, form));
+
+        // A link that names a playlist *and* a video is read as the playlist by the rest of the app
+        // (the same parser approves sources), so the parent is offered the other reading rather than
+        // being quietly given fifty videos.
+        var ownVideoId = CatalogEditor.videoIdFrom(url);
+        if (!isVideo && ownVideoId) {
+            children.push(banner('info', 'This link also names one video',
+                'You can add just that video instead of the whole playlist.',
+                [actionButton('Add only that video', 'add-single-video',
+                    { 'data-video-id': ownVideoId }) ]));
+        }
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    function addDestinations() {
+        return CatalogEditor.validParentsFor(state.session, CatalogEditor.VIDEO)
+            .filter(function (id) { return id !== null && !!nodeById(id); })
+            .map(function (id) { return { id: id, title: pathOf(id) }; });
+    }
+
+    /** The parent pressed "Add": allow the source if asked, then publish one document. */
+    async function confirmAdd() {
+        if (!fields.link || !fields.addParent) return;
+
+        var resolved = fields.link.resolved;
+        var url = fields.link.url;
+        var parentId = fields.addParent.value;
+        var parent = nodeById(parentId);
+
+        if (!parent) {
+            toast('Choose where this should go', 'error');
+            return;
+        }
+
+        if (fields.addAllow && fields.addAllow.checked) {
+            var allowed = await apiCall('POST', '/playlists', { url: url });
+            if (allowed.status !== 200 && allowed.status !== 409) {
+                toast((allowed.data && allowed.data.error) || 'That source could not be allowed', 'error');
+                return;
+            }
+            await loadPlaylists();
+        }
+
+        var applied = resolved.kind === 'video'
+            ? CatalogEditor.addVideo(state.session, {
+                parentId: parentId,
+                title: (fields.addTitle && fields.addTitle.value || '').trim() || resolved.title,
+                youtubeVideoId: resolved.sourceId
+            })
+            : CatalogEditor.importPlaylist(state.session, {
+                parentId: parentId,
+                playlistId: resolved.sourceId,
+                videos: resolved.videos
+            });
+
+        if (!applied.ok) {
+            toast(applied.reason, 'error');
+            return;
+        }
+
+        state.session = applied.session;
+
+        if (resolved.kind !== 'video' && !CatalogEditor.isDirty(state.session)) {
+            toast('Those videos are already in ' + parent.title + '.', 'ok');
+            go(routeFor(parent));
+            return;
+        }
+
+        var howMany = resolved.kind === 'video'
+            ? 1
+            : ((applied.summary && applied.summary.added.length) || resolved.videos.length);
+
+        var reason = resolved.kind === 'video'
+            ? 'Added one video'
+            : 'Added ' + words(howMany, 'video');
+
+        if (applied.summary && applied.summary.hidden && applied.summary.hidden.length) {
+            reason += ', and hid ' + words(applied.summary.hidden.length, 'video') + ' that left that playlist';
+        }
+
+        var saved = await publish(reason);
+        if (saved) go(routeFor(parent));
+    }
+
+    // --- the item menu -----------------------------------------------------------------------
+
+    async function openItemSheet(nodeId) {
+        var node = nodeById(nodeId);
+        if (!node) return;
+
+        var siblings = childrenOf(node.parentId);
+        var index = siblings.findIndex(function (candidate) { return candidate.id === node.id; });
+        var options = [];
+
+        if (node.nodeType !== CatalogEditor.VIDEO) {
+            options.push({ id: 'rename', title: 'Rename', meta: 'Change what it is called on the TV' });
+        }
+
+        options.push({
+            id: 'toggle',
+            title: node.enabled === false ? 'Show it to my child again' : 'Hide it from my child',
+            meta: node.enabled === false
+                ? 'It will appear on the TV again'
+                : 'It stays in your library, but the TV stops showing it'
+        });
+
+        options.push({ id: 'up', title: 'Move up', disabled: index <= 0 });
+        options.push({ id: 'down', title: 'Move down', disabled: index < 0 || index >= siblings.length - 1 });
+
+        if (node.nodeType !== CatalogEditor.CATEGORY) {
+            options.push({
+                id: 'move',
+                title: 'Move to another shelf…',
+                meta: 'Keeps the video and everything inside it'
+            });
+        }
+
+        if (node.nodeType !== CatalogEditor.VIDEO) {
+            var auto = CatalogEditor.autoVideo(state.session, node.id);
+            var fromTv = state.artwork.containers[node.id];
+            options.push({
+                id: 'picture',
+                title: 'Choose the picture',
+                meta: auto
+                    ? 'Now showing “' + auto.title + '”'
+                    : (fromTv && fromTv.videoCount > 0
+                        ? 'The TV picks one from the playlist itself'
+                        : 'Nothing inside to take a picture from')
+            });
+        }
+
+        options.push({
+            id: 'delete',
+            title: 'Delete',
+            meta: node.nodeType === CatalogEditor.VIDEO
+                ? 'Removes it from your library and from the TV'
+                : 'Deletes this and everything inside it',
+            danger: true
+        });
+
+        var choice = await chooseFrom({
+            title: node.title,
+            body: TYPE_WORDS[node.nodeType] + ' · ' + nodeMeta(node),
+            image: artworkFor(node) || null,
+            options: options
+        });
+
+        if (choice) runItemAction(choice, node);
+    }
+
+    async function runItemAction(choice, node) {
+        if (choice === 'rename') {
+            var title = await askForText({ title: 'Rename', label: 'Name', value: node.title });
+            if (title === null) return;
+            var renamed = CatalogEditor.rename(state.session, { id: node.id, title: title });
+            if (!renamed.ok) return void toast(renamed.reason, 'error');
+            state.session = renamed.session;
+            return void publish('Renamed');
+        }
+
+        if (choice === 'toggle') {
+            var shown = node.enabled === false;
+            var toggled = CatalogEditor.setEnabled(state.session, { id: node.id, enabled: shown });
+            if (!toggled.ok) return void toast(toggled.reason, 'error');
+            state.session = toggled.session;
+            return void publish(shown ? 'Shown again' : 'Hidden');
+        }
+
+        if (choice === 'up' || choice === 'down') {
+            var moved = choice === 'up'
+                ? CatalogEditor.moveUp(state.session, { id: node.id })
+                : CatalogEditor.moveDown(state.session, { id: node.id });
+            if (!moved.ok) return void toast(moved.reason, 'error');
+            state.session = moved.session;
+            return void publish('Reordered');
+        }
+
+        if (choice === 'move') return void moveToOtherParent(node);
+        if (choice === 'picture') return void choosePicture(node);
+        if (choice === 'delete') return void askDelete(node);
+    }
+
+    async function moveToOtherParent(node) {
+        var forbidden = CatalogEditor.subtreeIds(state.session, node.id);
+        var options = CatalogEditor.validParentsFor(state.session, node.nodeType)
+            .filter(function (id) { return id !== null && forbidden.indexOf(id) === -1; })
+            .map(function (id) {
+                return {
+                    id: id,
+                    title: pathOf(id),
+                    selected: id === node.parentId,
+                    meta: id === node.parentId ? 'Where it is now' : ''
+                };
+            });
+
+        if (!options.length) {
+            toast('There is nowhere else to put it yet.', 'ok');
+            return;
+        }
+
+        var destination = await chooseFrom({
+            title: 'Move “' + node.title + '”',
+            body: 'Choose the shelf or folder it should go in.',
+            options: options
+        });
+
+        if (!destination) return;
+
+        var moved = CatalogEditor.moveTo(state.session, { id: node.id, parentId: destination });
+        if (!moved.ok) return void toast(moved.reason, 'error');
+        state.session = moved.session;
+        publish('Moved');
+    }
+
+    async function choosePicture(node) {
+        var videos = CatalogEditor.descendantVideos(state.session, node.id);
+        var options = [{
+            id: 'AUTO',
+            title: 'Automatic',
+            meta: 'Show the first video inside — what the TV does today',
+            selected: CatalogEditor.thumbnailModeOf(node) === 'AUTO'
+        }];
+
+        videos.forEach(function (video) {
+            if (!video.usable) return;
+            options.push({
+                id: video.id,
+                title: video.title,
+                meta: video.path,
+                selected: node.thumbnailVideoId === video.id
+            });
+        });
+
+        if (options.length === 1) {
+            var fromTv = state.artwork.containers[node.id];
+            toast(fromTv && fromTv.videoCount > 0
+                ? 'The TV picks this folder’s picture from the playlist itself.'
+                : 'This has no videos in it yet, so there is nothing to show.', 'ok');
+            return;
+        }
+
+        var chosen = await chooseFrom({
+            title: 'Picture for “' + node.title + '”',
+            body: 'What should this show on the TV?',
+            options: options
+        });
+
+        if (!chosen) return;
+
+        var applied = chosen === 'AUTO'
+            ? CatalogEditor.setThumbnail(state.session, { id: node.id, mode: 'AUTO' })
+            : CatalogEditor.setThumbnail(state.session, { id: node.id, mode: 'VIDEO', videoNodeId: chosen });
+
+        if (!applied.ok) return void toast(applied.reason, 'error');
+        state.session = applied.session;
+        publish('Picture changed');
+    }
+
+    async function askDelete(node) {
+        var inside = descendantsOf(node.id).length;
+        var confirmed = await confirmDialog({
+            title: 'Delete “' + node.title + '”?',
+            body: inside
+                ? 'This deletes it and the ' + words(inside, 'thing') + ' inside it, from your library and from the TV. ' +
+                  'You can add them again later.'
+                : 'This removes it from your library and from the TV. You can add it again later.',
+            confirmLabel: 'Delete',
+            danger: true
+        });
+
+        if (!confirmed) return;
+
+        var parentId = node.parentId;
+        var removed = CatalogEditor.remove(state.session, { id: node.id });
+        if (!removed.ok) return void toast(removed.reason, 'error');
+        state.session = removed.session;
+
+        var saved = await publish('Deleted');
+        if (saved && !parentId) go('#/library');
+    }
+
+    // --- settings ----------------------------------------------------------------------------
+
+    function panel(title, note, body, actions) {
+        return h('section', { class: 'panel' }, [
+            h('div', { class: 'panel__head' }, [
+                h('h2', { class: 'panel__title', text: title }),
+                actions && actions.length ? h('div', { class: 'btn-group' }, actions) : null
+            ]),
+            note ? h('p', { class: 'panel__note', text: note }) : null,
+            body
+        ]);
+    }
+
+    function screenSettings() {
+        var children = [
+            screenHead('Settings', null, 'The TV itself, screen time, and what your child is allowed to watch.', [])
+        ];
+
+        children.push(tvPanel());
+        children.push(screenTimePanel());
+
+        if (state.session) {
+            children.push(allowedSourcesPanel());
+            children.push(libraryPanel());
+        }
+
+        children.push(watchHistoryPanel());
+        children.push(lookPanel());
+        children.push(helpPanel());
+
+        return h('div', { class: 'screen' }, children);
+    }
+
+    function tvPanel() {
+        var status = state.status;
+        var playing = status && status.currentlyPlaying;
+
+        var body = [
+            h('p', {
+                class: 'inline-status',
+                text: state.reachable === false
+                    ? 'The TV is not answering. Check that it is switched on and on the same wifi.'
+                    : (playing && playing.title
+                        ? 'Now playing: ' + playing.title
+                        : 'The TV is on, and nothing is playing.')
+            })
+        ];
+
+        if (playing && playing.title) {
+            body.push(h('div', { class: 'btn-group' }, [
+                actionButton(playing.playing ? 'Pause' : 'Play', 'playback-pause', {}, 'btn--sm'),
+                actionButton('Next video', 'playback-skip', {}, 'btn--sm'),
+                actionButton('Stop', 'playback-stop', {}, 'btn--sm')
+            ]));
+        }
+
+        body.push(h('div', { class: 'btn-group' }, [
+            actionButton('Send my library to the TV now', 'send-to-tv', {}, 'btn--primary')
+        ]));
+
+        if (status && status.version) {
+            body.push(h('p', { class: 'panel__note', text: 'SafeTube ' + status.version + ' on the TV' }));
+        }
+
+        return panel('Your TV', 'What the television is doing right now.', h('div', {}, body));
+    }
+
+    function screenTimePanel() {
+        var limits = state.limits;
+
+        if (!limits) {
+            return panel('Screen time', 'How long your child may watch, and when.',
+                h('p', { class: 'inline-status' }, [h('span', { class: 'spinner' }), 'Loading…']));
+        }
+
+        var used = limits.todayUsedMin || 0;
+        var limit = limits.todayLimitMin;
+        var percent = limit && limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+
+        var body = [
+            h('div', { class: 'stats' }, [
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: used + ' min' }),
+                    h('p', { class: 'stat__label', text: 'Watched today' })
+                ]),
+                h('div', { class: 'stat' }, [
+                    h('p', {
+                        class: 'stat__value',
+                        text: limits.todayRemainingMin === null || limits.todayRemainingMin === undefined
+                            ? 'No limit'
+                            : limits.todayRemainingMin + ' min'
+                    }),
+                    h('p', { class: 'stat__label', text: 'Left today' })
+                ])
+            ])
+        ];
+
+        if (limit && limit > 0) {
+            var barClass = 'progress__bar' +
+                (percent >= 100 ? ' progress__bar--danger' : (percent >= 80 ? ' progress__bar--warn' : ''));
+            body.push(h('div', {
+                class: 'progress',
+                role: 'img',
+                'aria-label': used + ' of ' + limit + ' minutes used today'
+            }, [h('span', { class: barClass, style: 'width: ' + percent + '%' })]));
+        }
+
+        if (limits.hasTimeRequest) {
+            body.push(banner('info', 'Your child asked for more time',
+                'Give a little extra, or leave it as it is.',
+                [
+                    actionButton('+15 minutes', 'bonus', { 'data-minutes': '15' }, 'btn--primary'),
+                    actionButton('+30 minutes', 'bonus', { 'data-minutes': '30' })
+                ]));
+        }
+
+        if (limits.manuallyLocked) {
+            body.push(banner('warn', 'The TV is locked', 'Nothing can play until you unlock it.', []));
+        } else if (limits.currentStatus === 'blocked') {
+            body.push(banner('warn', 'Screen time is over for today',
+                limits.lockReason === 'bedtime' ? 'It is past bedtime.' : 'Today’s limit has been reached.', []));
+        }
+
+        body.push(h('div', { class: 'btn-group' }, [
+            actionButton(limits.manuallyLocked ? 'Unlock the TV' : 'Lock the TV', 'lock-tv', {},
+                limits.manuallyLocked ? 'btn--primary' : ''),
+            actionButton('+15 minutes', 'bonus', { 'data-minutes': '15' }),
+            actionButton('Change the daily limits', 'edit-limits', {})
+        ]));
+
+        body.push(limitEditor(limits));
+
+        return panel('Screen time', 'How long your child may watch, and when.', h('div', {}, body));
+    }
+
+    function limitEditor(limits) {
+        var days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
+        var labels = {
+            monday: 'Monday', tuesday: 'Tuesday', wednesday: 'Wednesday', thursday: 'Thursday',
+            friday: 'Friday', saturday: 'Saturday', sunday: 'Sunday'
+        };
+
+        var inputs = {};
+        fields.limitInputs = inputs;
+
+        var rows = days.map(function (day) {
+            var value = limits.dailyLimits ? limits.dailyLimits[day] : null;
+            var input = h('input', {
+                class: 'input',
+                type: 'number',
+                inputmode: 'numeric',
+                min: '-1',
+                max: '480',
+                value: value === undefined || value === null ? '-1' : String(value),
+                'aria-label': labels[day] + ', minutes allowed'
+            });
+            inputs[day] = input;
+            return h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: labels[day] }),
+                input
+            ]);
+        });
+
+        var bedtimeStart = h('input', {
+            class: 'input',
+            type: 'time',
+            value: (limits.bedtime && limits.bedtime.start) || '20:00',
+            'aria-label': 'Bedtime starts'
+        });
+        var bedtimeEnd = h('input', {
+            class: 'input',
+            type: 'time',
+            value: (limits.bedtime && limits.bedtime.end) || '07:00',
+            'aria-label': 'Bedtime ends'
+        });
+        fields.bedtimeStart = bedtimeStart;
+        fields.bedtimeEnd = bedtimeEnd;
+
+        var save = withListener(h('button', { type: 'button', class: 'btn btn--primary', text: 'Save the limits' }),
+            'click', saveLimits);
+
+        var details = h('details', { class: 'panel' }, [
+            h('summary', { class: 'panel__title', text: 'Daily limits and bedtime' }),
+            h('p', { class: 'field__hint', text: 'Minutes allowed each day. Use −1 for no limit.' }),
+            h('div', {}, rows),
+            h('div', { class: 'two-up' }, [
+                h('label', { class: 'field' }, [h('span', { class: 'field__label', text: 'Bedtime starts' }), bedtimeStart]),
+                h('label', { class: 'field' }, [h('span', { class: 'field__label', text: 'Bedtime ends' }), bedtimeEnd])
+            ]),
+            save
+        ]);
+        fields.limitsDetails = details;
+
+        return details;
+    }
+
+    async function saveLimits() {
+        var dailyLimits = {};
+        Object.keys(fields.limitInputs || {}).forEach(function (day) {
+            var raw = parseInt(fields.limitInputs[day].value, 10);
+            dailyLimits[day] = isNaN(raw) ? -1 : Math.max(-1, Math.min(480, raw));
+        });
+
+        var result = await apiCall('PUT', '/time-limits', {
+            dailyLimits: dailyLimits,
+            bedtimeStartMin: toMinutes(fields.bedtimeStart.value),
+            bedtimeEndMin: toMinutes(fields.bedtimeEnd.value)
+        });
+
+        if (result.status !== 200) {
+            toast((result.data && result.data.error) || 'The limits could not be saved', 'error');
+            return;
+        }
+
+        await loadLimits();
+        toast('Screen time saved.', 'ok');
+        render();
+        if (fields.limitsDetails) fields.limitsDetails.open = true;
+    }
+
+    function toMinutes(value) {
+        var parts = String(value || '').split(':');
+        if (parts.length !== 2) return -1;
+        var hours = parseInt(parts[0], 10);
+        var minutes = parseInt(parts[1], 10);
+        if (isNaN(hours) || isNaN(minutes)) return -1;
+        return hours * 60 + minutes;
+    }
+
+    function allowedSourcesPanel() {
+        var list = state.playlists.length
+            ? h('ul', {}, state.playlists.map(function (source) {
+                return h('li', { class: 'row' }, [
+                    h('span', { class: 'row__body' }, [
+                        h('span', { class: 'row__title', text: source.displayName || source.sourceId }),
+                        h('span', { class: 'row__meta', text: describeSource(source) })
+                    ]),
+                    h('span', { class: 'row__actions' }, [
+                        actionButton('Remove', 'remove-source', { 'data-id': String(source.id) },
+                            'btn--sm btn--danger')
+                    ])
+                ]);
+            }))
+            : h('p', {
+                class: 'panel__note',
+                text: 'Nothing is allowed yet, so nothing in your library can play on the TV.'
+            });
+
+        var urlInput = h('input', {
+            class: 'input',
+            type: 'url',
+            inputmode: 'url',
+            autocapitalize: 'off',
+            placeholder: 'https://www.youtube.com/@channel',
+            'aria-label': 'Channel, playlist or video link'
+        });
+        fields.sourceUrl = urlInput;
+
+        var add = withListener(h('button', { type: 'button', class: 'btn btn--primary', text: 'Allow it' }),
+            'click', addSource);
+
+        var body = [
+            h('p', {
+                class: 'panel__note',
+                text: 'Only what is listed here can play on the TV. Adding something to your library does not allow it.'
+            }),
+            list,
+            h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'Allow a channel, playlist or video' }),
+                urlInput
+            ]),
+            h('div', { class: 'btn-group' }, [
+                add,
+                actionButton('Save the list to a file', 'export-sources', {}),
+                actionButton('Load a saved list', 'import-sources', {})
+            ])
+        ];
+
+        return panel('Allowed sources', null, h('div', {}, body));
+    }
+
+    function describeSource(source) {
+        var kind = source.sourceType === 'yt_channel' ? 'Channel'
+            : (source.sourceType === 'yt_video' ? 'Video' : 'Playlist');
+        var videos = typeof source.videoCount === 'number' && source.videoCount > 0
+            ? ' · ' + words(source.videoCount, 'video') + ' ready'
+            : '';
+        return kind + videos;
+    }
+
+    async function addSource() {
+        var url = (fields.sourceUrl && fields.sourceUrl.value || '').trim();
+        if (!url) {
+            toast('Paste a link first.', 'error');
+            return;
+        }
+
+        var result = await apiCall('POST', '/playlists', { url: url });
+        if (result.status !== 200 && result.status !== 409) {
+            toast((result.data && result.data.error) || 'That link could not be allowed', 'error');
+            return;
+        }
+
+        fields.sourceUrl.value = '';
+        await loadPlaylists();
+        await refreshTv();
+        toast(result.status === 409 ? 'That was already allowed.' : 'Allowed. It will be ready in a moment.', 'ok');
+        render();
+    }
+
+    async function removeSource(id) {
+        var source = state.playlists.filter(function (candidate) {
+            return String(candidate.id) === String(id);
+        })[0];
+        if (!source) return;
+
+        var confirmed = await confirmDialog({
+            title: 'Stop allowing “' + (source.displayName || source.sourceId) + '”?',
+            body: 'Videos from it stay in your library, but they will not play on the TV any more.',
+            confirmLabel: 'Stop allowing',
+            danger: true
+        });
+        if (!confirmed) return;
+
+        var result = await apiCall('DELETE', '/playlists/' + encodeURIComponent(id));
+        if (result.status !== 200) {
+            toast((result.data && result.data.error) || 'That could not be removed', 'error');
+            return;
+        }
+
+        await loadPlaylists();
+        toast('That source is no longer allowed.', 'ok');
+        render();
+    }
+
+    function libraryPanel() {
+        var count = state.session.nodes.length;
+        var version = state.session.catalogVersion;
+        var installed = state.artwork.installedCatalogVersion;
+        var upToDate = version > 0 && installed >= version;
+
+        var body = [
+            h('p', {
+                class: 'panel__note',
+                text: words(count, 'item') + ' in your library. ' +
+                    (upToDate
+                        ? 'Your TV has this version.'
+                        : 'Your TV is on an older version — send it now.')
+            }),
+            h('div', { class: 'btn-group' }, [
+                actionButton('Send to TV now', 'send-to-tv', {}, 'btn--primary'),
+                actionButton('Check my library', 'check-library', {}),
+                actionButton('Reload from the TV', 'reload-catalog', {})
+            ])
+        ];
+
+        return panel('Your library', 'The shelves, folders and videos you have made.', h('div', {}, body));
+    }
+
+    function watchHistoryPanel() {
+        var stats = state.stats;
+        var body = [];
+
+        if (!stats) {
+            body.push(h('p', { class: 'inline-status' }, [h('span', { class: 'spinner' }), 'Loading…']));
+        } else {
+            body.push(h('div', { class: 'stats' }, [
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: String(stats.totalEventsToday) }),
+                    h('p', { class: 'stat__label', text: 'Videos today' })
+                ]),
+                h('div', { class: 'stat' }, [
+                    h('p', {
+                        class: 'stat__value',
+                        text: Math.round((stats.totalWatchTimeToday || 0) / 60) + ' min'
+                    }),
+                    h('p', { class: 'stat__label', text: 'Watched today' })
+                ]),
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: String(stats.totalEventsAllTime) }),
+                    h('p', { class: 'stat__label', text: 'Videos all time' })
+                ])
+            ]));
+        }
+
+        if (state.recent.length) {
+            body.push(h('ul', {}, state.recent.slice(0, 8).map(function (event) {
+                return h('li', { class: 'row' }, [
+                    h('span', { class: 'row__body' }, [
+                        h('span', { class: 'row__title', text: event.title || event.videoId }),
+                        h('span', { class: 'row__meta', text: whenWords(event.startedAt) })
+                    ])
+                ]);
+            })));
+        } else if (stats) {
+            body.push(h('p', { class: 'panel__note', text: 'Nothing has been watched yet.' }));
+        }
+
+        return panel('What has been watched', 'The last videos played on the TV, newest first.',
+            h('div', {}, body));
+    }
+
+    function whenWords(stamp) {
+        if (!stamp) return '';
+        var date = new Date(stamp);
+        var time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (date.toDateString() === new Date().toDateString()) return 'Today at ' + time;
+        return date.toLocaleDateString() + ' at ' + time;
+    }
+
+    function lookPanel() {
+        var dark = currentTheme() === 'dark';
+
+        var light = withListener(h('button', {
+            type: 'button',
+            class: 'segment__option' + (dark ? '' : ' is-selected'),
+            text: 'Light'
+        }), 'click', function () { applyTheme('light', true); render(); });
+
+        var darkButton = withListener(h('button', {
+            type: 'button',
+            class: 'segment__option' + (dark ? ' is-selected' : ''),
+            text: 'Dark'
+        }), 'click', function () { applyTheme('dark', true); render(); });
+
+        return panel('Look', 'The colours of this page. Your choice is remembered on this phone.',
+            h('div', { class: 'segment' }, [light, darkButton]));
+    }
+
+    function helpPanel() {
+        var log = h('textarea', { class: 'textarea', readonly: true, 'aria-label': 'Last error report' });
+        log.value = state.crash || 'No errors have been recorded.';
+
+        var copy = withListener(h('button', { type: 'button', class: 'btn', text: 'Copy the error report' }),
+            'click', async function () {
+                try {
+                    await navigator.clipboard.writeText(log.value);
+                    toast('Copied.', 'ok');
+                } catch (error) {
+                    log.focus();
+                    log.select();
+                    toast('Press and hold the text to copy it.', 'ok');
+                }
+            });
+
+        return panel('Something wrong?',
+            'If the TV misbehaves, copy the last error report and send it to whoever set SafeTube up for you.',
+            h('div', {}, [
+                log,
+                h('div', { class: 'btn-group' }, [copy]),
+                h('div', { class: 'btn-group' }, [
+                    actionButton('Disconnect this phone', 'disconnect', {}, 'btn--danger')
+                ])
+            ]));
+    }
+
+    // --- the action table --------------------------------------------------------------------
+    //
+    // Every control in the page - in index.html and in the screens built above - ends up here. It is
+    // the one place that turns a tap into work, and the guard tests check that nothing on the page
+    // names an action this table does not have.
+
+    var ACTIONS = {
+        'go-library': function () { go('#/library'); },
+        'go-settings': function () { go('#/settings'); },
+        'toggle-theme': function () {
+            toggleTheme();
+            // The look is also offered inside Settings, so that screen has to catch up with the
+            // header's switch rather than showing the other answer until the next navigation.
+            if (state.route.name === 'settings') render();
+        },
+
+        'new-shelf': function () { createNode('CATEGORY', null); },
+        'new-folder': function (element) { createNode('SUBCATEGORY', element.getAttribute('data-parent')); },
+        'add-from-youtube': function (element) {
+            var parent = element.getAttribute('data-parent');
+            go('#/add' + (parent ? '/' + encodeURIComponent(parent) : ''));
+        },
+        'add-single-video': function (element) {
+            addSingleVideo(element.getAttribute('data-video-id'));
+        },
+        'show-node': function (element) { showNode(element.getAttribute('data-id')); },
+
+        'send-to-tv': function () { sendToTv(); },
+        'reload-catalog': function () { reloadFromTv(); },
+        'check-library': function () { checkLibrary(); },
+        'allow-sources': function (element) { allowSources(element.getAttribute('data-sources')); },
+
+        'playback-stop': function () { playback('stop', 'Stopped'); },
+        'playback-pause': function () { playback('pause', 'Done'); },
+        'playback-skip': function () { playback('skip', 'Skipped'); },
+
+        'lock-tv': function () { toggleLock(); },
+        'bonus': function (element) { grantBonus(element.getAttribute('data-minutes')); },
+        'edit-limits': function () {
+            if (!fields.limitsDetails) return;
+            fields.limitsDetails.open = true;
+            fields.limitsDetails.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        },
+
+        'remove-source': function (element) { removeSource(element.getAttribute('data-id')); },
+        'export-sources': function () { exportSources(); },
+        'import-sources': function () { importSources(); },
+
+        'install-homescreen': function () { installHomescreen(); },
+        'dismiss-homescreen': function () { dismissHomescreen(); },
+        'disconnect': function () { disconnect(); }
+    };
+
+    document.addEventListener('click', function (event) {
+        var element = event.target && event.target.closest ? event.target.closest('[data-action]') : null;
+        if (!element) return;
+        var handler = ACTIONS[element.getAttribute('data-action')];
+        if (!handler) return;
+        event.preventDefault();
+        handler(element);
     });
 
-    // --- Dashboard lifecycle ---
-    async function loadDashboard() {
-        await refreshToken();
-        loadPlaylists();
-        loadStats();
-        loadRecent();
-        loadStatus();
-        loadTimeLimits();
-        loadKioskConfig();
-        checkVersion();
-        loadCrashLog();
-        loadCatalog();
+    // --- the actions themselves --------------------------------------------------------------
 
-        // Set version footer from status
+    async function createNode(type, parentId) {
+        var shelf = type === 'CATEGORY';
+        var title = await askForText({
+            title: shelf ? 'New shelf' : 'New folder',
+            body: shelf
+                ? 'A shelf is a row of videos on the TV, like “Cartoons”.'
+                : 'A folder groups videos together inside a shelf, like “Songs”.',
+            label: 'Name',
+            confirmLabel: 'Create'
+        });
+
+        if (title === null) return;
+
+        var applied = shelf
+            ? CatalogEditor.addCategory(state.session, { title: title })
+            : CatalogEditor.addSubcategory(state.session, { title: title, parentId: parentId });
+
+        if (!applied.ok) return void toast(applied.reason, 'error');
+        state.session = applied.session;
+        publish(shelf ? 'New shelf' : 'New folder');
+    }
+
+    async function showNode(id) {
+        var applied = CatalogEditor.setEnabled(state.session, { id: id, enabled: true });
+        if (!applied.ok) return void toast(applied.reason, 'error');
+        state.session = applied.session;
+        publish('Shown again');
+    }
+
+    async function sendToTv() {
+        var result = await refreshTv();
+        await loadArtwork();
+        render();
+        toast(result.ok
+            ? (result.message || 'Your TV has the latest library.')
+            : 'The TV did not answer. It will try again on its own.',
+            result.ok ? 'ok' : 'error');
+    }
+
+    async function reloadFromTv() {
+        var loaded = await loadLibrary();
+        if (!loaded.ok) return void toast(loaded.reason, 'error');
+        toast('Loaded your library.', 'ok');
+        render();
+    }
+
+    function checkLibrary() {
+        var problems = CatalogEditor.problems(state.session);
+        if (!problems.length) {
+            toast('Everything checks out.', 'ok');
+            return;
+        }
+        explainProblems(problems);
+    }
+
+    async function allowSources(raw) {
+        var sources = {};
         try {
-            var statusResult = await apiCall('GET', '/status');
-            if (statusResult.status === 200 && statusResult.data.version) {
-                updateVersionFooter(statusResult.data.version);
-                checkUpdateAvailable(statusResult.data.version);
-            }
-        } catch (err) {}
-
-        setPollingRate(120000);
-    }
-
-    function escapeHtml(str) {
-        var div = document.createElement('div');
-        div.textContent = str;
-        return div.innerHTML;
-    }
-
-    function logout() {
-        sessionToken = null;
-        localStorage.removeItem(STORAGE_KEY);
-        dashboard.classList.add('hidden');
-        authScreen.classList.remove('hidden');
-        if (statusInterval) clearInterval(statusInterval);
-    }
-
-    // --- Add to Home Screen banner ---
-    (function() {
-        var DISMISS_KEY = tvId ? 'kw_homescreen_dismissed_' + tvId : 'kw_homescreen_dismissed';
-        var banner = document.getElementById('homescreen-banner');
-        var addBtn = document.getElementById('homescreen-add-btn');
-        var dismissBtn = document.getElementById('homescreen-dismiss-btn');
-        var bannerText = document.getElementById('homescreen-text');
-        var deferredPrompt = null;
-
-        var isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-        var isMobile = 'ontouchstart' in window || window.innerWidth <= 768;
-        if (isStandalone || !isMobile || localStorage.getItem(DISMISS_KEY)) return;
-
-        var isIOS = /iPhone|iPad/.test(navigator.userAgent);
-
-        if (isIOS) {
-            bannerText.textContent = "Tap Share then 'Add to Home Screen' for quick access.";
-            addBtn.style.display = 'none';
-            banner.classList.remove('hidden');
+            sources = JSON.parse(raw || '{}');
+        } catch (error) {
+            sources = {};
         }
 
-        window.addEventListener('beforeinstallprompt', function(e) {
-            e.preventDefault();
-            deferredPrompt = e;
-            banner.classList.remove('hidden');
-        });
+        var ids = Object.keys(sources);
+        if (!ids.length) return;
 
-        addBtn.addEventListener('click', function() {
-            if (deferredPrompt) {
-                deferredPrompt.prompt();
-                deferredPrompt.userChoice.then(function() {
-                    deferredPrompt = null;
-                    banner.classList.add('hidden');
-                });
+        var allowed = 0;
+        for (var i = 0; i < ids.length; i++) {
+            var url = sources[ids[i]] === 'video'
+                ? 'https://www.youtube.com/watch?v=' + ids[i]
+                : 'https://www.youtube.com/playlist?list=' + ids[i];
+            var result = await apiCall('POST', '/playlists', { url: url });
+            if (result.status === 200 || result.status === 409) allowed++;
+        }
+
+        await loadPlaylists();
+        await refreshTv();
+        toast(allowed
+            ? 'Allowed. Those videos can play once the TV has them.'
+            : 'That could not be allowed.', allowed ? 'ok' : 'error');
+        render();
+    }
+
+    async function addSingleVideo(videoId) {
+        var parentId = fields.addParent ? fields.addParent.value : null;
+        if (!parentId) {
+            toast('Choose where this should go', 'error');
+            return;
+        }
+
+        var resolved = await apiCall('POST', '/catalog/import/resolve', {
+            url: 'https://www.youtube.com/watch?v=' + videoId
+        });
+        if (resolved.status !== 200) {
+            toast((resolved.data && resolved.data.error) || 'That video could not be read', 'error');
+            return;
+        }
+
+        var applied = CatalogEditor.addVideo(state.session, {
+            parentId: parentId,
+            title: resolved.data.title || videoId,
+            youtubeVideoId: videoId
+        });
+        if (!applied.ok) return void toast(applied.reason, 'error');
+        state.session = applied.session;
+
+        var parent = nodeById(parentId);
+        var saved = await publish('Added “' + (resolved.data.title || videoId) + '”');
+        if (saved) go(routeFor(parent));
+    }
+
+    async function playback(kind, label) {
+        var result = await apiCall('POST', '/playback/' + kind);
+        toast(result.status === 200 ? label + '.' : 'The TV did not answer.',
+            result.status === 200 ? 'ok' : 'error');
+        await loadStatus();
+        render();
+    }
+
+    async function toggleLock() {
+        var locked = !(state.limits && state.limits.manuallyLocked);
+        var result = await apiCall('POST', '/time-limits/lock', { locked: locked });
+        if (result.status !== 200) {
+            toast('That did not work', 'error');
+            return;
+        }
+        await loadLimits();
+        toast(locked ? 'The TV is locked.' : 'The TV is unlocked.', 'ok');
+        render();
+    }
+
+    async function grantBonus(minutes) {
+        var result = await apiCall('POST', '/time-limits/bonus', { minutes: parseInt(minutes, 10) });
+        if (result.status !== 200) {
+            toast((result.data && result.data.error) || 'That did not work', 'error');
+            return;
+        }
+        await loadLimits();
+        toast('Added ' + minutes + ' minutes for today.', 'ok');
+        render();
+    }
+
+    async function exportSources() {
+        var result = await apiCall('GET', '/sources/export');
+        if (result.status !== 200) {
+            toast('The list could not be saved', 'error');
+            return;
+        }
+
+        var blob = new Blob([JSON.stringify(result.data, null, 2)], { type: 'application/json' });
+        var link = h('a', { href: URL.createObjectURL(blob), download: 'safetube-allowed-sources.json' });
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        toast('Saved to your downloads.', 'ok');
+    }
+
+    function importSources() {
+        var fileInput = h('input', { type: 'file', accept: 'application/json,.json', 'aria-label': 'Choose a file' });
+
+        fileInput.addEventListener('change', async function () {
+            var file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+
+            var text = await file.text();
+            var payload;
+            try {
+                payload = JSON.parse(text);
+            } catch (error) {
+                toast('That file is not a SafeTube list.', 'error');
+                return;
             }
-        });
 
-        dismissBtn.addEventListener('click', function() {
-            banner.classList.add('hidden');
-            localStorage.setItem(DISMISS_KEY, '1');
-        });
-    })();
-
-    // --- Startup ---
-    var autoPin = extractPin();
-    if (autoPin && !sessionToken) {
-        pinInput.value = autoPin;
-        submitPin(autoPin);
-    } else if (sessionToken) {
-        refreshToken().then(function(valid) {
-            if (valid) {
-                authScreen.classList.add('hidden');
-                dashboard.classList.remove('hidden');
-                loadDashboard();
-            } else {
-                logout();
+            var result = await apiCall('POST', '/sources/import', payload);
+            if (result.status !== 200) {
+                toast((result.data && result.data.error) || 'That file could not be read', 'error');
+                return;
             }
+
+            await loadPlaylists();
+            toast('Loaded: ' + describeImport(result.data), 'ok');
+            render();
+        });
+
+        fileInput.click();
+    }
+
+    function describeImport(summary) {
+        if (!summary || typeof summary.added !== 'number') return 'done';
+        var parts = [words(summary.added, 'source') + ' added'];
+        if (summary.skipped) parts.push(words(summary.skipped, 'source') + ' already there');
+        if (summary.failed) parts.push(words(summary.failed, 'source') + ' could not be read');
+        return parts.join(', ');
+    }
+
+    function installHomescreen() {
+        if (!deferredInstallPrompt) {
+            toast('Use your browser’s menu to add this page to the home screen.', 'ok');
+            return;
+        }
+        deferredInstallPrompt.prompt();
+        deferredInstallPrompt.userChoice.then(function () {
+            deferredInstallPrompt = null;
+            render();
         });
     }
+
+    function dismissHomescreen() {
+        try {
+            window.localStorage.setItem(HOMESCREEN_KEY, '1');
+        } catch (error) {
+            // The hint simply comes back next time.
+        }
+        render();
+    }
+
+    async function disconnect() {
+        var confirmed = await confirmDialog({
+            title: 'Disconnect this phone?',
+            body: 'Nothing on the TV changes. You will need the PIN from the TV to come back.',
+            confirmLabel: 'Disconnect',
+            danger: true
+        });
+        if (!confirmed) return;
+        forgetSession();
+        toast('Disconnected.', 'ok');
+    }
+
+    // --- polling -----------------------------------------------------------------------------
+
+    function startPolling() {
+        stopPolling();
+        loadStatus();
+        statusTimer = setInterval(function () {
+            if (document.hidden) return;
+            loadStatus();
+        }, 20000);
+    }
+
+    function stopPolling() {
+        if (statusTimer) clearInterval(statusTimer);
+        statusTimer = null;
+    }
+
+    // --- startup -----------------------------------------------------------------------------
+
+    window.addEventListener('hashchange', function () {
+        render();
+        view.focus();
+    });
+
+    window.addEventListener('beforeinstallprompt', function (event) {
+        event.preventDefault();
+        deferredInstallPrompt = event;
+        render();
+    });
+
+    document.addEventListener('visibilitychange', function () {
+        if (!document.hidden && state.token) loadStatus();
+    });
+
+    async function boot() {
+        // The theme is already on the document - `theme.js` ran in the head, before anything painted -
+        // so all that is left is to say on the control which way round it is.
+        paintThemeControl();
+
+        // The public status answers without a session, which is how the page can tell a parent that
+        // the TV is unreachable - or that this page is too old - before they hunt for the PIN.
+        await loadStatus();
+
+        var pin = extractPin();
+        if (pin && !state.token) {
+            var result = await connect(pin);
+            if (!result.ok) toast(result.reason, 'error');
+        }
+
+        if (state.token) {
+            var valid = await refreshSession();
+            if (!valid) {
+                forgetSession();
+                return;
+            }
+
+            var loaded = await loadLibrary();
+            if (!loaded.ok) toast(loaded.reason, 'error');
+            startPolling();
+            loadStats();
+            loadLimits();
+            loadCrash();
+        }
+
+        render();
+    }
+
+    boot();
 })();

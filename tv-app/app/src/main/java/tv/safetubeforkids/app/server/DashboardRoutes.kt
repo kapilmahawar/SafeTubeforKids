@@ -5,8 +5,26 @@ import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 
+/**
+ * The policy the dashboard ships under.
+ *
+ * `img-src` names both YouTube artwork hosts (`img.youtube.com` and `i.ytimg.com`): a card's picture
+ * is a url the TV's approved cache supplied, and YouTube hands those out from either host.
+ *
+ * `script-src` no longer carries `'unsafe-inline'`. The rewritten dashboard has no inline `onclick`
+ * and no inline `<script>` at all - every control is wired in `app.js` and the theme is set by
+ * `theme.js` before first paint - so the exemption is gone, and a page that ever grows an inline
+ * handler again would be refused by the browser rather than trusted.
+ *
+ * `style-src` keeps `'unsafe-inline'`: the dashboard sets CSS custom properties from JavaScript to
+ * drive the library's progress bars, which is an inline style by the letter of the policy.
+ */
 private fun ApplicationCall.addSecurityHeaders() {
-    response.headers.append("Content-Security-Policy", "default-src 'self'; img-src 'self' https://img.youtube.com; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'")
+    response.headers.append(
+        "Content-Security-Policy",
+        "default-src 'self'; img-src 'self' https://img.youtube.com https://i.ytimg.com; " +
+            "style-src 'self' 'unsafe-inline'; script-src 'self'",
+    )
     response.headers.append("X-Content-Type-Options", "nosniff")
     response.headers.append("X-Frame-Options", "DENY")
     response.headers.append("Referrer-Policy", "no-referrer")
@@ -28,7 +46,7 @@ fun Route.dashboardRoutes() {
     // Root-relative paths allow the same HTML to work on both local Ktor and the relay.
     val assetFiles = mapOf(
         "app.js" to ContentType("application", "javascript"),
-        "catalog-tree.js" to ContentType("application", "javascript"),
+        "theme.js" to ContentType("application", "javascript"),
         "catalog-editor.js" to ContentType("application", "javascript"),
         "style.css" to ContentType.Text.CSS,
         "favicon.svg" to ContentType("image", "svg+xml"),

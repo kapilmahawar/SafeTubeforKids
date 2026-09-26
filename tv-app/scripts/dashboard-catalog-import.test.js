@@ -597,18 +597,23 @@ test('the editor warns when the shelf already imports that playlist', () => {
     assert.equal(summary.existingContainerId, 'i-cocomelon');
 });
 
-test('the import control is wired to a function the script exposes, with a valid target list', () => {
-    const html = fs.readFileSync(path.join(assets, 'index.html'), 'utf8');
+test('the add flow resolves through the read-only endpoint and applies it with the editor model', () => {
     const app = fs.readFileSync(path.join(assets, 'app.js'), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, '')
         .split('\n').map((line) => line.replace(/\/\/.*/, '')).join('\n');
 
-    ['import-url', 'import-parent', 'import-btn', 'import-status', 'import-hint'].forEach((id) => {
-        assert.ok(html.includes('id="' + id + '"'), 'the page must have #' + id);
-    });
-    assert.match(app, /window\.importPlaylistNow\s*=/);
-    // Only a category or a subcategory can be a target: the list is built from the node types that
-    // may hold a video, never from every node.
-    assert.match(app, /childTypesOf\(node\.nodeType\)\.indexOf\('VIDEO'\)/);
+    // The preview the parent confirms comes from the one resolve endpoint, which approves nothing.
     assert.match(app, /apiCall\('POST', '\/catalog\/import\/resolve'/);
+
+    // Applying it is the model's job, not a second implementation of the import rules.
+    assert.match(app, /CatalogEditor\.importPlaylist\(/);
+    assert.match(app, /CatalogEditor\.addVideo\(/);
+
+    // A destination is always a node that may hold a video, never every node.
+    assert.match(app, /CatalogEditor\.validParentsFor\(state\.session, CatalogEditor\.VIDEO\)/);
+
+    // And allowing the source is an explicit, separate request to the endpoint that approves -
+    // which is what keeps "in my library" and "allowed to play" two different things.
+    assert.match(app, /apiCall\('POST', '\/playlists'/);
+    assert.match(app, /Let my child watch it/);
 });
