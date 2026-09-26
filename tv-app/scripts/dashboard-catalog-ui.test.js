@@ -338,9 +338,13 @@ test('a failure the parent cannot act on never reaches the screen raw', () => {
     assert.doesNotMatch(app, /toast\(\([a-z]+\.data && [a-z]+\.data\.error\)/,
         'a toast must go through humanError first');
 
-    // And the translations do not leak implementation words either.
-    const friendly = app.slice(app.indexOf('var FRIENDLY_FAILURES'), app.indexOf('function isParentReadable'));
-    assert.doesNotMatch(friendly, /exception|extractor|json|null/);
+    // And the translations do not leak implementation words either: the *patterns* have to match the
+    // extractor's own text, but what a parent reads must not contain it.
+    const says = [...app.slice(app.indexOf('var FRIENDLY_FAILURES'), app.indexOf('function isParentReadable'))
+        .matchAll(/says: '([^']*)'/g)].map((m) => m[1]);
+    assert.ok(says.length >= 4, 'the translator still has its sentences');
+    says.forEach((phrase) => assert.doesNotMatch(phrase, /exception|extractor|json|null|undefined/i,
+        'a translation must not contain the message it translates: ' + phrase));
 });
 
 test('settings are grouped, and every group holds real controls', () => {
@@ -479,6 +483,151 @@ test('the card gets its picture from the TV first, and never invents a fact abou
     assert.match(raw('app.js'), /i\.ytimg\.com\/vi\//, 'and YouTube\'s thumbnail for that id is the fallback');
     assert.match(artwork, /\^\[A-Za-z0-9_-\]\{6,20\}\$/,
         'only something shaped like a YouTube id is turned into a URL');
+});
+
+// --- W8.2: the corrections, as guards --------------------------------------------------------
+
+test('F1: the breadcrumb is a control a parent can hit', () => {
+    const css = raw('style.css');
+    const crumb = css.slice(css.indexOf('.crumb {'), css.indexOf('.crumb--here'));
+
+    assert.match(crumb, /min-height:\s*40px/, 'the way back is at least 40px tall');
+    assert.match(crumb, /display:\s*inline-flex/);
+    assert.match(crumb, /align-items:\s*center/);
+    // The text stays the size it was: the target grew, the look did not.
+    assert.match(crumb, /font-size:\s*var\(--fs-sm\)/);
+});
+
+test('F2: removing something says how many videos go with it', () => {
+    const app = code('app.js');
+    const sheet = app.slice(app.indexOf('async function openItemSheet'), app.indexOf('async function runItemAction'));
+    const confirm = app.slice(app.indexOf('async function askDelete'), app.indexOf('function panel('));
+
+    // One count, and it is the reachable one - not the number of rows in the document. A collection
+    // is counted the way its own heading counts it, which for an imported playlist is the TV's count.
+    assert.match(sheet, /var removable = removableVideoCount\(node\);/);
+    assert.match(sheet, /'Removes this and the ' \+ words\(removable, 'video'\) \+ ' inside it'/);
+    assert.match(confirm, /var inside = removableVideoCount\(node\);/);
+    assert.match(confirm, /'This removes it and the ' \+ words\(inside, 'video'\) \+ ' inside it from your child/);
+
+    const helper = app.slice(app.indexOf('function removableVideoCount'), app.indexOf('function nodeById'));
+    assert.match(helper, /if \(node\.nodeType === CatalogEditor\.VIDEO\) return 0;/);
+    assert.match(helper, /return isContainer\(node\) \? containerVideoCount\(node\) : reachableVideoCount\(node\);/,
+        'a collection is counted by the TV-aware helper, a category by what is inside it');
+
+    // And never the document-row count, which said "0 items" for a fifty-video collection.
+    assert.doesNotMatch(sheet, /descendantsOf\(node\.id\)\.length/, 'the old row count is gone');
+    assert.doesNotMatch(confirm, /descendantsOf\(node\.id\)\.length/, 'the old row count is gone');
+
+    // The sentence that must survive a destructive confirmation.
+    assert.match(confirm, /It does not delete anything from YouTube\./);
+    assert.match(confirm, /confirmLabel: 'Remove'/);
+});
+
+test('F4: an unknown TV version is never reported as a stale one', () => {
+    const app = code('app.js');
+
+    assert.match(app, /artworkKnown: false/);
+    assert.match(app, /state\.artworkKnown = true;/);
+    assert.match(app, /state\.artworkKnown = false;/);
+
+    const freshness = app.slice(app.indexOf('function tvFreshness'), app.indexOf('function screenHead'));
+    assert.match(freshness, /if \(state\.reachable === false\) return 'unreachable';/);
+    assert.match(freshness, /if \(!state\.artworkKnown\) return 'unknown';/,
+        'a failed read is unknown, which is checked before any comparison');
+    assert.match(freshness, /return state\.artwork\.installedCatalogVersion >= state\.session\.catalogVersion \? 'current' : 'behind';/);
+
+    // The banner and the settings line are gated on the same classification, and only "behind" may
+    // ever claim it.
+    const library = app.slice(app.indexOf('function screenLibrary'), app.indexOf('function homescreenHintWanted'));
+    assert.match(library, /if \(freshness === 'behind'\) \{/);
+    assert.match(library, /var freshness = tvFreshness\(\);/);
+
+    const panel = app.slice(app.indexOf('function libraryPanel'), app.indexOf('function watchHistoryPanel'));
+    assert.match(panel, /var freshness = tvFreshness\(\);/);
+    assert.match(panel, /freshness === 'current' \? 'Your TV has this version\.'/);
+    assert.match(panel, /freshness === 'behind' \? 'Your TV is on an older version/);
+    assert.match(panel, /'What version your TV has could not be checked just now\.'/);
+
+    // Nothing anywhere compares the installed version to zero and calls it behind.
+    assert.doesNotMatch(app, /installedCatalogVersion < state\.session\.catalogVersion/,
+        'the bare comparison that produced the false claim is gone');
+});
+
+test('F5: every screen counts the same videos', () => {
+    const app = code('app.js');
+    const counts = app.slice(app.indexOf('function countsFor'), app.indexOf('function containerVideoCount'));
+
+    assert.match(counts, /videos: reachableVideoCount\(nodeId\)/);
+    assert.match(app, /function reachableVideoCount\(nodeId\) \{/);
+
+    // The library summary, the category heading and the collection heading all read the same number.
+    assert.match(app, /collections \+= counts\.collections;/);
+    assert.match(app, /videos \+= counts\.videos;/);
+    assert.match(app, /var videos = isContainer\(node\) \? containerVideoCount\(node\) : counts\.videos;/);
+
+    // A hidden video is counted as hidden, not as reachable - so the two numbers never double-count.
+    const helper = app.slice(app.indexOf('function reachableVideoCount'), app.indexOf('// --- the parent'));
+    assert.match(helper, /if \(child\.enabled !== false\) total \+= 1;/);
+});
+
+test('F6: the conflict dialog names no version', () => {
+    const app = code('app.js');
+    const dialog = app.slice(app.indexOf('function openConflictDialog'), app.indexOf('var TYPE_WORDS'));
+
+    assert.doesNotMatch(dialog, /version/i, 'no catalog version reaches a parent');
+    assert.doesNotMatch(dialog, /serverVersion/, 'and the outcome is no longer read for one');
+    assert.match(dialog, /Another phone or browser saved a change first, so this change was not saved\./);
+    assert.match(dialog, /Nothing on the TV changed\./);
+    // Both safe paths stay.
+    assert.match(dialog, /'Load the latest and start again'/);
+    assert.match(dialog, /'Keep my change and save again'/);
+    assert.match(app, /openConflictDialog\(reason\)/);
+});
+
+test('F7: a row states its state once', () => {
+    const app = code('app.js');
+    const meta = app.slice(app.indexOf('function nodeMeta'), app.indexOf('function parseHash'));
+
+    assert.match(meta, /return sourceNameFor\(node\);/, 'the meta line is where it came from, once');
+    assert.doesNotMatch(meta, /parts\.push\('hidden'\)/);
+    assert.doesNotMatch(meta, /can\\'t play yet'\)\);/, 'the badge says it, not the meta line');
+
+    // The badges themselves are untouched.
+    const row = app.slice(app.indexOf('function itemRow'), app.indexOf('function emptyState'));
+    assert.match(row, /badge--hidden', text: 'Hidden'/);
+    assert.match(row, /badge--blocked', text: 'Can\\'t play yet'/);
+});
+
+test('F8: the move description works for a video and for a collection', () => {
+    const app = code('app.js');
+    assert.ok(app.includes("meta: 'Keeps everything inside it'"));
+    assert.doesNotMatch(app, /Keeps the video and everything inside it/);
+});
+
+test('F15: a link with nothing behind it says so, and other failures keep their own words', () => {
+    const app = code('app.js');
+    const failures = app.slice(app.indexOf('var FRIENDLY_FAILURES'), app.indexOf('function isParentReadable'));
+
+    // The sentence the device's own extractor messages have to reach.
+    assert.match(failures, /json response is too short/);
+    assert.match(failures, /Nothing was found at that link\./);
+    // The unavailable family no longer assumes a playlist.
+    assert.match(failures, /That video or playlist is not available on YouTube\./);
+    assert.doesNotMatch(failures, /That playlist is private/);
+    // Network failures are still described as network failures, and are checked first.
+    assert.ok(failures.indexOf('could not reach YouTube') < failures.indexOf('Nothing was found'),
+        'a network problem must not be reported as a missing video');
+    assert.ok(failures.indexOf('did not answer') < failures.indexOf('Nothing was found'));
+    // And the translator is still the only way an error reaches the screen.
+    assert.match(app, /function humanError\(data, fallback\)/);
+
+    // A short technical message is still technical: the extractor's own "Got error ERROR: ..." reads
+    // as English, so the readability filter has to reject it for the translation to happen at all.
+    const readable = app.slice(app.indexOf('function isParentReadable'), app.indexOf('function humanError'));
+    assert.match(readable, /got error/);
+    assert.match(readable, /error\\b\\s\*\[:"'\]/);
+    assert.match(readable, /too short/);
 });
 
 // --- W7's removal, guaranteed ---------------------------------------------------------------

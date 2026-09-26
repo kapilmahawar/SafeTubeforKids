@@ -158,9 +158,12 @@ class CatalogImportRoutesTest {
         val message = response.bodyAsText()
 
         // A channel is a source, not a shelf: approving one belongs in the allowed-source list, and
-        // the refusal says where rather than leaving the parent staring at a form.
-        assertTrue(message.contains("not a shelf"))
+        // the refusal says where rather than leaving the parent staring at a form. The wording names
+        // no concept the dashboard stopped using - "shelf" became "category" in W8, so the sentence
+        // must not rely on it.
+        assertTrue(message.contains("can't be added here"))
         assertTrue(message.contains("Settings"))
+        assertFalse("the refusal must not use the retired word", message.contains("shelf"))
         assertEquals(0 to 0, approvalState())
     }
 
