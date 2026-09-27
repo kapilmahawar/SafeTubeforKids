@@ -4,6 +4,7 @@ import android.content.Intent
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.InMemoryParentCredentialStore
 import tv.safetubeforkids.app.auth.PinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.data.cache.CacheDatabase
@@ -18,35 +19,58 @@ class DebugReceiverIntentTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private lateinit var receiver: DebugReceiver
 
+    private companion object {
+        const val TEST_PIN = "482913"
+    }
+
     @Before
     fun setup() {
         val db = CacheDatabase.getInMemoryInstance(context)
-        ServiceLocator.initForTest(db, PinManager(), SessionManager())
+        // W10: a credential is created, not generated. The instrument tests install one they know,
+        // exactly as the e2e harness does through DEBUG_SET_PIN.
+        ServiceLocator.initForTest(
+            db,
+            PinManager(store = InMemoryParentCredentialStore()).also { it.setup(TEST_PIN, TEST_PIN) },
+            SessionManager(),
+        )
         receiver = DebugReceiver()
     }
 
     @Test
-    fun debugGetPin_returnsPin() {
+    fun debugGetPin_reportsWhetherACredentialExistsAndNeverThePin() {
         val intent = Intent("tv.safetubeforkids.app.DEBUG_GET_PIN")
         receiver.onReceive(context, intent)
-        val pin = ServiceLocator.pinManager.getCurrentPin()
-        assertEquals(6, pin.length)
+        // Nothing to read back any more: the intent that used to return the PIN now answers whether one
+        // exists. There is no plaintext PIN in the process to return.
+        assertTrue(ServiceLocator.pinManager.isConfigured())
     }
 
     @Test
-    fun debugResetPin_returnsNewPin() {
-        val oldPin = ServiceLocator.pinManager.getCurrentPin()
+    fun debugSetPin_installsAKnownCredential() {
+        val intent = Intent("tv.safetubeforkids.app.DEBUG_SET_PIN").apply { putExtra("pin", "135790") }
+        receiver.onReceive(context, intent)
+
+        assertTrue(ServiceLocator.pinManager.isConfigured())
+        assertTrue(
+            ServiceLocator.pinManager.validate("135790") is tv.safetubeforkids.app.auth.PinResult.Success,
+        )
+    }
+
+    @Test
+    fun debugResetPin_clearsTheCredentialAndReturnsTheTvToSetup() {
         val intent = Intent("tv.safetubeforkids.app.DEBUG_RESET_PIN")
         receiver.onReceive(context, intent)
-        // PIN has been reset
-        assertTrue(ServiceLocator.pinManager.getCurrentPin().length == 6)
+
+        assertFalse("a reset leaves nothing to sign in with", ServiceLocator.pinManager.isConfigured())
+        assertTrue(
+            ServiceLocator.pinManager.validate(TEST_PIN) is tv.safetubeforkids.app.auth.PinResult.NotSetUp,
+        )
     }
 
     @Test
     fun debugSimulateAuth_correctPin_returnsValid() {
-        val pin = ServiceLocator.pinManager.getCurrentPin()
         val intent = Intent("tv.safetubeforkids.app.DEBUG_SIMULATE_AUTH").apply {
-            putExtra("pin", pin)
+            putExtra("pin", TEST_PIN)
         }
         receiver.onReceive(context, intent)
         // Should succeed without throwing

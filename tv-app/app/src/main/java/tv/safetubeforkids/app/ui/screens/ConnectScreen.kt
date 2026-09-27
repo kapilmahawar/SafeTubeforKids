@@ -58,13 +58,12 @@ import tv.safetubeforkids.app.util.QrCodeGenerator
 import kotlinx.coroutines.delay
 
 @Composable
-fun ConnectScreen(onBack: () -> Unit = {}) {
+fun ConnectScreen(onBack: () -> Unit = {}, onParentAccess: () -> Unit = {}) {
     val context = LocalContext.current
     var ip by remember { mutableStateOf<String?>(null) }
     var localQrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var relayQrBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var showSettings by remember { mutableStateOf(false) }
-    val pin = remember { ServiceLocator.pinManager.getCurrentPin() }
     var relayEnabled by remember { mutableStateOf(ServiceLocator.isRelayEnabled()) }
 
     val relayConfig = remember {
@@ -77,15 +76,18 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
     LaunchedEffect(Unit) {
         ip = NetworkUtils.getDeviceIp(context)
 
+        // The address, and nothing else. The QR code used to carry `?pin=...` because the PIN was
+        // regenerated on every app start and the phone had to be told it somehow - which put the
+        // parent's credential inside a scannable image and made the pairing code and the login the
+        // same secret. The Parent PIN is now chosen by the parent and verified on the TV, so the QR
+        // only has to say where the dashboard is.
         ip?.let { address ->
-            val localUrl = NetworkUtils.buildConnectUrl(address) + "?pin=$pin"
-            localQrBitmap = QrCodeGenerator.generate(localUrl)
+            localQrBitmap = QrCodeGenerator.generate(NetworkUtils.buildConnectUrl(address))
         }
 
         if (relayEnabled) {
             relayConfig?.let { config ->
-                val relayUrl = "${config.relayUrl}/tv/${config.tvId}/?pin=$pin"
-                relayQrBitmap = QrCodeGenerator.generate(relayUrl)
+                relayQrBitmap = QrCodeGenerator.generate("${config.relayUrl}/tv/${config.tvId}/")
             }
         }
     }
@@ -98,7 +100,6 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
         if (showSettings) {
             ConnectSettingsPanel(
                 ip = ip,
-                pin = pin,
                 relayEnabled = relayEnabled,
                 localQrBitmap = localQrBitmap,
                 relayConfig = relayConfig,
@@ -109,7 +110,7 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
                     // Regenerate relay QR if newly enabled
                     if (relayEnabled && relayQrBitmap == null) {
                         relayConfig?.let { config ->
-                            relayQrBitmap = QrCodeGenerator.generate("${config.relayUrl}/tv/${config.tvId}/?pin=$pin")
+                            relayQrBitmap = QrCodeGenerator.generate("${config.relayUrl}/tv/${config.tvId}/")
                         }
                     }
                     showSettings = false
@@ -209,7 +210,9 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
 
                     Spacer(modifier = Modifier.height(24.dp))
 
-                    // PIN box
+                    // What the parent reads instead of a PIN. The PIN is not printed here any more -
+                    // there is nothing to print, and that is the point of W10 - so this box says where
+                    // the credential lives and how to replace it if it is forgotten.
                     Box(
                         modifier = Modifier
                             .border(2.dp, KidAccent, RoundedCornerShape(12.dp))
@@ -218,20 +221,35 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
-                                text = "Or enter:",
+                                text = if (ServiceLocator.pinManager.isConfigured()) {
+                                    "Use your Parent PIN to sign in."
+                                } else {
+                                    "SafeTube is not set up yet."
+                                },
                                 style = MaterialTheme.typography.bodySmall,
                                 color = KidTextDim,
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = pin,
-                                fontSize = 36.sp,
-                                fontWeight = FontWeight.Bold,
-                                fontFamily = FontFamily.Monospace,
-                                color = KidAccent,
-                                letterSpacing = 8.sp,
+                                text = if (ServiceLocator.pinManager.isConfigured()) {
+                                    "Forgotten it? Use your Recovery Code."
+                                } else {
+                                    "Run setup on this TV to create one."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = KidTextDim,
                             )
                         }
+                    }
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    Button(
+                        onClick = onParentAccess,
+                        colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Text("Recovery Code", color = KidText, fontWeight = FontWeight.SemiBold)
                     }
 
                     Spacer(modifier = Modifier.height(16.dp))
@@ -337,7 +355,6 @@ fun ConnectScreen(onBack: () -> Unit = {}) {
 @Composable
 private fun ConnectSettingsPanel(
     ip: String?,
-    pin: String,
     relayEnabled: Boolean,
     localQrBitmap: Bitmap?,
     relayConfig: tv.safetubeforkids.app.relay.RelayConfig?,
@@ -468,9 +485,17 @@ private fun ConnectSettingsPanel(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        Text("Current PIN", style = MaterialTheme.typography.titleMedium, color = KidText)
+        Text("Parent PIN", style = MaterialTheme.typography.titleMedium, color = KidText)
         Spacer(modifier = Modifier.height(4.dp))
-        Text(pin, style = MaterialTheme.typography.bodyLarge, color = KidAccent, fontFamily = FontFamily.Monospace)
+        Text(
+            if (ServiceLocator.pinManager.isConfigured()) {
+                "Set on this TV, and never shown: it is stored as a verifier."
+            } else {
+                "Not set up yet. Finish setup on this TV to create one."
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = KidTextDim,
+        )
 
         Spacer(modifier = Modifier.height(16.dp))
 

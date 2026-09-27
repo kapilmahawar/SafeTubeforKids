@@ -18,4 +18,12 @@ interface KioskDao {
 
     @Query("UPDATE kiosk_config SET enforceTimeLimitsOnAllApps = :enforce WHERE id = 1")
     suspend fun setEnforceTimeLimitsOnAllApps(enforce: Boolean)
+
+    /**
+     * Used by the destructive reset (W10), which must leave nothing of SafeTube's own configuration
+     * behind. Kiosk *device-owner* state lives in Android, not here: this clears what SafeTube asked
+     * for, and the reset tells the kiosk manager to let go of the device separately.
+     */
+    @Query("DELETE FROM kiosk_config")
+    suspend fun deleteAll()
 }

@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import tv.safetubeforkids.app.auth.PinManager
 import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.auth.SharedPrefsParentCredentialStore
 import tv.safetubeforkids.app.auth.SharedPrefsPinLockoutPersistence
 import tv.safetubeforkids.app.auth.SharedPrefsSessionPersistence
 import tv.safetubeforkids.app.data.cache.CacheDatabase
@@ -52,22 +53,30 @@ object ServiceLocator {
     val catalogRepository: CatalogRepository by lazy { CatalogRepository(database) }
 
     /**
-     * The TV's catalog sync against its own SafeTube server.
+     * The TV's own catalog sync against its own SafeTube server.
      *
      * It reads over HTTP rather than reaching into [catalogStore] directly, so the sync path is the
      * same one a future remote parent server would use, and the JSON boundary is exercised in
      * production rather than only in tests. The token is a single session this process creates for
      * itself and reuses; it is never logged.
      *
-     * Nothing calls this yet: Phase 4 owns when the TV syncs. Invoking [CatalogSyncService.syncCatalog]
-     * is the whole API, and it is deliberately not awaited from any UI path.
+     * Since W10 the token is checked before it is reused, and replaced when it no longer works. That
+     * matters because a PIN change, a PIN reset and a destructive wipe all invalidate every session by
+     * design - including this one - and the TV must not be left unable to sync its own catalog because
+     * the parent did something to their credential. The old code cached whatever token it first
+     * obtained and kept offering it for the life of the process.
      */
     val catalogSyncService: CatalogSyncService by lazy {
         CatalogSyncService(
             api = HttpCatalogApi(
                 baseUrl = "http://127.0.0.1:$SAFE_TUBE_SERVER_PORT",
                 tokenProvider = {
-                    selfSyncToken ?: sessionManager.createSession()?.also { selfSyncToken = it }
+                    val existing = selfSyncToken
+                    if (existing != null && sessionManager.validateSession(existing)) {
+                        existing
+                    } else {
+                        sessionManager.createSession()?.also { selfSyncToken = it } ?: ""
+                    }
                 },
             ),
             repository = catalogRepository,
@@ -99,9 +108,20 @@ object ServiceLocator {
         val pinLockoutPersistence = SharedPrefsPinLockoutPersistence(
             context.getSharedPreferences("parentapproved_pin_lockout", Context.MODE_PRIVATE)
         )
+        // The Parent PIN and the Recovery Code are rate-limited separately: a parent fumbling the
+        // recovery code must not spend the PIN's attempts, and vice versa.
+        val recoveryLockoutPersistence = SharedPrefsPinLockoutPersistence(
+            context.getSharedPreferences("parentapproved_pin_lockout", Context.MODE_PRIVATE),
+            keyPrefix = SharedPrefsPinLockoutPersistence.PREFIX_RECOVERY,
+        )
         pinManager = PinManager(
+            store = SharedPrefsParentCredentialStore.open(context),
             onPinValidated = { sessionManager.createSession() ?: "" },
-            lockoutPersistence = pinLockoutPersistence,
+            // A credential that changed invalidates every session issued under the old one. This is
+            // what makes "change PIN" and "reset PIN" mean something beyond the next sign-in.
+            onCredentialsChanged = { sessionManager.invalidateAll() },
+            pinLockoutPersistence = pinLockoutPersistence,
+            recoveryLockoutPersistence = recoveryLockoutPersistence,
         )
         PlayEventRecorder.init(database)
 
@@ -174,4 +194,11 @@ object ServiceLocator {
 
     fun isInitialized(): Boolean = initialized
     fun isKioskManagerInitialized(): Boolean = ::kioskManager.isInitialized
+
+    /**
+     * Whether the relay was wired up. The destructive reset has to detach remote access, and it must be
+     * able to run on a device where `init` never got that far (a unit test, or a build with no relay
+     * configured) without tripping over an uninitialised field.
+     */
+    fun isRelayInitialized(): Boolean = ::relayConnector.isInitialized && ::relayConfig.isInitialized
 }

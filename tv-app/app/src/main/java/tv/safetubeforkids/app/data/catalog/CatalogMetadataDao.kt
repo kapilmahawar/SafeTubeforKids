@@ -35,4 +35,12 @@ interface CatalogMetadataDao {
 
     @Query("UPDATE catalog_metadata SET server_version = :version WHERE id = 1")
     suspend fun markServerVersion(version: Long): Int
+
+    /**
+     * The destructive reset (W10) removes the TV's mirror of the library, and this row is part of it:
+     * it carries the catalog version the TV believes it holds. Leaving it behind would make a fresh
+     * install claim to be at a version whose nodes no longer exist.
+     */
+    @Query("DELETE FROM catalog_metadata")
+    suspend fun deleteAll()
 }

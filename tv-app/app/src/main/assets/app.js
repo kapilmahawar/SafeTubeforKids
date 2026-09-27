@@ -45,10 +45,9 @@
         return id ? '/tv/' + id + '/api' : '';
     }
 
-    function extractPin() {
-        return new URLSearchParams(window.location.search).get('pin');
-    }
-
+    // The `?pin=` parameter used to sign a parent in automatically, because the PIN was printed on the
+    // TV and encoded in its QR code. It is gone with the rest of that model: no page is handed a
+    // credential in its address bar, and no link can sign anybody in.
     var tvId = extractTvId();
     var API_BASE = extractApiBase();
     var TOKEN_KEY = tvId ? 'kw_token_' + tvId : 'kw_token';
@@ -79,6 +78,12 @@
 
     var state = {
         token: readToken(),
+        // Whether the TV has a Parent PIN at all: null until the TV answers, false for a TV that has
+        // never been set up (which is a different screen, not a failed sign-in).
+        authState: null,
+        // The Recovery Code a parent has just had verified, held in memory only while the second step
+        // of "forgot my PIN" is on screen. Never written to storage.
+        recoveryCode: null,
         session: null,
         artwork: { videos: {}, containers: {}, installedCatalogVersion: 0 },
         // Whether the TV's installed version is known at all. A failed artwork read means "unknown",
@@ -220,6 +225,14 @@
         }
     }
 
+    /**
+     * Sign in with the Parent PIN.
+     *
+     * The PIN is sent once, exchanged for a session token, and then forgotten: it is never stored in
+     * the browser, never kept in memory after this call, and never used as the bearer token for
+     * anything. Every later request carries the session, which is what lets "change the PIN" or "sign
+     * out everywhere" invalidate every browser at once.
+     */
     async function connect(pin) {
         try {
             var response = await fetch(API_BASE + '/auth', {
@@ -237,20 +250,29 @@
 
             if (response.ok && data.token) {
                 rememberToken(data.token);
-                // The PIN is a secret: it does not stay in the address bar or in history.
-                if (window.history && window.history.replaceState) {
-                    window.history.replaceState({}, document.title,
-                        window.location.pathname + window.location.hash);
-                }
                 return { ok: true };
             }
 
-            if (response.status === 429) return { ok: false, reason: 'Too many tries. Wait a minute and try again.' };
-            if (response.status === 503) return { ok: false, reason: 'The TV is busy or offline' };
-            return { ok: false, reason: data.error || 'That PIN was not right' };
+            return { ok: false, reason: ParentAccess.describeAuthProblem(response.status, data, 'sign in') };
         } catch (error) {
             return { ok: false, reason: 'Could not reach the TV. Is it on the same wifi?' };
         }
+    }
+
+    /**
+     * Does this TV have a Parent PIN yet?
+     *
+     * Answered without a session, because a parent who cannot sign in is exactly the person who needs
+     * to be told "there is nothing here to sign in to - set it up on the TV". Anything other than a
+     * clear answer leaves `authState` null, and the page shows the sign-in form rather than claiming
+     * the TV is unconfigured when it simply could not be reached.
+     */
+    async function loadAuthState() {
+        var result = await apiCall('GET', '/auth/state');
+        if (result.status === 200 && result.data && typeof result.data.configured === 'boolean') {
+            state.authState = result.data.configured;
+        }
+        paintStatusPill();
     }
 
     /**
@@ -1246,6 +1268,7 @@
             return { name: 'add', id: parts[1] ? decodeURIComponent(parts[1]) : null };
         }
         if (name === 'settings') return { name: 'settings', id: null };
+        if (name === 'recovery') return { name: 'recovery', id: null };
         return { name: 'library', id: null };
     }
 
@@ -1269,16 +1292,20 @@
     }
 
     function render() {
+        // The route is read first, for signed-in and signed-out parents alike: "forgot my PIN" is a
+        // route, so the page has to know which of the two locked screens to show before it knows
+        // whether anybody is signed in.
+        state.route = parseHash();
+
         if (!state.token) {
             topbar.hidden = true;
             tabbar.hidden = true;
-            clear(view).appendChild(screenConnect());
+            clear(view).appendChild(state.route.name === 'recovery' ? screenRecovery() : screenLogin());
             return;
         }
 
         topbar.hidden = false;
         tabbar.hidden = false;
-        state.route = parseHash();
         paintTabs();
 
         var screen;
@@ -1354,31 +1381,46 @@
         ]);
     }
 
-    // --- the connect screen ------------------------------------------------------------------
+    // --- parent access: signing in ------------------------------------------------------------
 
-    function screenConnect() {
+    /**
+     * The sign-in screen, and the screen a parent sees when their TV has never been set up.
+     *
+     * What changed in W10 is what this page *is*. It used to ask for "the PIN your TV is showing",
+     * which was a code that changed every time the app restarted - so the page was really a pairing
+     * screen, and the parent re-paired forever. It now asks for the Parent PIN the parent chose, which
+     * is the same PIN next month, and it offers the two things that has to come with: what to do when
+     * it is forgotten, and an honest answer when the TV has nothing to sign in to yet.
+     */
+    function screenLogin() {
+        if (state.authState === false) return screenNotSetUp();
+
         var pinInput = h('input', {
             class: 'input',
-            type: 'text',
+            type: 'password',
             inputmode: 'numeric',
-            autocomplete: 'one-time-code',
-            maxlength: '8',
-            'aria-label': 'PIN shown on the TV'
+            autocomplete: 'current-password',
+            maxlength: '6',
+            'aria-label': 'Parent PIN'
         });
         var error = h('p', { class: 'field__error', hidden: true });
-        var submit = h('button', { type: 'button', class: 'btn btn--primary btn--block', text: 'Connect' });
+        var submit = h('button', { type: 'button', class: 'btn btn--primary btn--block', text: 'Sign In' });
+
+        pinInput.addEventListener('input', function () {
+            pinInput.value = ParentAccess.digitsOnly(pinInput.value);
+        });
 
         async function attempt() {
             var pin = pinInput.value.trim();
             if (!pin) return;
             error.hidden = true;
             submit.disabled = true;
-            submit.textContent = 'Connecting…';
+            submit.textContent = 'Signing in…';
 
             var result = await connect(pin);
 
             submit.disabled = false;
-            submit.textContent = 'Connect';
+            submit.textContent = 'Sign In';
 
             if (!result.ok) {
                 error.textContent = result.reason;
@@ -1405,15 +1447,17 @@
             h('h1', { class: 'screen__title', text: 'SafeTube' }),
             h('p', {
                 class: 'screen__sub',
-                text: 'Type the PIN your TV is showing. This page is how you choose what your child can watch.'
+                text: 'Your Parent PIN is how you choose what your child can watch.'
             }),
             h('div', { class: 'panel' }, [
                 h('label', { class: 'field' }, [
-                    h('span', { class: 'field__label', text: 'PIN from the TV' }),
+                    h('span', { class: 'field__label', text: 'Parent PIN' }),
                     pinInput
                 ]),
                 error,
-                submit
+                submit,
+                withListener(h('button', { type: 'button', class: 'btn btn--quiet btn--block', text: 'Forgot PIN?' }),
+                    'click', function () { go('#/recovery'); })
             ])
         ];
 
@@ -1425,6 +1469,376 @@
         setTimeout(function () { pinInput.focus(); }, 40);
 
         return h('div', { class: 'screen' }, children);
+    }
+
+    /** A TV with no Parent PIN: there is nothing to type, so say so instead of asking twice. */
+    function screenNotSetUp() {
+        return h('div', { class: 'screen' }, [
+            h('h1', { class: 'screen__title', text: ParentAccess.NOT_SET_UP.title }),
+            h('p', { class: 'screen__sub', text: ParentAccess.NOT_SET_UP.body }),
+            h('div', { class: 'panel' }, [
+                h('p', { class: 'panel__note', text: ParentAccess.NOT_SET_UP.hint }),
+                h('div', { class: 'btn-group' }, [
+                    actionButton('Try again', 'check-auth-state', {}, 'btn--primary')
+                ])
+            ])
+        ]);
+    }
+
+    /**
+     * "I have forgotten my PIN": the Recovery Code, then a new PIN.
+     *
+     * Two steps, in that order, because the second one is only worth doing for a parent who has
+     * actually proved they hold the first - and because a page that asks for a new PIN before checking
+     * the code would invite a parent to type a new secret into a form that is about to reject them.
+     *
+     * The last paragraph is the honest one. There is no way back in from this page for a parent who has
+     * lost both secrets: the TV has to be reset, on the TV, with a typed phrase. Saying so here is
+     * better than a link that goes nowhere.
+     */
+    function screenRecovery() {
+        if (state.authState === false) return screenNotSetUp();
+
+        var step = 'code';
+        var container = h('div', { class: 'screen' });
+
+        function paint() {
+            clear(container);
+            container.appendChild(h('h1', { class: 'screen__title', text: 'Reset Parent PIN' }));
+            container.appendChild(h('p', {
+                class: 'screen__sub',
+                text: step === 'code'
+                    ? 'Enter the Recovery Code generated on your TV.'
+                    : 'Create your new Parent PIN.'
+            }));
+            container.appendChild(step === 'code' ? codeStep() : newPinStep());
+        }
+
+        function codeStep() {
+            var codeInput = h('input', {
+                class: 'input',
+                type: 'text',
+                autocapitalize: 'characters',
+                spellcheck: 'false',
+                autocomplete: 'off',
+                maxlength: '14',
+                'aria-label': 'Recovery Code'
+            });
+            var error = h('p', { class: 'field__error', hidden: true });
+            var verify = h('button', { type: 'button', class: 'btn btn--primary btn--block', text: 'Verify' });
+
+            async function attempt() {
+                var code = codeInput.value;
+                error.hidden = true;
+                verify.disabled = true;
+                verify.textContent = 'Checking…';
+
+                var result = await apiCall('POST', '/auth/recovery/verify', { recoveryCode: code });
+                verify.disabled = false;
+                verify.textContent = 'Verify';
+
+                if (result.status !== 200) {
+                    error.textContent = ParentAccess.describeAuthProblem(result.status, result.data, 'recover');
+                    error.hidden = false;
+                    codeInput.select();
+                    return;
+                }
+
+                step = 'pin';
+                state.recoveryCode = code;
+                paint();
+            }
+
+            codeInput.addEventListener('input', function () {
+                var atEnd = codeInput.selectionStart === codeInput.value.length;
+                var grouped = ParentAccess.groupCode(codeInput.value);
+                codeInput.value = grouped;
+                if (atEnd) codeInput.setSelectionRange(grouped.length, grouped.length);
+            });
+            verify.addEventListener('click', attempt);
+            codeInput.addEventListener('keydown', function (event) {
+                if (event.key === 'Enter') attempt();
+            });
+
+            setTimeout(function () { codeInput.focus(); }, 40);
+
+            return h('div', {}, [
+                h('div', { class: 'panel' }, [
+                    h('label', { class: 'field' }, [
+                        h('span', { class: 'field__label', text: 'Recovery Code' }),
+                        codeInput
+                    ]),
+                    h('p', { class: 'field__hint', text: 'Twelve letters and numbers, like 8K4P-7M2Q-91TX.' }),
+                    error,
+                    verify
+                ]),
+                h('div', { class: 'panel' }, [
+                    h('h3', { class: 'panel__title', text: 'Don\u2019t have your Recovery Code?' }),
+                    h('p', {
+                        class: 'panel__note',
+                        text: 'You can perform a complete SafeTube reset from the TV. It erases your ' +
+                            'library, settings and parent access, and it cannot be undone.'
+                    }),
+                    h('div', { class: 'btn-group' }, [
+                        actionButton('Back to sign in', 'go-sign-in', {})
+                    ])
+                ])
+            ]);
+        }
+
+        function newPinStep() {
+            var pinInput = h('input', {
+                class: 'input', type: 'password', inputmode: 'numeric', maxlength: '6',
+                'aria-label': 'New Parent PIN'
+            });
+            var confirmInput = h('input', {
+                class: 'input', type: 'password', inputmode: 'numeric', maxlength: '6',
+                'aria-label': 'Confirm new Parent PIN'
+            });
+            var error = h('p', { class: 'field__error', hidden: true });
+            var submit = h('button', { type: 'button', class: 'btn btn--primary btn--block', text: 'Reset PIN' });
+
+            [pinInput, confirmInput].forEach(function (input) {
+                input.addEventListener('input', function () {
+                    input.value = ParentAccess.digitsOnly(input.value);
+                });
+            });
+
+            submit.addEventListener('click', async function () {
+                var pin = pinInput.value.trim();
+                var confirm = confirmInput.value.trim();
+
+                if (!ParentAccess.isPin(pin)) {
+                    error.textContent = 'A Parent PIN is six digits.';
+                    error.hidden = false;
+                    return;
+                }
+                if (pin !== confirm) {
+                    error.textContent = 'The two PINs are not the same.';
+                    error.hidden = false;
+                    return;
+                }
+
+                error.hidden = true;
+                submit.disabled = true;
+                submit.textContent = 'Resetting…';
+
+                var result = await apiCall('POST', '/auth/recovery', {
+                    recoveryCode: state.recoveryCode,
+                    newPin: pin,
+                    confirmPin: confirm
+                });
+
+                submit.disabled = false;
+                submit.textContent = 'Reset PIN';
+
+                if (result.status !== 200) {
+                    error.textContent = ParentAccess.describeAuthProblem(result.status, result.data, 'recover');
+                    error.hidden = false;
+                    return;
+                }
+
+                state.recoveryCode = null;
+                showNewRecoveryCode(result.data.recoveryCode, 'Your Parent PIN was replaced. Sign in with the new one.');
+            });
+
+            return h('div', {}, [
+                h('div', { class: 'panel' }, [
+                    h('label', { class: 'field' }, [
+                        h('span', { class: 'field__label', text: 'New Parent PIN' }),
+                        pinInput
+                    ]),
+                    h('label', { class: 'field' }, [
+                        h('span', { class: 'field__label', text: 'Confirm new Parent PIN' }),
+                        confirmInput
+                    ]),
+                    error,
+                    submit
+                ])
+            ]);
+        }
+
+        paint();
+        return container;
+    }
+
+    /**
+     * The new Recovery Code, once, in a dialog that cannot be dismissed by tapping outside it.
+     *
+     * A rotated code replaces the old one the moment this response is sent, so the parent has exactly
+     * one chance to write it down. A dialog they can wave away without reading would lose it silently.
+     */
+    function showNewRecoveryCode(code, note) {
+        openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: 'Your new Recovery Code' }));
+            inner.appendChild(h('p', { class: 'dialog__body', text: note }));
+            inner.appendChild(h('p', { class: 'recovery-code', text: ParentAccess.groupCode(code) }));
+            inner.appendChild(h('p', {
+                class: 'panel__note',
+                text: 'Write this down and keep it safe. The previous code no longer works, and this ' +
+                    'is the only time it is shown.'
+            }));
+            var ok = withListener(h('button', {
+                type: 'button', class: 'btn btn--primary', text: 'I\u2019ve written it down'
+            }), 'click', function () {
+                close(null);
+                go('#/library');
+                render();
+            });
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [ok]));
+        });
+    }
+
+    // --- parent access: the panel in Settings --------------------------------------------------
+
+    /**
+     * The three things a parent needs to be able to do to their own credential, and nothing else.
+     *
+     * Changing the PIN asks for the current one even though it is done from a signed-in browser: a
+     * session is something a phone holds, and the credential is what the parent knows. Rotating the
+     * Recovery Code is here because the paper gets lost. Signing out everywhere is here because the
+     * parent may have signed in on a phone they no longer have.
+     *
+     * There is deliberately no "set up a PIN from this page". First-run setup happens on the TV, where
+     * the recovery code can be read off the screen the moment it is made - a phone cannot show a code
+     * the parent is supposed to keep somewhere else.
+     */
+    function parentAccessPanel() {
+        return panel('Parent access', null, h('div', {}, [
+            h('p', {
+                class: 'panel__note',
+                text: 'Your Parent PIN protects this page. It lives on the TV, and this page never sees it.'
+            }),
+            h('div', { class: 'btn-group' }, [
+                actionButton('Change PIN', 'change-pin', {}, 'btn--primary'),
+                actionButton('Generate new Recovery Code', 'new-recovery-code', {}),
+                actionButton('Sign out all sessions', 'sign-out-everywhere', {})
+            ])
+        ]));
+    }
+
+    /** Change the PIN: the current one, the new one, and the same new one again. */
+    function changePinDialog() {
+        var current = h('input', {
+            class: 'input', type: 'password', inputmode: 'numeric', maxlength: '6',
+            autocomplete: 'current-password', 'aria-label': 'Current Parent PIN'
+        });
+        var next = h('input', {
+            class: 'input', type: 'password', inputmode: 'numeric', maxlength: '6',
+            autocomplete: 'new-password', 'aria-label': 'New Parent PIN'
+        });
+        var confirm = h('input', {
+            class: 'input', type: 'password', inputmode: 'numeric', maxlength: '6',
+            autocomplete: 'new-password', 'aria-label': 'Confirm new Parent PIN'
+        });
+        [current, next, confirm].forEach(function (input) {
+            input.addEventListener('input', function () {
+                input.value = ParentAccess.digitsOnly(input.value);
+            });
+        });
+
+        openModal(function (inner, close) {
+            var error = h('p', { class: 'field__error', hidden: true });
+            var save = h('button', { type: 'button', class: 'btn btn--primary', text: 'Change PIN' });
+            var cancel = withListener(h('button', { type: 'button', class: 'btn', text: 'Cancel' }),
+                'click', function () { close(null); });
+
+            save.addEventListener('click', async function () {
+                if (!ParentAccess.isPin(next.value.trim())) {
+                    error.textContent = 'A Parent PIN is six digits.';
+                    error.hidden = false;
+                    return;
+                }
+                if (next.value.trim() !== confirm.value.trim()) {
+                    error.textContent = 'The two new PINs are not the same.';
+                    error.hidden = false;
+                    return;
+                }
+
+                error.hidden = true;
+                save.disabled = true;
+                save.textContent = 'Changing…';
+
+                var result = await apiCall('POST', '/auth/pin', {
+                    currentPin: current.value.trim(),
+                    newPin: next.value.trim(),
+                    confirmPin: confirm.value.trim()
+                });
+
+                save.disabled = false;
+                save.textContent = 'Change PIN';
+
+                if (result.status !== 200) {
+                    error.textContent = ParentAccess.describeAuthProblem(result.status, result.data, 'change your PIN');
+                    error.hidden = false;
+                    return;
+                }
+
+                close(null);
+                // The TV invalidates every session when the credential changes, including this one -
+                // so the honest thing to do is show the sign-in screen rather than keep a page that
+                // will fail on its next request.
+                forgetSession();
+                toast('Your Parent PIN was changed. Sign in again with the new one.', 'ok');
+                render();
+            });
+
+            inner.appendChild(h('h2', { class: 'dialog__title', text: 'Change Parent PIN' }));
+            inner.appendChild(h('p', {
+                class: 'dialog__body',
+                text: 'Every device signed in to this page will be signed out.'
+            }));
+            inner.appendChild(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'Current PIN' }), current
+            ]));
+            inner.appendChild(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'New PIN' }), next
+            ]));
+            inner.appendChild(h('label', { class: 'field' }, [
+                h('span', { class: 'field__label', text: 'Confirm New PIN' }), confirm
+            ]));
+            inner.appendChild(error);
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [save, cancel]));
+        });
+    }
+
+    /** A new Recovery Code, for a parent who knows their PIN and has lost the paper. */
+    async function newRecoveryCode() {
+        var sure = await confirmDialog({
+            title: 'Generate a new Recovery Code?',
+            body: 'A new code is created and the previous one stops working immediately.',
+            confirmLabel: 'Generate'
+        });
+        if (!sure) return;
+
+        var result = await apiCall('POST', '/auth/recovery/rotate');
+        if (result.status !== 200 || !result.data || !result.data.recoveryCode) {
+            toast(humanError(result.data, 'A new Recovery Code could not be made'), 'error');
+            return;
+        }
+        showNewRecoveryCode(result.data.recoveryCode, 'This replaces the code you had.');
+    }
+
+    /** Sign out everywhere, this browser included. */
+    async function signOutEverywhere() {
+        var sure = await confirmDialog({
+            title: 'Sign out all sessions?',
+            body: 'Every phone and browser signed in to SafeTube will have to sign in again with your Parent PIN.',
+            confirmLabel: 'Sign out everywhere'
+        });
+        if (!sure) return;
+
+        await apiCall('POST', '/auth/sessions/revoke');
+        forgetSession();
+        toast('Signed out everywhere.', 'ok');
+        render();
+    }
+
+    /** Ask the TV again whether it has a Parent PIN: used by the "not set up yet" screen's button. */
+    async function refreshAuthState() {
+        state.authState = null;
+        await loadAuthState();
+        render();
     }
 
     // --- shared pieces of a screen -----------------------------------------------------------
@@ -2362,6 +2776,8 @@
             children.push(settingsGroup('Content', [allowedSourcesPanel(), libraryFilePanel()]));
         }
 
+        children.push(settingsGroup('Parent access', [parentAccessPanel()]));
+
         children.push(settingsGroup('What has been watched', [watchHistoryPanel()]));
         children.push(settingsGroup('Appearance', [lookPanel()]));
         children.push(settingsGroup('Troubleshooting', [libraryPanel(), helpPanel()]));
@@ -3067,6 +3483,12 @@
         'export-catalog': function () { exportCatalog(); },
         'import-catalog': function () { importCatalog(); },
 
+        'check-auth-state': function () { refreshAuthState(); },
+        'go-sign-in': function () { go('#/library'); },
+        'change-pin': function () { changePinDialog(); },
+        'new-recovery-code': function () { newRecoveryCode(); },
+        'sign-out-everywhere': function () { signOutEverywhere(); },
+
         'install-homescreen': function () { installHomescreen(); },
         'dismiss-homescreen': function () { dismissHomescreen(); },
         'disconnect': function () { disconnect(); }
@@ -3319,7 +3741,7 @@
     async function disconnect() {
         var confirmed = await confirmDialog({
             title: 'Disconnect this phone?',
-            body: 'Nothing on the TV changes. You will need the PIN from the TV to come back.',
+            body: 'Nothing on the TV changes. You will need your Parent PIN to sign in again.',
             confirmLabel: 'Disconnect',
             danger: true
         });
@@ -3373,14 +3795,10 @@
         render();
 
         // The public status answers without a session, which is how the page can tell a parent that
-        // the TV is unreachable - or that this page is too old - before they hunt for the PIN.
+        // the TV is unreachable - or that this page is too old - before they hunt for the PIN. The
+        // auth state answers without one too, and says whether there is a Parent PIN to sign in with.
         await loadStatus();
-
-        var pin = extractPin();
-        if (pin && !state.token) {
-            var result = await connect(pin);
-            if (!result.ok) toast(result.reason, 'error');
-        }
+        await loadAuthState();
 
         if (state.token) {
             var valid = await refreshSession();

@@ -70,10 +70,12 @@ publish the catalog again afterwards.
 The four dashboard suites are `dashboard-catalog-editor.test.js` (the model: every mutation and the
 save/reload conversation), `dashboard-catalog-import.test.js` (the import rules and the ordering they
 produce), `dashboard-catalog-yaml.test.js` (the catalog file: the format, the validation, the preview,
-and the round trip) and `dashboard-catalog-ui.test.js` (the shell that ships: the theme rule, the token
-palette, the action table, what the browser is allowed to store, and that no Apps/Kiosk surface is left
-in any dashboard file). They run against the real asset files, so a page and a script that disagree
-fail here rather than on a phone.
+and the round trip), `dashboard-parent-access.test.js` (signing in: what a Parent PIN may be, how a
+Recovery Code is normalised, what a parent is told when the TV refuses, and the guards that keep a
+credential out of browser storage and out of the address bar) and `dashboard-catalog-ui.test.js` (the
+shell that ships: the theme rule, the token palette, the action table, what the browser is allowed to
+store, and that no Apps/Kiosk surface is left in any dashboard file). They run against the real asset
+files, so a page and a script that disagree fail here rather than on a phone.
 
 The W9 live harness (`catalog-file.js`, above) is the one that checks what unit tests cannot: it
 exports the real library from the real dashboard in a real browser, imports the file back and asserts
@@ -81,6 +83,13 @@ the tree comes back node for node, imports an edited file and asserts the librar
 said, watches the TV's own installed version catch up, checks that the allowed sources are
 byte-identical before and after, and puts the original library back — verifying that it did. It runs
 36 checks and needs the TV's current PIN (see the e2e harness for how the PIN is acquired).
+
+W10's live harness works the same way for the parent credential, and W10 changed how a run signs in:
+the Parent PIN is no longer generated per process and readable from a debug intent, so a harness
+**installs** one it knows (`DEBUG_SET_PIN`, addressed to `.debug.DebugReceiver` by name), and
+`DEBUG_GET_PIN` now answers only whether a credential exists. The destructive reset is verified by a
+focused script that drives the TV's own screens — phrase, refusal, second question, wipe — checking
+after every gate that nothing has been erased yet.
 
 CI (`.github/workflows/ci.yml`) runs `./gradlew --no-daemon --stacktrace assembleDebug
 testDebugUnitTest`, checks the dashboard scripts parse, runs the four dashboard suites, and uploads the
@@ -116,6 +125,7 @@ Test count history (each measured, not estimated):
 | W8 polish | 846 | no Kotlin changed; the dashboard suites went 117 → 128 (`dashboard-catalog-ui.test.js` gained 11 guards for the loading state, the vocabulary, the reorder arrows, the remove copy, the error translator and the artwork fallback) |
 | W8.1 now playing | 846 | still no Kotlin change; the dashboard suites went 128 → 135 (the seventh group guards the live status card: the five states, the freshness rule, the playhead ticker, the polling cadence and the fact that it reads `/status` and never the watch history) |
 | W9 catalog file | 850 | +2: the two `catalog-yaml.js` routes. No Kotlin model changed — the file is a client-side reader/writer over the existing atomic `PUT /catalog`. The dashboard suites went 143 → 186: `dashboard-catalog-yaml.test.js` is a new suite of 36 (the format, the refusals, the preview, the round trip) and `dashboard-catalog-ui.test.js` gained 7 guards (the panel, the export, the preview gate, the one write path, and that an imported file can never grant playback) |
+| W10 parent access | 910 | +60: the persistent parent credential (`PinManagerTest` rewritten around setup/verification/persistence/pin-change/recovery/rotation, `RecoveryCodeTest`, `ParentAccessRoutesTest`, `ParentAccessSecurityTest` for the credential-versus-playback separation, `SafeTubeResetTest` for the wipe's exact scope and the confirmation phrase). The dashboard suites went 186 → 211: `dashboard-parent-access.test.js` is a new suite of 25. The instrumented suite is unchanged apart from the debug-intent tests, and is not part of routine verification |
 
 **205 of the 542 tests are catalog-era** (Phases 2–4) and live in 11 classes:
 

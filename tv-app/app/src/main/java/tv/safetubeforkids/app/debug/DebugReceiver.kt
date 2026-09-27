@@ -72,6 +72,7 @@ class DebugReceiver : BroadcastReceiver() {
 
             // --- PIN/Auth ---
             "$PKG.DEBUG_GET_PIN" -> handleGetPin()
+            "$PKG.DEBUG_SET_PIN" -> handleSetPin(intent)
             "$PKG.DEBUG_RESET_PIN" -> handleResetPin()
             "$PKG.DEBUG_SIMULATE_AUTH" -> handleSimulateAuth(intent)
             "$PKG.DEBUG_GET_AUTH_STATE" -> handleGetAuthState()
@@ -469,21 +470,66 @@ class DebugReceiver : BroadcastReceiver() {
             }
         }
     }
-    private fun handleGetPin() {        val pin = ServiceLocator.pinManager.getCurrentPin()
-        logResult("""{"pin":"$pin"}""")
+    /**
+     * Whether a Parent PIN exists. The old `DEBUG_GET_PIN` returned the PIN itself, which was possible
+     * only because the PIN was generated in memory and never really a credential. There is nothing to
+     * return now, so this reports the one fact that is left.
+     */
+    private fun handleGetPin() {
+        logResult("""{"configured":${ServiceLocator.pinManager.isConfigured()}}""")
     }
 
-    private fun handleResetPin() {
-        val newPin = ServiceLocator.pinManager.resetPin()
-        ServiceLocator.sessionManager.invalidateAll()
-        // Rotate tv-secret on PIN reset (security: invalidates all remote access)
-        try {
-            ServiceLocator.relayConfig.rotateTvSecret()
-            ServiceLocator.relayConnector.reconnectNow()
-        } catch (e: Exception) {
-            // Relay may not be initialized in tests
+    /**
+     * Sets a known Parent PIN, and a known Recovery Code, for automated device testing.
+     *
+     * This is the test instrument that replaces reading the PIN out of the log: an end-to-end run has
+     * to be able to sign in, and a persistent credential that no one can read is exactly what W10 is
+     * for. Debug builds only - the receiver returns before any of this on a build a family installs -
+     * and it is an operator action performed over adb, not something the app ever does on its own.
+     *
+     * The Recovery Code is derived from the PIN's last digits so a script can use both without a
+     * second round trip, and it is reported back for the same reason.
+     */
+    private fun handleSetPin(intent: Intent) {
+        val pin = intent.getStringExtra("pin") ?: run {
+            logResult("""{"error":"missing pin extra"}""")
+            return
         }
-        logResult("""{"pin":"$newPin"}""")
+        if (!tv.safetubeforkids.app.auth.PinManager.isSixDigits(pin)) {
+            logResult("""{"error":"a Parent PIN is six digits"}""")
+            return
+        }
+
+        val manager = ServiceLocator.pinManager
+        val setup = if (manager.isConfigured()) {
+            // Replace: there is no API to overwrite a credential, on purpose, so a test that wants a
+            // known PIN resets first and then sets it.
+            manager.clearAll()
+            manager.setup(pin)
+        } else {
+            manager.setup(pin)
+        }
+
+        when (setup) {
+            is tv.safetubeforkids.app.auth.PinSetupResult.Created ->
+                logResult("""{"configured":true,"pin":"$pin","recoveryCode":"${setup.recoveryCode}"}""")
+            else -> logResult("""{"configured":false,"error":"could not set the PIN"}""")
+        }
+    }
+
+    /**
+     * Forgets the Parent PIN and the Recovery Code, returning the TV to setup.
+     *
+     * The old version generated a new random PIN and reported it, because the PIN was ephemeral and
+     * readable. A persistent credential cannot be "reset to something a script knows" without either
+     * storing it in plaintext or reporting a secret, and both are what W10 removed - so this clears
+     * the credential (which is a real, useful instrument: it is how a test gets back to first run) and
+     * [handleSetPin] is how a test installs one it knows.
+     */
+    private fun handleResetPin() {
+        ServiceLocator.pinManager.clearAll()
+        ServiceLocator.sessionManager.invalidateAll()
+        logResult("""{"configured":false}""")
     }
 
     private fun handleSimulateAuth(intent: Intent) {
@@ -498,6 +544,8 @@ class DebugReceiver : BroadcastReceiver() {
             is PinResult.RateLimited -> logResult("""{"valid":false,"rateLimited":true,"retryAfterMs":${result.retryAfterMs}}""")
             // Correct PIN, but no session could be issued for it: never reported as valid.
             is PinResult.NotConfigured -> logResult("""{"valid":false,"notConfigured":true}""")
+            // No Parent PIN exists at all, so no PIN can be valid on this device.
+            is PinResult.NotSetUp -> logResult("""{"valid":false,"notSetUp":true}""")
         }
     }
 
@@ -505,7 +553,9 @@ class DebugReceiver : BroadcastReceiver() {
         val sessions = ServiceLocator.sessionManager.getActiveSessionCount()
         val locked = ServiceLocator.pinManager.isLockedOut()
         val failed = ServiceLocator.pinManager.getFailedAttempts()
-        logResult("""{"sessions":$sessions,"lockedOut":$locked,"failedAttempts":$failed}""")
+        val configured = ServiceLocator.pinManager.isConfigured()
+        val recoveryPending = ServiceLocator.pinManager.pendingRecoveryCode() != null
+        logResult("""{"sessions":$sessions,"lockedOut":$locked,"failedAttempts":$failed,"pinConfigured":$configured,"recoveryCodePending":$recoveryPending}""")
     }
 
     // --- Playback ---
@@ -661,15 +711,20 @@ class DebugReceiver : BroadcastReceiver() {
 
     // --- Lifecycle ---
 
+    /**
+     * The destructive reset, as a test instrument.
+     *
+     * The product's own reset is on the TV (typed phrase, then a second question) and there is no HTTP
+     * route that can trigger it. This exists so an automated run can put a device back into the state
+     * a fresh install is in without a robot typing on a television - and it calls the same
+     * [tv.safetubeforkids.app.reset.SafeTubeReset] the TV screen calls, so what a test verifies is
+     * what a parent gets.
+     */
     private fun handleFullReset(context: Context) {
         scope.launch {
             try {
-                ServiceLocator.database.channelDao().deleteAll()
-                ServiceLocator.database.playEventDao().deleteAll()
-                ServiceLocator.database.videoDao().deleteAll()
-                ServiceLocator.pinManager.resetPin()
-                ServiceLocator.sessionManager.invalidateAll()
-                logResult("""{"success":true}""")
+                val report = tv.safetubeforkids.app.reset.SafeTubeReset.wipe(context)
+                logResult("""{"success":true,"removed":${report.removed.entries.joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" }}}""")
             } catch (e: Exception) {
                 logResult("""{"error":"${e.message}"}""")
             }
@@ -699,7 +754,11 @@ class DebugReceiver : BroadcastReceiver() {
                 val events = ServiceLocator.database.playEventDao().count()
                 val videos = ServiceLocator.database.videoDao().count()
                 val sessions = ServiceLocator.sessionManager.getActiveSessionCount()
-                val pin = ServiceLocator.pinManager.getCurrentPin()
+                // The PIN itself is not reported any more, and this is deliberate rather than an
+                // oversight: since W10 it is stored as a verifier and there is no plaintext to report.
+                // What a caller can learn is whether a parent credential exists, which is what an
+                // automated test actually needs to know.
+                val pinConfigured = ServiceLocator.pinManager.isConfigured()
                 val ip = NetworkUtils.getDeviceIp(context) ?: "unknown"
                 val offline = OfflineSimulator.isOffline
                 val nowPlaying = PlayEventRecorder.currentVideoId
@@ -713,7 +772,7 @@ class DebugReceiver : BroadcastReceiver() {
                 val catalogVersion = catalogMetadata?.catalogVersion ?: 0
                 val catalogServerVersion = catalogMetadata?.serverVersion ?: 0
 
-                logResult("""{"sources":$sources,"events":$events,"videos":$videos,"sessions":$sessions,"pin":"$pin","ip":"$ip","offline":$offline,"nowPlaying":${if (nowPlaying != null) "\"$nowPlaying\"" else "null"},"catalog":"$catalogNames","catalogVersion":$catalogVersion,"catalogServerVersion":$catalogServerVersion,"catalogItems":$catalogItems}""")
+                logResult("""{"sources":$sources,"events":$events,"videos":$videos,"sessions":$sessions,"pinConfigured":$pinConfigured,"ip":"$ip","offline":$offline,"nowPlaying":${if (nowPlaying != null) "\"$nowPlaying\"" else "null"},"catalog":"$catalogNames","catalogVersion":$catalogVersion,"catalogServerVersion":$catalogServerVersion,"catalogItems":$catalogItems}""")
             } catch (e: Exception) {
                 logResult("""{"error":"${e.message}"}""")
             }

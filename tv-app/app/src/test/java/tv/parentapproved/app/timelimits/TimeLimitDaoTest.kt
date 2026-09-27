@@ -89,4 +89,9 @@ class FakeTimeLimitDao : TimeLimitDao {
     override suspend fun updateBonus(minutes: Int, date: String) {
         stored = stored?.copy(bonusMinutes = minutes, bonusDate = date)
     }
+
+    /** The destructive reset's own call (W10), which the fake has to answer like the real DAO. */
+    override suspend fun deleteAll() {
+        stored = null
+    }
 }

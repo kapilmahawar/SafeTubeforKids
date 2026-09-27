@@ -1,7 +1,7 @@
 package tv.safetubeforkids.app.server
 
 import tv.safetubeforkids.app.ServiceLocator
-import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.testPinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelDao
@@ -46,7 +46,7 @@ class StatusRoutesTest {
         sessionManager = SessionManager()
         ServiceLocator.initForTest(
             db = mockDb,
-            pin = PinManager(),
+            pin = testPinManager(),
             session = sessionManager,
         )
         PlayEventRecorder.init(mockDb, clock = { fakeTime })

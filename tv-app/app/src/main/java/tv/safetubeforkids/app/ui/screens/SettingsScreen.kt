@@ -45,10 +45,12 @@ import tv.safetubeforkids.app.util.OfflineSimulator
 fun SettingsScreen(
     onBack: () -> Unit,
     onRefresh: () -> Unit,
+    onParentAccess: () -> Unit = {},
+    onResetSafeTube: () -> Unit = {},
 ) {
     var showLog by remember { mutableStateOf(false) }
-    var displayPin by remember { mutableStateOf(ServiceLocator.pinManager.getCurrentPin()) }
     var sessionCount by remember { mutableStateOf(ServiceLocator.sessionManager.getActiveSessionCount()) }
+    val pinConfigured = ServiceLocator.pinManager.isConfigured()
 
     Row(
         modifier = Modifier
@@ -92,13 +94,42 @@ fun SettingsScreen(
             // --- Connection ---
             Text("Connection", style = MaterialTheme.typography.titleMedium, color = KidText)
             Spacer(modifier = Modifier.height(8.dp))
-            Text("PIN: $displayPin", style = MaterialTheme.typography.bodySmall, color = KidTextDim)
+            // The PIN itself is not shown here, or anywhere. It is stored as a verifier, so there is
+            // no PIN to show - which is the W10 change: the old screen printed a secret that anyone
+            // in the room could read, and it printed a different one after every app start.
+            Text(
+                if (pinConfigured) "Parent PIN: set" else "Parent PIN: not set up yet",
+                style = MaterialTheme.typography.bodySmall,
+                color = KidTextDim,
+            )
             Text("Active sessions: $sessionCount", style = MaterialTheme.typography.bodySmall, color = KidTextDim)
 
             Spacer(modifier = Modifier.height(24.dp))
 
+            // --- Parent access ---
+            // Reachable without a PIN, deliberately, and unchanged from before W10: the parent who has
+            // forgotten their PIN is exactly the person who needs the recovery code and, failing that,
+            // the reset. Neither button grants anything on its own - the recovery screen asks for the
+            // current PIN before issuing a new code, and the reset asks for a typed phrase.
+            Text("Parent access", style = MaterialTheme.typography.titleMedium, color = KidText)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                "Recovery Code: " + if (ServiceLocator.pinManager.pendingRecoveryCode() != null) {
+                    "waiting to be written down"
+                } else {
+                    "not shown (you can make a new one)"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = KidTextDim,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SettingsBtn("Recovery Code") { onParentAccess() }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
             // --- Parents ---
-            // Only reachable after the PIN, so these are parent tools rather than a way in.
             Text("Parents", style = MaterialTheme.typography.titleMedium, color = KidText)
             Spacer(Modifier.height(8.dp))
             // Developer tools follow; they are kept out of a build a family installs.
@@ -112,22 +143,11 @@ fun SettingsScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                SettingsBtn("Reset PIN") {
-                    val newPin = ServiceLocator.pinManager.resetPin()
-                    ServiceLocator.sessionManager.invalidateAll()
-                    try {
-                        ServiceLocator.relayConfig.rotateTvSecret()
-                        if (ServiceLocator.isRelayEnabled()) {
-                            ServiceLocator.relayConnector.reconnectNow()
-                        }
-                    } catch (_: Exception) {}
-                    displayPin = newPin
-                    sessionCount = 0
-                }
-                SettingsBtn("Clear Sessions") {
+                SettingsBtn("Sign Out All Sessions") {
                     ServiceLocator.sessionManager.invalidateAll()
                     sessionCount = 0
                 }
+                SettingsBtn("Reset SafeTube") { onResetSafeTube() }
                 SettingsBtn("Clear Events") { PlayEventRecorder.clearAll() }
                 if (BuildConfig.IS_DEBUG) {
                     SettingsBtn(if (OfflineSimulator.isOffline) "Go Online" else "Simulate Offline") {

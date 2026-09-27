@@ -195,12 +195,15 @@ test('the library is read and written through the one document endpoint', () => 
     });
 
     // And the API surface is exactly the endpoints that already existed, plus the two the redesign
-    // needs: nothing here invents a second way to change the library.
+    // needs: nothing here invents a second way to change the library. W10 added the parent-access
+    // routes, which change a credential and nothing else - none of them touches the library.
     const allowed = new Set([
         "'/status'", "'/auth/refresh'", "'/catalog'", "'/catalog/artwork'", "'/catalog/refresh'",
         "'/catalog/import/resolve'", "'/playlists'", "'/playlists/'", "'/time-limits'",
         "'/time-limits/lock'", "'/time-limits/bonus'", "'/stats'", "'/stats/recent'", "'/crash-log'",
         "'/playback/'", "'/sources/export'", "'/sources/import'",
+        "'/auth/state'", "'/auth/pin'", "'/auth/recovery'", "'/auth/recovery/verify'",
+        "'/auth/recovery/rotate'", "'/auth/sessions/revoke'",
     ]);
 
     const paths = [...app.matchAll(/apiCall\('[A-Z]+', ('[^']+')/g)].map((m) => m[1]);

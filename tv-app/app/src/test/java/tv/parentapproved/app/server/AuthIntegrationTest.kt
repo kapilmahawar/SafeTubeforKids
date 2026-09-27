@@ -1,6 +1,10 @@
 package tv.safetubeforkids.app.server
 
+import tv.safetubeforkids.app.auth.InMemoryParentCredentialStore
 import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.TEST_PIN
+import tv.safetubeforkids.app.auth.TestHasher
+import tv.safetubeforkids.app.auth.testPinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -30,10 +34,13 @@ class AuthIntegrationTest {
     ) = testApplication {
         val sessionManager = SessionManager(clock = { timeRef.value })
         val pinManager = PinManager(
+            store = InMemoryParentCredentialStore(),
             clock = { timeRef.value },
-            onPinValidated = { sessionManager.createSession() ?: "" }
+            onPinValidated = { sessionManager.createSession() ?: "" },
+            hasher = TestHasher,
         )
-        val pin = pinManager.getCurrentPin()
+        pinManager.setup(TEST_PIN, TEST_PIN)
+        val pin = TEST_PIN
 
         application {
             install(ContentNegotiation) { json() }

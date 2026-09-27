@@ -2,6 +2,9 @@ package tv.safetubeforkids.app.relay
 
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.TEST_PIN
+import tv.safetubeforkids.app.auth.TestHasher
+import tv.safetubeforkids.app.auth.testPinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelDao
@@ -40,7 +43,7 @@ class RelayBridgeIntegrationTest {
         private lateinit var server: EmbeddedServer<*, *>
         private var serverPort: Int = 0
         private val sessionManager = SessionManager()
-        private val pinManager = PinManager(
+        private val pinManager = testPinManager(
             onPinValidated = { sessionManager.createSession() ?: "" },
         )
 
@@ -152,7 +155,7 @@ class RelayBridgeIntegrationTest {
 
     @Test
     fun bridge_postAuth_withCorrectPin_returns200() = runTest {
-        val pin = pinManager.getCurrentPin()
+        val pin = TEST_PIN
         val requestJson = """{"id":"req-auth","method":"POST","path":"/api/auth","headers":{"Content-Type":"application/json"},"body":"{\"pin\":\"$pin\"}"}"""
         val response = sendRelayRequest(requestJson)
 
@@ -173,7 +176,7 @@ class RelayBridgeIntegrationTest {
     @Test
     fun bridge_getPlaylists_withAuth_returns200() = runTest {
         // First get a valid token
-        val pin = pinManager.getCurrentPin()
+        val pin = TEST_PIN
         val authJson = """{"id":"req-auth2","method":"POST","path":"/api/auth","headers":{"Content-Type":"application/json"},"body":"{\"pin\":\"$pin\"}"}"""
         val authResponse = sendRelayRequest(authJson)
         val token = parseResponseBody(authResponse)!!["token"]!!.jsonPrimitive.content
@@ -188,7 +191,7 @@ class RelayBridgeIntegrationTest {
     @Test
     fun bridge_postPlaybackPause_returns200() = runTest {
         // Get auth token first
-        val pin = pinManager.getCurrentPin()
+        val pin = TEST_PIN
         val authJson = """{"id":"req-auth3","method":"POST","path":"/api/auth","headers":{"Content-Type":"application/json"},"body":"{\"pin\":\"$pin\"}"}"""
         val authResponse = sendRelayRequest(authJson)
         val token = parseResponseBody(authResponse)!!["token"]!!.jsonPrimitive.content
@@ -202,7 +205,7 @@ class RelayBridgeIntegrationTest {
     @Test
     fun bridge_postAuthRefresh_withValidToken_returns200() = runTest {
         // Get a session token first
-        val pin = pinManager.getCurrentPin()
+        val pin = TEST_PIN
         val authJson = """{"id":"req-auth4","method":"POST","path":"/api/auth","headers":{"Content-Type":"application/json"},"body":"{\"pin\":\"$pin\"}"}"""
         val authResponse = sendRelayRequest(authJson)
         val token = parseResponseBody(authResponse)!!["token"]!!.jsonPrimitive.content

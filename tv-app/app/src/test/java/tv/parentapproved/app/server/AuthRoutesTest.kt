@@ -1,6 +1,10 @@
 package tv.safetubeforkids.app.server
 
+import tv.safetubeforkids.app.auth.InMemoryParentCredentialStore
 import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.TEST_PIN
+import tv.safetubeforkids.app.auth.TestHasher
+import tv.safetubeforkids.app.auth.testPinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -28,10 +32,14 @@ class AuthRoutesTest {
     ) = testApplication {
         val sessionManager = SessionManager(clock = { timeRef.value })
         val pinManager = PinManager(
+            store = InMemoryParentCredentialStore(),
             clock = { timeRef.value },
-            onPinValidated = { sessionManager.createSession() ?: "" }
+            onPinValidated = { sessionManager.createSession() ?: "" },
+            hasher = TestHasher,
         )
-        val pin = pinManager.getCurrentPin()
+        // W10: the PIN is chosen, not generated, so a test states the one it will use.
+        pinManager.setup(TEST_PIN, TEST_PIN)
+        val pin = TEST_PIN
 
         application {
             install(ContentNegotiation) { json() }
@@ -149,8 +157,9 @@ class AuthRoutesTest {
         // and the response must not carry a token of any kind - not even an empty one.
         val timeRef = TimeRef()
         val sessionManager = SessionManager(clock = { timeRef.value })
-        val pinManager = PinManager(clock = { timeRef.value })
-        val pin = pinManager.getCurrentPin()
+        val pinManager = PinManager(store = InMemoryParentCredentialStore(), clock = { timeRef.value }, hasher = TestHasher)
+        pinManager.setup(TEST_PIN, TEST_PIN)
+        val pin = TEST_PIN
 
         testApplication {
             application {
@@ -173,3 +182,4 @@ class AuthRoutesTest {
         }
     }
 }
+

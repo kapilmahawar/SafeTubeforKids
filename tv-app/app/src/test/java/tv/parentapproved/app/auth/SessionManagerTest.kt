@@ -76,20 +76,19 @@ class SessionManagerTest {
 
     @Test
     fun resetPinFlow_invalidatesAllSessions() {
-        // Simulates what SettingsScreen and DebugReceiver do:
-        // resetPin() + invalidateAll() ensures old tokens stop working
-        val pinManager = PinManager(clock = { currentTime })
+        // What the TV and the auth routes do since W10: replacing the credential invalidates every
+        // session issued under the old one, and the credential itself says so through
+        // `onCredentialsChanged` rather than every call site having to remember.
+        val pinManager = testPinManager(onCredentialsChanged = { sessionManager.invalidateAll() })
         val token1 = sessionManager.createSession()!!
         val token2 = sessionManager.createSession()!!
         assertTrue(sessionManager.validateSession(token1))
 
-        // Reset PIN should clear sessions (call site responsibility)
-        pinManager.resetPin()
-        sessionManager.invalidateAll()
+        val result = pinManager.changePin(TEST_PIN, "654321", "654321")
+        assertTrue(result is PinChangeResult.Changed)
 
-        assertFalse(sessionManager.validateSession(token1))
+        assertFalse("an old session must not survive a credential change", sessionManager.validateSession(token1))
         assertFalse(sessionManager.validateSession(token2))
-        // New session can be created after reset
         val newToken = sessionManager.createSession()
         assertNotNull(newToken)
         assertTrue(sessionManager.validateSession(newToken!!))

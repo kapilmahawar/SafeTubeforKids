@@ -1201,7 +1201,7 @@ class CatalogRoutesTest {
     @Test
     fun api14_theCatalogRouteUsesTheExistingAuthFlowAndLeavesTheOtherRoutesAlone() = testApplication {
         val sessionManager = SessionManager(clock = { currentTime })
-        val pinManager = tv.safetubeforkids.app.auth.PinManager(
+        val pinManager = tv.safetubeforkids.app.auth.testPinManager(
             clock = { currentTime },
             onPinValidated = { sessionManager.createSession() ?: "" },
         )
@@ -1218,7 +1218,7 @@ class CatalogRoutesTest {
         // The parent signs in through the existing PIN route...
         val authResponse = client.post("/auth") {
             contentType(ContentType.Application.Json)
-            setBody("""{"pin":"${pinManager.getCurrentPin()}"}""")
+            setBody("""{"pin":"${tv.safetubeforkids.app.auth.TEST_PIN}"}""")
         }
         assertEquals(HttpStatusCode.OK, authResponse.status)
         val issuedToken = Json.parseToJsonElement(authResponse.bodyAsText())
@@ -1229,7 +1229,7 @@ class CatalogRoutesTest {
         assertEquals(HttpStatusCode.OK, getCatalog(issuedToken).status)
 
         // A wrong PIN is still refused by the existing route.
-        val wrongPin = if (pinManager.getCurrentPin() == "000000") "111111" else "000000"
+        val wrongPin = "000000"
         val rejected = client.post("/auth") {
             contentType(ContentType.Application.Json)
             setBody("""{"pin":"$wrongPin"}""")

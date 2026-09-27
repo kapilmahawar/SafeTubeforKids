@@ -6,350 +6,508 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 
+/**
+ * The Parent PIN as a persistent credential, and the Recovery Code that can replace it.
+ *
+ * This was `PinManagerTest`, and it used to test a generator: a PIN that was invented on every app
+ * start and shown on the television. W10 replaced that model, and these tests were rewritten around
+ * what replaced it rather than deleted - the lockout policy, the fail-closed rule and the counter
+ * persistence are the same behaviour they always were, now applied to a credential the parent chose.
+ *
+ * The iteration count is lowered here (and only here) so the suite stays fast: 120,000 PBKDF2 rounds
+ * per assertion would make this file take minutes, and the cost is a property of `Pbkdf2SecretHasher`,
+ * not of the rules under test.
+ */
 class PinManagerTest {
 
     private var currentTime = 0L
+    private lateinit var store: InMemoryParentCredentialStore
     private lateinit var pinManager: PinManager
+
+    private val fastHasher = Pbkdf2SecretHasher(iterations = 1_000)
 
     @Before
     fun setup() {
         currentTime = 1000000L
-        // A session-issuing callback is wired, because a correct PIN is only an authentication when
-        // something can issue a token for it. Without one, `validate` now fails closed
-        // (PinResult.NotConfigured) instead of returning a Success carrying an empty token, so the
-        // tests that need an unconfigured device build their own PinManager.
+        store = InMemoryParentCredentialStore()
         pinManager = PinManager(
+            store = store,
             clock = { currentTime },
             onPinValidated = { "test-session-token" },
+            hasher = fastHasher,
+        )
+        pinManager.setup(PIN)
+    }
+
+    // --- first run ----------------------------------------------------------------------------------
+
+    @Test
+    fun aFreshDeviceHasNoParentPinAndSaysSo() {
+        val fresh = PinManager(store = InMemoryParentCredentialStore(), clock = { currentTime }, hasher = fastHasher)
+
+        assertFalse("nothing is configured before setup", fresh.isConfigured())
+        assertTrue(
+            "and a PIN cannot be validated on a device that has none",
+            fresh.validate(PIN) is PinResult.NotSetUp,
         )
     }
 
     @Test
-    fun generatePin_returns6Digits() {
-        val pin = pinManager.getCurrentPin()
-        assertEquals(6, pin.length)
-        assertTrue("PIN should be all numeric", pin.all { it.isDigit() })
+    fun setupCreatesTheCredentialAndIssuesARecoveryCode() {
+        val fresh = PinManager(store = InMemoryParentCredentialStore(), clock = { currentTime }, hasher = fastHasher)
+
+        val result = fresh.setup(PIN, PIN)
+
+        assertTrue(result is PinSetupResult.Created)
+        assertTrue(fresh.isConfigured())
+        val code = (result as PinSetupResult.Created).recoveryCode
+        assertTrue("a recovery code is issued with the PIN", RecoveryCode.isWellFormed(code))
+        assertEquals("and it is the code the TV can show", code, fresh.pendingRecoveryCode())
     }
 
     @Test
-    fun generatePin_differentEachTime() {
-        val pins = (1..10).map { PinManager(clock = { currentTime }).getCurrentPin() }.toSet()
-        assertTrue("At least 2 different PINs from 10 generations", pins.size >= 2)
+    fun setupRefusesASecondTimeInsteadOfReplacingTheCredential() {
+        val second = pinManager.setup("654321", "654321")
+
+        assertTrue("an existing PIN is never silently regenerated", second is PinSetupResult.AlreadyConfigured)
+        assertTrue("and the original still works", pinManager.validate(PIN) is PinResult.Success)
     }
 
     @Test
-    fun validatePin_correctPinReturnsTrue() {
-        val pin = pinManager.getCurrentPin()
-        val result = pinManager.validate(pin)
-        assertTrue("Correct PIN should return Success", result is PinResult.Success)
+    fun theRecoveryCodeIsOnlyReadableUntilTheParentAcknowledgesIt() {
+        assertNotNull(pinManager.pendingRecoveryCode())
+
+        pinManager.acknowledgeRecoveryCode()
+
+        assertNull("after acknowledging, the plaintext is gone from memory", pinManager.pendingRecoveryCode())
     }
 
-    @Test
-    fun validatePin_wrongPinReturnsFalse() {
-        val result = pinManager.validate("000000")
-        assertTrue("Wrong PIN should return Invalid", result is PinResult.Invalid)
-    }
+    // --- what a PIN may be --------------------------------------------------------------------------
 
     @Test
-    fun rateLimiting_locksAfter5Failures() {
-        repeat(4) {
-            pinManager.validate("wrong!")
+    fun aPinMustBeSixDigits() {
+        val fresh = PinManager(store = InMemoryParentCredentialStore(), clock = { currentTime }, hasher = fastHasher)
+
+        listOf("", "12345", "1234567", "12345a", "12 456", "abcdef").forEach { candidate ->
+            val result = fresh.setup(candidate, candidate)
+            assertTrue("'$candidate' is not a Parent PIN", result is PinSetupResult.Invalid)
+            assertFalse(fresh.isConfigured())
         }
-        val fifthResult = pinManager.validate("wrong!")
-        assertTrue("5th failure should trigger rate limiting", fifthResult is PinResult.RateLimited)
+        assertTrue(fresh.setup("000000", "000000") is PinSetupResult.Created)
     }
 
     @Test
-    fun rateLimiting_resetsAfterTimeout() {
-        repeat(5) { pinManager.validate("wrong!") }
-        // Advance past 5 minute lockout
-        currentTime += 5 * 60 * 1000L + 1
-        val result = pinManager.validate("wrong!")
-        assertTrue("After timeout, should allow attempt (Invalid, not RateLimited)", result is PinResult.Invalid)
+    fun theConfirmationMustMatch() {
+        val fresh = PinManager(store = InMemoryParentCredentialStore(), clock = { currentTime }, hasher = fastHasher)
+
+        val result = fresh.setup("123456", "123457")
+
+        assertTrue(result is PinSetupResult.Invalid)
+        assertFalse("a mistyped confirmation must not create a credential", fresh.isConfigured())
     }
+
+    // --- signing in ---------------------------------------------------------------------------------
 
     @Test
-    fun rateLimiting_exponentialBackoff() {
-        // First lockout: 5 min
-        repeat(5) { pinManager.validate("wrong!") }
-        val first = pinManager.validate("wrong!") as PinResult.RateLimited
-
-        // Advance past first lockout
-        currentTime += first.retryAfterMs + 1
-
-        // Second lockout: 10 min
-        repeat(5) { pinManager.validate("wrong!") }
-        val second = pinManager.validate("wrong!") as PinResult.RateLimited
-        assertTrue("Second lockout should be longer", second.retryAfterMs > first.retryAfterMs)
-
-        // Advance past second lockout
-        currentTime += second.retryAfterMs + 1
-
-        // Third lockout: 20 min
-        repeat(5) { pinManager.validate("wrong!") }
-        val third = pinManager.validate("wrong!") as PinResult.RateLimited
-        assertTrue("Third lockout should be longer than second", third.retryAfterMs > second.retryAfterMs)
-    }
-
-    @Test
-    fun rateLimiting_successResetsCounter() {
-        val pin = pinManager.getCurrentPin()
-        repeat(3) { pinManager.validate("wrong!") }
-        assertEquals(3, pinManager.getFailedAttempts())
-
-        pinManager.validate(pin)
-        assertEquals(0, pinManager.getFailedAttempts())
-    }
-
-    @Test
-    fun resetPin_generatesNewPin() {
-        val oldPin = pinManager.getCurrentPin()
-        // Reset enough times to ensure a different PIN (statistically near-certain)
-        var different = false
-        repeat(10) {
-            val newPin = pinManager.resetPin()
-            if (newPin != oldPin) different = true
-        }
-        assertTrue("Reset should eventually generate a different PIN", different)
-    }
-
-    @Test
-    fun resetPin_invalidatesOldPin() {
-        val oldPin = pinManager.getCurrentPin()
-        pinManager.resetPin()
-        val result = pinManager.validate(oldPin)
-        // Old PIN should now fail (unless by extreme coincidence it's the same)
-        // We test the mechanism: currentPin changed, so validate against old should fail
-        val newPin = pinManager.getCurrentPin()
-        if (oldPin != newPin) {
-            assertTrue("Old PIN should fail after reset", result is PinResult.Invalid)
-        }
-    }
-
-    @Test
-    fun isLockedOut_returnsTrueWhenLocked() {
-        repeat(5) { pinManager.validate("wrong!") }
-        assertTrue("Should be locked out after 5 failures", pinManager.isLockedOut())
-    }
-
-    @Test
-    fun lockoutPersistence_survivesRestart() {
-        val fakePersistence = FakePinLockoutPersistence()
-        val pm1 = PinManager(clock = { currentTime }, lockoutPersistence = fakePersistence)
-        val pin = pm1.getCurrentPin()
-
-        // Fail 3 times
-        repeat(3) { pm1.validate("wrong!") }
-        assertEquals(3, pm1.getFailedAttempts())
-
-        // Simulate restart: create new PinManager with same persistence
-        val pm2 = PinManager(clock = { currentTime }, lockoutPersistence = fakePersistence)
-        assertEquals(3, pm2.getFailedAttempts())
-    }
-
-    @Test
-    fun lockoutPersistence_lockoutSurvivesRestart() {
-        val fakePersistence = FakePinLockoutPersistence()
-        val pm1 = PinManager(clock = { currentTime }, lockoutPersistence = fakePersistence)
-
-        // Trigger lockout
-        repeat(5) { pm1.validate("wrong!") }
-        assertTrue(pm1.isLockedOut())
-
-        // Simulate restart
-        val pm2 = PinManager(clock = { currentTime }, lockoutPersistence = fakePersistence)
-        assertTrue("Lockout should survive restart", pm2.isLockedOut())
-    }
-
-    // --- PIN generation from the injected source (Phase 6 P0-2) -------------------------------------
-
-    /**
-     * A deterministic digit source: it hands back exactly the values it was given, in order, and
-     * remembers what it was asked for. No statistical test is involved.
-     */
-    private class ScriptedRandom(private val digits: IntArray) : Random() {
-        val bounds = mutableListOf<Int>()
-        private var index = 0
-
-        override fun nextInt(bound: Int): Int {
-            bounds += bound
-            if (index >= digits.size) {
-                throw AssertionError("the PIN asked for more digits than were scripted")
-            }
-            return digits[index++]
-        }
-    }
-
-    @Test
-    fun generatePin_takesEveryDigitFromTheInjectedRandomSource() {
-        val random = ScriptedRandom(intArrayOf(1, 2, 3, 4, 5, 6))
-        val pm = PinManager(clock = { currentTime }, randomSource = random)
-
-        assertEquals("123456", pm.getCurrentPin())
-    }
-
-    @Test
-    fun generatePin_keepsLeadingZeroesSoThePinIsAlwaysSixCharacters() {
-        val leadingZero = PinManager(
-            clock = { currentTime },
-            randomSource = ScriptedRandom(intArrayOf(0, 0, 1, 2, 3, 4)),
-        )
-        val pin = leadingZero.getCurrentPin()
-        assertEquals("001234", pin)
-        assertEquals("a leading zero must not shorten the PIN", 6, pin.length)
-
-        val allZeroes = PinManager(
-            clock = { currentTime },
-            randomSource = ScriptedRandom(intArrayOf(0, 0, 0, 0, 0, 0)),
-        )
-        assertEquals("000000", allZeroes.getCurrentPin())
-        assertEquals(6, allZeroes.getCurrentPin().length)
-    }
-
-    @Test
-    fun generatePin_asksForSixDigitsEachInZeroToNine() {
-        val random = ScriptedRandom(intArrayOf(9, 9, 9, 9, 9, 9))
-        PinManager(clock = { currentTime }, randomSource = random)
-
-        assertEquals("one digit per position", 6, random.bounds.size)
-        assertTrue(
-            "each digit must be drawn in 0..9, never derived from a wider draw",
-            random.bounds.all { it == 10 },
-        )
-    }
-
-    @Test
-    fun generatePin_defaultSourceIsACsprng() {
-        // The seam exists for tests; production must never quietly fall back to a predictable source.
-        assertTrue(
-            "the production default must be a SecureRandom",
-            PinManager(clock = { currentTime }).randomSource is SecureRandom,
-        )
-    }
-
-    @Test
-    fun resetPin_alsoTakesItsDigitsFromTheInjectedSource() {
-        val random = ScriptedRandom(intArrayOf(4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5))
-        val pm = PinManager(clock = { currentTime }, randomSource = random)
-
-        assertEquals("444444", pm.getCurrentPin())
-        assertEquals("555555", pm.resetPin())
-        assertEquals("a reset PIN keeps six characters too", 6, pm.getCurrentPin().length)
-    }
-
-    // --- fail closed when no session can be issued (Phase 6 P0-2) -----------------------------------
-
-    @Test
-    fun validate_withoutASessionCallbackFailsClosed() {
-        val unconfigured = PinManager(clock = { currentTime })
-
-        val result = unconfigured.validate(unconfigured.getCurrentPin())
-
-        assertTrue(
-            "a correct PIN on a device that cannot issue a session is not an authentication",
-            result is PinResult.NotConfigured,
-        )
-        assertFalse("it must never be a Success", result is PinResult.Success)
-    }
-
-    @Test
-    fun validate_withoutASessionCallbackNeitherResetsNorIncrementsTheFailureCount() {
-        val unconfigured = PinManager(clock = { currentTime })
-        repeat(3) { unconfigured.validate("wrong!") }
-        assertEquals(3, unconfigured.getFailedAttempts())
-
-        assertTrue(unconfigured.validate(unconfigured.getCurrentPin()) is PinResult.NotConfigured)
-
-        assertEquals("a correct PIN is not a failed attempt", 3, unconfigured.getFailedAttempts())
-        assertFalse("and it did not lock the device out either", unconfigured.isLockedOut())
-    }
-
-    @Test
-    fun validate_withABlankTokenFromTheCallbackIsNotASuccess() {
-        val emptyToken = PinManager(clock = { currentTime }, onPinValidated = { "" })
-        assertTrue(
-            "an empty token must not be handed back as a success",
-            emptyToken.validate(emptyToken.getCurrentPin()) is PinResult.NotConfigured,
-        )
-
-        val whitespaceToken = PinManager(clock = { currentTime }, onPinValidated = { "   " })
-        assertTrue(
-            "nor a blank one",
-            whitespaceToken.validate(whitespaceToken.getCurrentPin()) is PinResult.NotConfigured,
-        )
-    }
-
-    @Test
-    fun anEmptyTokenCannotAuthenticateASession() {
-        // The belt to those braces: even if an empty string were ever handed out as a token, it
-        // authenticates nothing.
-        val sessions = SessionManager()
-        assertFalse(sessions.validateSession(""))
-        assertFalse(sessions.validateSession("not-a-real-token"))
-    }
-
-    // --- the normal success path and the lockout policy are unchanged --------------------------------
-
-    @Test
-    fun validate_withASessionCallbackReturnsSuccessAndItsToken() {
-        val wired = PinManager(clock = { currentTime }, onPinValidated = { "tok-1" })
-
-        val result = wired.validate(wired.getCurrentPin())
+    fun theCorrectPinReturnsASession() {
+        val result = pinManager.validate(PIN)
 
         assertTrue(result is PinResult.Success)
-        assertEquals("tok-1", (result as PinResult.Success).token)
+        assertEquals("test-session-token", (result as PinResult.Success).token)
     }
 
     @Test
-    fun validate_withASessionCallbackStillResetsTheFailureCountOnSuccess() {
-        val wired = PinManager(clock = { currentTime }, onPinValidated = { "tok-2" })
-        repeat(4) { wired.validate("wrong!") }
-        assertEquals(4, wired.getFailedAttempts())
+    fun aWrongPinIsRejectedAndCostsAnAttempt() {
+        val result = pinManager.validate("999999")
 
-        assertTrue(wired.validate(wired.getCurrentPin()) is PinResult.Success)
-
-        assertEquals("a real success still clears the failures", 0, wired.getFailedAttempts())
-        assertFalse(wired.isLockedOut())
+        assertTrue(result is PinResult.Invalid)
+        assertEquals("four tries are left after the first failure", 4, (result as PinResult.Invalid).attemptsRemaining)
+        assertEquals(1, pinManager.getFailedAttempts())
     }
 
     @Test
-    fun lockoutIsUnchangedWhenASessionCallbackIsWired() {
-        val wired = PinManager(clock = { currentTime }, onPinValidated = { "tok-3" })
+    fun theLockoutPolicyIsUnchanged() {
+        repeat(4) { assertTrue(pinManager.validate("999999") is PinResult.Invalid) }
 
-        repeat(4) { assertTrue(wired.validate("wrong!") is PinResult.Invalid) }
+        val fifth = pinManager.validate("999999")
 
-        val fifth = wired.validate("wrong!")
         assertTrue("the fifth failure still rate-limits", fifth is PinResult.RateLimited)
-        assertEquals(
-            "the first lockout is still five minutes",
-            5 * 60 * 1000L,
-            (fifth as PinResult.RateLimited).retryAfterMs,
-        )
-        assertTrue(wired.isLockedOut())
+        assertEquals(5 * 60 * 1000L, (fifth as PinResult.RateLimited).retryAfterMs)
+        assertTrue(pinManager.isLockedOut())
 
         currentTime += fifth.retryAfterMs + 1
-        assertFalse("the lockout still expires with the clock", wired.isLockedOut())
-        assertTrue(wired.validate("wrong!") is PinResult.Invalid)
+        assertFalse("the lockout still expires with the clock", pinManager.isLockedOut())
+        assertTrue(pinManager.validate("999999") is PinResult.Invalid)
     }
 
     @Test
-    fun aWrongPinStillRecordsItsFailureInPersistentLockoutState() {
+    fun aCorrectPinClearsTheFailures() {
+        repeat(4) { pinManager.validate("999999") }
+        assertEquals(4, pinManager.getFailedAttempts())
+
+        assertTrue(pinManager.validate(PIN) is PinResult.Success)
+
+        assertEquals(0, pinManager.getFailedAttempts())
+        assertFalse(pinManager.isLockedOut())
+    }
+
+    @Test
+    fun theCorrectPinIsNotAFailedAttemptWhenNoSessionCanBeIssued() {
+        val noSession = PinManager(
+            store = store,
+            clock = { currentTime },
+            onPinValidated = { "" },
+            hasher = fastHasher,
+        )
+
+        val result = noSession.validate(PIN)
+
+        assertTrue("an empty token is not a success", result is PinResult.NotConfigured)
+        assertFalse(result is PinResult.Success)
+        assertEquals("a correct PIN is not a failed attempt", 0, noSession.getFailedAttempts())
+        assertFalse(noSession.isLockedOut())
+    }
+
+    @Test
+    fun checkPinVerifiesWithoutIssuingASession() {
+        var issued = 0
+        val counted = PinManager(
+            store = store,
+            clock = { currentTime },
+            onPinValidated = { issued++; "token" },
+            hasher = fastHasher,
+        )
+
+        assertTrue(counted.checkPin(PIN) is PinCheckResult.Verified)
+        assertEquals("the TV's own screens must not mint sessions", 0, issued)
+        assertTrue(counted.checkPin("999999") is PinCheckResult.Wrong)
+    }
+
+    // --- persistence --------------------------------------------------------------------------------
+
+    @Test
+    fun thePinSurvivesAProcessRestart() {
+        // The store is what outlives the process; a second PinManager over it is the next app start.
+        val afterRestart = PinManager(
+            store = store,
+            clock = { currentTime },
+            onPinValidated = { "new-token" },
+            hasher = fastHasher,
+        )
+
+        assertTrue("the credential is still there", afterRestart.isConfigured())
+        assertTrue(afterRestart.validate(PIN) is PinResult.Success)
+        assertTrue("and the old PIN is the only one", afterRestart.validate("999999") is PinResult.Invalid)
+    }
+
+    @Test
+    fun theRecoveryCodeSurvivesAProcessRestartAndStillWorks() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        val afterRestart = PinManager(store = store, clock = { currentTime }, hasher = fastHasher)
+
+        assertNull("the plaintext is not persisted", afterRestart.pendingRecoveryCode())
+        assertTrue(afterRestart.verifyRecoveryCode(code) is RecoveryCheckResult.Verified)
+    }
+
+    @Test
+    fun failedAttemptsSurviveARestart() {
         val persistence = FakePinLockoutPersistence()
-        val pm1 = PinManager(
-            clock = { currentTime },
-            onPinValidated = { "tok-4" },
-            lockoutPersistence = persistence,
+        val first = PinManager(
+            store = store, clock = { currentTime }, hasher = fastHasher,
+            pinLockoutPersistence = persistence,
+        )
+        repeat(3) { first.validate("999999") }
+
+        val second = PinManager(
+            store = store, clock = { currentTime }, hasher = fastHasher,
+            pinLockoutPersistence = persistence,
         )
 
-        pm1.validate("wrong!")
-        assertEquals(1, pm1.getFailedAttempts())
+        assertEquals("a lockout cannot be escaped by restarting the TV", 3, second.getFailedAttempts())
+    }
 
-        val pm2 = PinManager(
-            clock = { currentTime },
-            onPinValidated = { "tok-5" },
-            lockoutPersistence = persistence,
+    @Test
+    fun aLockoutSurvivesARestart() {
+        val persistence = FakePinLockoutPersistence()
+        val first = PinManager(
+            store = store, clock = { currentTime }, hasher = fastHasher,
+            pinLockoutPersistence = persistence,
         )
-        assertEquals("the failure still survives a restart", 1, pm2.getFailedAttempts())
+        repeat(5) { first.validate("999999") }
+        assertTrue(first.isLockedOut())
+
+        val second = PinManager(
+            store = store, clock = { currentTime }, hasher = fastHasher,
+            pinLockoutPersistence = persistence,
+        )
+
+        assertTrue(second.isLockedOut())
+    }
+
+    // --- what is stored -----------------------------------------------------------------------------
+
+    @Test
+    fun thePinItselfIsNotStoredAnywhere() {
+        val stored = store.readPin()!!
+
+        assertNotEquals("the PIN must not be the stored value", PIN, stored.hash)
+        assertFalse("nor inside it", stored.hash.contains(PIN))
+        assertTrue("a salt is stored with it", stored.salt.isNotEmpty())
+        assertTrue("and a real iteration count", stored.iterations >= 1_000)
+    }
+
+    @Test
+    fun twoDevicesWithTheSamePinStoreDifferentVerifiers() {
+        val other = InMemoryParentCredentialStore()
+        PinManager(store = other, clock = { currentTime }, hasher = fastHasher).setup(PIN, PIN)
+
+        assertNotEquals(
+            "the salt is per credential, so one precomputed table serves nobody",
+            store.readPin()!!.hash,
+            other.readPin()!!.hash,
+        )
+    }
+
+    @Test
+    fun theRecoveryCodeIsNotStoredInPlaintextEither() {
+        val code = pinManager.pendingRecoveryCode()!!
+        val stored = store.readRecovery()!!
+
+        assertNotEquals(RecoveryCode.normalise(code), stored.hash)
+        assertFalse(stored.hash.contains(RecoveryCode.normalise(code)))
+    }
+
+    // --- changing the PIN ---------------------------------------------------------------------------
+
+    @Test
+    fun changePinRequiresTheCurrentOne() {
+        val result = pinManager.changePin("999999", "654321", "654321")
+
+        assertTrue(result is PinChangeResult.WrongPin)
+        assertTrue("the old PIN still works", pinManager.validate(PIN) is PinResult.Success)
+        assertTrue("and the new one was not installed", pinManager.validate("654321") is PinResult.Invalid)
+    }
+
+    @Test
+    fun changePinReplacesTheCredentialAndNotifies() {
+        var changes = 0
+        val manager = PinManager(
+            store = store,
+            clock = { currentTime },
+            onPinValidated = { "token" },
+            onCredentialsChanged = { changes++ },
+            hasher = fastHasher,
+        )
+
+        val result = manager.changePin(PIN, "654321", "654321")
+
+        assertTrue(result is PinChangeResult.Changed)
+        assertEquals("the sessions issued under the old credential are told to go", 1, changes)
+        assertTrue(manager.validate("654321") is PinResult.Success)
+        assertTrue("the old PIN is no longer a PIN", manager.validate(PIN) is PinResult.Invalid)
+    }
+
+    @Test
+    fun changePinLeavesTheRecoveryCodeAlone() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        pinManager.changePin(PIN, "654321", "654321")
+
+        assertTrue(
+            "a parent changing their PIN has not lost their paper",
+            pinManager.verifyRecoveryCode(code) is RecoveryCheckResult.Verified,
+        )
+    }
+
+    @Test
+    fun changePinValidatesTheNewPinAndItsConfirmation() {
+        assertTrue(pinManager.changePin(PIN, "12345", "12345") is PinChangeResult.Invalid)
+        assertTrue(pinManager.changePin(PIN, "654321", "654322") is PinChangeResult.Invalid)
+        assertTrue("nothing was replaced", pinManager.validate(PIN) is PinResult.Success)
+    }
+
+    // --- recovering ---------------------------------------------------------------------------------
+
+    @Test
+    fun aWrongRecoveryCodeIsRejected() {
+        assertTrue(pinManager.verifyRecoveryCode("8K4P-7M2Q-91TX") is RecoveryCheckResult.Unknown)
+    }
+
+    @Test
+    fun aMalformedRecoveryCodeIsNotCountedAsAGuess() {
+        assertTrue(pinManager.verifyRecoveryCode("8K4P-7M2Q") is RecoveryCheckResult.NotWellFormed)
+        assertTrue(pinManager.verifyRecoveryCode("8K4P-7M2Q-91T!") is RecoveryCheckResult.NotWellFormed)
+
+        assertTrue("a typo must not spend an attempt", pinManager.verifyRecoveryCode("8K4P-7M2Q-91TX") is RecoveryCheckResult.Unknown)
+        assertTrue("which is what an attempt looks like", pinManager.verifyRecoveryCode("8K4P-7M2Q-91TX") is RecoveryCheckResult.Unknown)
+    }
+
+    @Test
+    fun dashesAndLowerCaseAreForgiven() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        assertTrue(pinManager.verifyRecoveryCode(code.lowercase()) is RecoveryCheckResult.Verified)
+        assertTrue(pinManager.verifyRecoveryCode(code.replace("-", " ")) is RecoveryCheckResult.Verified)
+        assertTrue(pinManager.verifyRecoveryCode("  $code  ") is RecoveryCheckResult.Verified)
+    }
+
+    @Test
+    fun resetWithRecoveryReplacesThePinAndRotatesTheCode() {
+        val oldCode = pinManager.pendingRecoveryCode()!!
+
+        val result = pinManager.resetWithRecovery(oldCode, "654321", "654321")
+
+        assertTrue(result is PinResetResult.Reset)
+        val newCode = (result as PinResetResult.Reset).recoveryCode
+        assertNotEquals("the code that was used is replaced", oldCode, newCode)
+        assertTrue(RecoveryCode.isWellFormed(newCode))
+        assertTrue("the new PIN works", pinManager.validate("654321") is PinResult.Success)
+        assertTrue("the forgotten one is gone", pinManager.validate(PIN) is PinResult.Invalid)
+    }
+
+    @Test
+    fun aUsedRecoveryCodeCannotBeUsedTwice() {
+        val code = pinManager.pendingRecoveryCode()!!
+        pinManager.resetWithRecovery(code, "654321", "654321")
+
+        assertTrue(
+            "a recovery code is one-time",
+            pinManager.verifyRecoveryCode(code) is RecoveryCheckResult.Unknown,
+        )
+        assertTrue(pinManager.resetWithRecovery(code, "111111", "111111") is PinResetResult.Unknown)
+        assertTrue("and the second attempt changed nothing", pinManager.validate("654321") is PinResult.Success)
+    }
+
+    @Test
+    fun resetWithRecoveryNotifiesSoSessionsCanBeInvalidated() {
+        var changes = 0
+        val ownStore = InMemoryParentCredentialStore()
+        val manager = PinManager(
+            store = ownStore,
+            clock = { currentTime },
+            onPinValidated = { "token" },
+            onCredentialsChanged = { changes++ },
+            hasher = fastHasher,
+        )
+        manager.setup(PIN, PIN)
+        val code = manager.pendingRecoveryCode()!!
+        // Setting up a credential is itself a credential change (the TV's own sync session predates
+        // it), so the count is taken from here: what is under test is the *reset* notifying.
+        changes = 0
+
+        manager.resetWithRecovery(code, "654321", "654321")
+
+        assertEquals("a session issued before a PIN reset must not outlive it", 1, changes)
+    }
+
+    @Test
+    fun resetWithRecoveryValidatesTheNewPin() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        assertTrue(pinManager.resetWithRecovery(code, "12345", "12345") is PinResetResult.Invalid)
+        assertTrue(pinManager.resetWithRecovery(code, "654321", "654322") is PinResetResult.Invalid)
+        assertTrue("the PIN is unchanged", pinManager.validate(PIN) is PinResult.Success)
+    }
+
+    @Test
+    fun aRecoveryCodeCannotSignInByItself() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        // The code is a way to *replace* a PIN, never a way to be signed in. If it authenticated, it
+        // would be a permanent second password that a parent cannot revoke from memory.
+        assertTrue(pinManager.validate(code) is PinResult.Invalid)
+        assertFalse(pinManager.validate(code) is PinResult.Success)
+        assertTrue(pinManager.validate(RecoveryCode.normalise(code)) is PinResult.Invalid)
+    }
+
+    // --- rotating -----------------------------------------------------------------------------------
+
+    @Test
+    fun rotatingIssuesANewCodeAndKillsTheOldOne() {
+        val oldCode = pinManager.pendingRecoveryCode()!!
+
+        val newCode = pinManager.rotateRecoveryCode()
+
+        assertNotEquals(oldCode, newCode)
+        assertEquals("the new code is the one the TV can show", newCode, pinManager.pendingRecoveryCode())
+        assertTrue(pinManager.verifyRecoveryCode(oldCode) is RecoveryCheckResult.Unknown)
+        assertTrue(pinManager.verifyRecoveryCode(newCode) is RecoveryCheckResult.Verified)
+    }
+
+    @Test
+    fun rotatingKeepsThePinItself() {
+        pinManager.rotateRecoveryCode()
+
+        assertTrue(pinManager.validate(PIN) is PinResult.Success)
+    }
+
+    // --- the destructive reset's door ---------------------------------------------------------------
+
+    @Test
+    fun clearAllRemovesBothCredentials() {
+        val code = pinManager.pendingRecoveryCode()!!
+
+        pinManager.clearAll()
+
+        assertFalse(pinManager.isConfigured())
+        assertNull(pinManager.pendingRecoveryCode())
+        assertTrue(pinManager.validate(PIN) is PinResult.NotSetUp)
+        assertTrue(pinManager.verifyRecoveryCode(code) is RecoveryCheckResult.NotSetUp)
+    }
+
+    @Test
+    fun afterAWipeTheDeviceIsBackToFirstRun() {
+        pinManager.clearAll()
+
+        val fresh = PinManager(store = store, clock = { currentTime }, hasher = fastHasher)
+
+        assertFalse("a wiped TV behaves like a new one", fresh.isConfigured())
+        assertTrue(fresh.setup("123456", "123456") is PinSetupResult.Created)
+    }
+
+    // --- the production hasher ----------------------------------------------------------------------
+
+    @Test
+    fun theDefaultHasherIsRealPbkdf2WithItsOwnSalt() {
+        val real = Pbkdf2SecretHasher()
+        val first = real.hash("123456")
+        val second = real.hash("123456")
+
+        assertNotEquals("a fresh salt every time", first.salt, second.salt)
+        assertNotEquals(first.hash, second.hash)
+        assertTrue(real.verify("123456", first))
+        assertFalse(real.verify("123457", first))
+        assertTrue(
+            "the production iteration count is the documented one",
+            first.iterations == Pbkdf2SecretHasher.DEFAULT_ITERATIONS,
+        )
+    }
+
+    @Test
+    fun aVerifierFromADifferentAlgorithmIsStillVerified() {
+        // A device that hashed with SHA1 (API 24/25) must keep working after an Android upgrade, which
+        // is why the algorithm is stored inside the verifier rather than assumed.
+        val sha1 = Pbkdf2SecretHasher(iterations = 1_000, algorithmOverride = Pbkdf2SecretHasher.ALGORITHM_SHA1)
+        val stored = sha1.hash("123456")
+
+        assertTrue(Pbkdf2SecretHasher(iterations = 1_000).verify("123456", stored))
+        assertFalse(Pbkdf2SecretHasher(iterations = 1_000).verify("654321", stored))
+    }
+
+    @Test
+    fun anUnreadableVerifierIsRefusedRatherThanAccepted() {
+        val broken = StoredSecret(hash = "not hex", salt = "also not hex", iterations = 1_000, algorithm = "PBKDF2WithHmacSHA256")
+
+        assertFalse("a corrupt credential fails closed", Pbkdf2SecretHasher(iterations = 1_000).verify("123456", broken))
+    }
+
+    @Test
+    fun theDefaultRecoveryCodeSourceIsACsprng() {
+        assertTrue(
+            "the seam exists for tests; production must never fall back to a predictable source",
+            PinManager(store = InMemoryParentCredentialStore(), hasher = fastHasher).randomSource is SecureRandom,
+        )
     }
 
     private class FakePinLockoutPersistence : PinLockoutPersistence {
@@ -366,5 +524,9 @@ class PinManagerTest {
         override fun loadFailedAttempts(): Int = failedAttempts
         override fun loadLockoutUntil(): Long = lockoutUntil
         override fun loadLockoutCount(): Int = lockoutCount
+    }
+
+    private companion object {
+        const val PIN = "482913"
     }
 }

@@ -116,6 +116,20 @@ class DashboardRoutesTest {
     }
 
     @Test
+    fun rootRelative_parentAccessJs_routeExists() = testApp {
+        // W10's model: what a Parent PIN may be, how a Recovery Code is read, and what a parent is told
+        // when the TV refuses - pure, so it is proved by tests rather than by clicking.
+        val response = client.get("/parent-access.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun legacy_assetsParentAccessJs_routeExists() = testApp {
+        val response = client.get("/assets/parent-access.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
     fun legacy_assetsAppJs_routeExists() = testApp {
         val response = client.get("/assets/app.js")
         assertEquals(HttpStatusCode.NotFound, response.status)

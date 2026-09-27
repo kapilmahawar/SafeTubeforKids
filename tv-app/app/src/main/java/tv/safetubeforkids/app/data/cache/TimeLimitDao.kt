@@ -18,4 +18,8 @@ interface TimeLimitDao {
 
     @Query("UPDATE time_limit_config SET bonusMinutes = :minutes, bonusDate = :date WHERE id = 1")
     suspend fun updateBonus(minutes: Int, date: String)
+
+    /** The destructive reset (W10): the child's daily limits and bedtime are SafeTube configuration. */
+    @Query("DELETE FROM time_limit_config")
+    suspend fun deleteAll()
 }

@@ -1,6 +1,6 @@
 package tv.safetubeforkids.app.server
 
-import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.testPinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
@@ -25,9 +25,9 @@ class AuthRefreshRoutesTest {
         block: suspend ApplicationTestBuilder.(sessionManager: SessionManager, timeRef: TimeRef) -> Unit
     ) = testApplication {
         val sessionManager = SessionManager(clock = { timeRef.value })
-        val pinManager = PinManager(
+        val pinManager = testPinManager(
             clock = { timeRef.value },
-            onPinValidated = { sessionManager.createSession() ?: "" }
+            onPinValidated = { sessionManager.createSession() ?: "" },
         )
         application {
             install(ContentNegotiation) { json() }
