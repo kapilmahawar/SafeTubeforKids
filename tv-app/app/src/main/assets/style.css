@@ -1309,6 +1309,48 @@ button {
     font-size: var(--fs-sm);
 }
 
+/* --- the catalog-file preview --------------------------------------------------------------- */
+
+/*
+ * The shape of an imported file, so a parent can see what their child's library would become
+ * without reading YAML: categories at the left, what is inside them at the right.
+ */
+
+.import-outline {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    max-height: 264px;
+    overflow-y: auto;
+}
+
+.import-outline li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+}
+
+.import-outline__category {
+    font-weight: 600;
+}
+
+.import-outline__collection {
+    margin-left: 16px;
+    background: transparent;
+}
+
+.import-outline__meta {
+    flex: none;
+    color: var(--text-dim);
+    font-size: var(--fs-sm);
+}
+
 /* --- toasts ----------------------------------------------------------------------------- */
 
 .toasts {

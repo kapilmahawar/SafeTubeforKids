@@ -24,6 +24,7 @@ class DashboardAssetTest {
         assertTrue("index.html should have the two sections", html.contains("data-action=\"go-library\""))
         assertTrue("index.html should have the theme control", html.contains("data-action=\"toggle-theme\""))
         assertTrue("index.html should load the scripts the shell needs", html.contains("catalog-editor.js"))
+        assertTrue("index.html should load the catalog-file model", html.contains("catalog-yaml.js"))
     }
 
     @Test
@@ -41,6 +42,25 @@ class DashboardAssetTest {
     }
 
     @Test
+    fun catalogYamlJs_existsInAssets() {
+        val assets = context.assets.list("") ?: emptyArray()
+        assertTrue("catalog-yaml.js should exist in assets", assets.contains("catalog-yaml.js"))
+    }
+
+    @Test
+    fun catalogYamlJs_carriesNoAuthorization() {
+        val js = context.assets.open("catalog-yaml.js").bufferedReader().readText()
+        // The file describes the child's library. Permission lives in the allowed sources, so an
+        // imported file can never be a way to let something new play.
+        listOf("/playlists", "/channels", "/sources", "approve").forEach { forbidden ->
+            assertFalse(
+                "catalog-yaml.js must not be able to allow anything: $forbidden",
+                js.contains(forbidden, ignoreCase = true),
+            )
+        }
+    }
+
+    @Test
     fun theTreeRendererIsGone() {
         val assets = context.assets.list("") ?: emptyArray()
         assertFalse("catalog-tree.js was replaced by the library screens", assets.contains("catalog-tree.js"))
@@ -54,7 +74,7 @@ class DashboardAssetTest {
 
     @Test
     fun noAssetManagesAppsOrKioskAnyMore() {
-        val files = listOf("index.html", "app.js", "style.css", "theme.js")
+        val files = listOf("index.html", "app.js", "style.css", "theme.js", "catalog-yaml.js")
         files.forEach { name ->
             val source = context.assets.open(name).bufferedReader().readText()
             listOf("kiosk", "Installed Apps", "app_whitelist", "/apps").forEach { forbidden ->

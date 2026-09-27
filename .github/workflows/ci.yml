@@ -35,6 +35,7 @@ jobs:
           node --check tv-app/app/src/main/assets/app.js
           node --check tv-app/app/src/main/assets/theme.js
           node --check tv-app/app/src/main/assets/catalog-editor.js
+          node --check tv-app/app/src/main/assets/catalog-yaml.js
 
       # The dashboard's model and the guards over the page it ships with. Plain Node, no
       # dependencies, and the thing that keeps the page and the script in step: a control wired to
@@ -46,6 +47,7 @@ jobs:
           node --test scripts/dashboard-catalog-editor.test.js
           scripts/dashboard-catalog-import.test.js
           scripts/dashboard-catalog-ui.test.js
+          scripts/dashboard-catalog-yaml.test.js
 
       - name: Upload the debug APK
         uses: actions/upload-artifact@v4

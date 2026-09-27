@@ -67,6 +67,7 @@ test('the page is a shell: no screens, no inline handlers, no data', () => {
     assert.match(html, /<link rel="stylesheet" href="style\.css">/);
     assert.match(html, /<main class="view" id="view"/);
     assert.match(html, /<script src="catalog-editor\.js"><\/script>/);
+    assert.match(html, /<script src="catalog-yaml\.js"><\/script>/);
     assert.match(html, /<script src="app\.js"><\/script>/);
 
     // No inline handler anywhere: the server's content policy no longer exempts them, so one would
@@ -357,7 +358,7 @@ test('settings are grouped, and every group holds real controls', () => {
     assert.match(app, /function settingsGroup\(/);
     // Every panel still exists inside a group: nothing was dropped for being awkward to place.
     ['tvPanel', 'screenTimePanel', 'allowedSourcesPanel', 'watchHistoryPanel', 'lookPanel',
-        'libraryPanel', 'helpPanel']
+        'libraryFilePanel', 'libraryPanel', 'helpPanel']
         .forEach((builder) => assert.match(app, new RegExp(builder + '\\(\\)'),
             builder + ' must still be rendered'));
 });
@@ -649,6 +650,112 @@ test('the Apps, Kiosk and Installed-Apps surface is gone from the dashboard', ()
             assert.doesNotMatch(source, pattern, file + ' still carries the removed surface: ' + pattern);
         });
     });
+});
+
+// --- W9: the library as a file ----------------------------------------------------------------
+
+test('the library file is offered in Settings, as writing one and reading one', () => {
+    const app = code('app.js');
+
+    assert.match(app, /libraryFilePanel\(\)/, 'the Content group has to offer it');
+    assert.match(app, /function libraryFilePanel\(/);
+    assert.match(app, /'export-catalog': function \(\) \{ exportCatalog\(\); \}/);
+    assert.match(app, /'import-catalog': function \(\) \{ importCatalog\(\); \}/);
+    assert.match(app, /actionButton\('Export catalog', 'export-catalog'/);
+    assert.match(app, /actionButton\('Import catalog', 'import-catalog'/);
+
+    // The two labels have to be the two verbs a parent reads, and nothing about the format.
+    const panel = app.slice(app.indexOf('function libraryFilePanel'), app.indexOf('function exportCatalog'));
+    assert.doesNotMatch(panel, /\bYAML\b|\.yaml|schema|node\b/i,
+        'the panel must not explain the file format to a parent');
+});
+
+test('exporting writes a file and changes nothing', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('function exportCatalog'), app.indexOf('function importCatalog'));
+
+    assert.match(block, /CatalogYaml\.serialize\(state\.session\.nodes\)/, 'the working copy is what is saved');
+    assert.match(block, /download: 'safetube-catalog\.yaml'/);
+    assert.match(block, /URL\.createObjectURL/);
+    assert.match(block, /if \(!state\.session\) return;/, 'nothing to save means no file');
+
+    // Reading only: an export must not write anywhere.
+    assert.doesNotMatch(block, /apiCall|publish\(|CatalogEditor\./,
+        'exporting must not touch the library or the TV');
+    assert.doesNotMatch(block, /localStorage|sessionStorage/, 'and must not store anything');
+});
+
+test('importing shows what the file would do before anything is written', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('function importCatalog'), app.indexOf('function openImportProblems'));
+
+    assert.match(block, /CatalogYaml\.readDocument\(text\)/, 'the file is validated by the format model');
+    assert.match(block, /if \(!read\.ok\) \{[\s\S]*?openImportProblems\(file\.name, read\.problems\);/,
+        'a refused file is explained, not imported');
+    assert.match(block, /CatalogYaml\.preview\(read\.nodes, state\.session\.nodes, allowed\.playlists\)/,
+        'the preview compares the file with the library on screen');
+    assert.match(block, /await askImport\(file\.name, read, view\)/, 'the parent is asked');
+    assert.match(block, /if \(confirmed\) await applyImport\(read\.nodes\)/,
+        'and nothing is applied unless they say yes');
+    assert.doesNotMatch(block, /apiCall|PUT/,
+        'the picker itself writes nothing: the one write path is publish()');
+});
+
+test('a file that is not a catalog changes nothing, and is explained in place', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('function openImportProblems'), app.indexOf('function askImport'));
+
+    assert.match(block, /problems\.slice\(0, 12\)/, 'every problem is listed, bounded');
+    assert.match(block, /Nothing was changed/, 'and the dialog says the library is untouched');
+    assert.doesNotMatch(block, /import\(|applyImport|publish\(|apiCall/,
+        'refusing a file must not write anything anywhere');
+});
+
+test('the preview counts what is in the file, and says what an unallowed source means', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('function askImport'), app.indexOf('function applyImport'));
+
+    ['Categories', 'Collections', 'Videos']
+        .forEach((label) => assert.ok(block.includes("text: '" + label + "'"), 'the preview counts ' + label));
+    assert.match(block, /describeChanges\(view\.changes\)/, 'and says what would change');
+    assert.match(block, /import-outline__category/, 'with the shape of the file as an outline');
+
+    // The warning that matters: a video from a source that is not allowed shows up and will not play.
+    assert.match(block, /if \(view\.counts\.unplayable\)/);
+    assert.match(block, /will not play yet/);
+    assert.match(block, /allow/i, 'and it says where the parent can do something about it');
+
+    assert.match(block, /text: 'Import catalog'/, 'the confirmation is the parent’s');
+    assert.match(block, /text: 'Cancel'/);
+});
+
+test('an import goes through the one document write, at the version on screen', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('async function applyImport'), app.indexOf('function describeSource'));
+
+    assert.match(block, /catalogVersion: previous\.catalogVersion/,
+        'the write is made against the version this page read, so a conflict is caught');
+    assert.match(block, /await publish\('Imported catalog'\)/, 'one atomic write, the existing path');
+    assert.doesNotMatch(block, /apiCall|fetch\(|localStorage|PUT|POST/,
+        'no second write path, no bypass of the version check');
+    assert.match(block, /savedNodes: previous\.savedNodes/,
+        'the imported library is unsaved until the server confirms it');
+});
+
+test('an imported file can never grant playback', () => {
+    const app = code('app.js');
+    const from = app.indexOf('function libraryFilePanel');
+    const to = app.indexOf('function describeSource');
+    const flow = app.slice(from, to);
+
+    // The whole flow, end to end: it reads the catalog and writes the catalog, and there is no other
+    // endpoint anywhere in it. Permission lives in the allowed sources, which this feature never names.
+    assert.doesNotMatch(flow, /\/playlists|\/channels|\/sources|approve/i,
+        'importing a library must not be able to allow a source');
+    assert.equal([...flow.matchAll(/apiCall\(/g)].length, 0,
+        'the flow reaches the server only through publish()');
+    assert.match(flow, /allowed sources .*left alone|Your allowed sources were left alone/,
+        'and it says so, so a parent is not left guessing');
 });
 
 test('the removed surface leaves no dangling call, route or asset behind', () => {

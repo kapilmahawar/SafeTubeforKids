@@ -102,6 +102,20 @@ class DashboardRoutesTest {
     }
 
     @Test
+    fun rootRelative_catalogYamlJs_routeExists() = testApp {
+        // The catalog-file model (writing a library out, reading one back) is its own script for the
+        // same reason the editor is: pure, so it is proved by tests rather than by clicking.
+        val response = client.get("/catalog-yaml.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun legacy_assetsCatalogYamlJs_routeExists() = testApp {
+        val response = client.get("/assets/catalog-yaml.js")
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
     fun legacy_assetsAppJs_routeExists() = testApp {
         val response = client.get("/assets/app.js")
         assertEquals(HttpStatusCode.NotFound, response.status)

@@ -2359,7 +2359,7 @@
         children.push(settingsGroup('Time limits', [screenTimePanel()]));
 
         if (state.session) {
-            children.push(settingsGroup('Content', [allowedSourcesPanel()]));
+            children.push(settingsGroup('Content', [allowedSourcesPanel(), libraryFilePanel()]));
         }
 
         children.push(settingsGroup('What has been watched', [watchHistoryPanel()]));
@@ -2617,6 +2617,230 @@
         return panel('Allowed YouTube sources', null, h('div', {}, body));
     }
 
+    /**
+     * The library as a file.
+     *
+     * Exporting and importing is the same catalog the rest of the dashboard edits, written out and
+     * read back - not a second kind of library. The file holds the shelves, their order, what is
+     * inside them and what is hidden; it holds no permissions, no watch history and nothing about
+     * the TV's current state, and importing one can never make something playable that the allowed
+     * sources do not already allow.
+     */
+    function libraryFilePanel() {
+        var body = [
+            h('p', {
+                class: 'panel__note',
+                text: 'Download your library as a file you can read and edit, or load one back.'
+            }),
+            h('div', { class: 'btn-group' }, [
+                actionButton('Export catalog', 'export-catalog', {}, 'btn--primary'),
+                actionButton('Import catalog', 'import-catalog', {})
+            ]),
+            h('p', {
+                class: 'field__hint',
+                text: 'The file describes your shelves, folders and videos, in order. It is not your ' +
+                    'allowed sources, and it carries no watching history — importing a file never lets ' +
+                    'your child watch something new.'
+            })
+        ];
+
+        return panel('Library file', null, h('div', {}, body));
+    }
+
+    /** Writes the working copy out as a YAML file. Reading only: the catalog is never touched. */
+    function exportCatalog() {
+        if (!state.session) return;
+
+        var text;
+        try {
+            text = CatalogYaml.serialize(state.session.nodes);
+        } catch (error) {
+            toast('The library could not be written to a file.', 'error');
+            return;
+        }
+
+        try {
+            var blob = new Blob([text], { type: 'application/x-yaml' });
+            var link = h('a', { href: URL.createObjectURL(blob), download: 'safetube-catalog.yaml' });
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            toast('Saved safetube-catalog.yaml to your downloads.', 'ok');
+        } catch (error) {
+            toast('Your browser would not save the file.', 'error');
+        }
+    }
+
+    /** Picks a file and shows what importing it would do, before anything changes. */
+    function importCatalog() {
+        if (!state.session) return;
+
+        var fileInput = h('input', {
+            type: 'file',
+            accept: '.yaml,.yml,application/x-yaml,text/yaml,text/plain',
+            'aria-label': 'Choose a SafeTube catalog file'
+        });
+
+        fileInput.addEventListener('change', async function () {
+            var file = fileInput.files && fileInput.files[0];
+            if (!file) return;
+
+            var text = await file.text();
+            var read = CatalogYaml.readDocument(text);
+
+            if (!read.ok) {
+                openImportProblems(file.name, read.problems);
+                return;
+            }
+
+            var allowed = allowedSourceMaps();
+            var view = CatalogYaml.preview(read.nodes, state.session.nodes, allowed.playlists);
+            var confirmed = await askImport(file.name, read, view);
+            if (confirmed) await applyImport(read.nodes);
+        });
+
+        fileInput.click();
+    }
+
+    /** Why a file was refused, in the file's own words, with the place the problem is in. */
+    function openImportProblems(name, problems) {
+        openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: 'That file could not be imported' }));
+            inner.appendChild(h('p', { class: 'dialog__body', text: name + ' is not a catalog this version of SafeTube can read:' }));
+
+            var list = h('ul', { class: 'dialog__list' });
+            problems.slice(0, 12).forEach(function (problem) {
+                list.appendChild(h('li', { class: 'dialog__list-item', text: problem }));
+            });
+            allIfTruncated(list, problems);
+            inner.appendChild(list);
+
+            inner.appendChild(h('p', { class: 'dialog__body', text: 'Nothing was changed — your library is exactly as it was.' }));
+            var ok = withListener(h('button', { type: 'button', class: 'btn btn--primary', text: 'OK' }),
+                'click', function () { close(null); });
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [ok]));
+        });
+    }
+
+    function allIfTruncated(list, items) {
+        if (items.length <= 12) return;
+        list.appendChild(h('li', {
+            class: 'dialog__list-item',
+            text: '…and ' + words(items.length - 12, 'more problem') + '.'
+        }));
+    }
+
+    /**
+     * The preview: what is in the file, what a child could play from it, and what would change.
+     *
+     * Shown before anything is written, because an import replaces the library the child sees, and a
+     * parent should be able to read what they are about to do - including the playlists this file
+     * names that are not allowed yet, which will show up on the TV but will not play.
+     */
+    function askImport(name, read, view) {
+        var modal = openModal(function (inner, close) {
+            inner.appendChild(h('h2', { class: 'dialog__title', text: 'Import this catalog file?' }));
+            inner.appendChild(h('p', { class: 'dialog__body', text: name + ' would replace your library.' }));
+
+            var outline = h('ul', { class: 'import-outline' });
+            view.tree.forEach(function (category) {
+                outline.appendChild(h('li', { class: 'import-outline__category' }, [
+                    h('span', { text: category.name + (category.hidden ? ' (hidden)' : '') }),
+                    h('span', {
+                        class: 'import-outline__meta',
+                        text: words(category.collections.length, 'folder') + ' · ' + words(category.videos, 'video')
+                    })
+                ]));
+                category.collections.forEach(function (collection) {
+                    outline.appendChild(h('li', { class: 'import-outline__collection' }, [
+                        h('span', { text: collection.name + (collection.hidden ? ' (hidden)' : '') }),
+                        h('span', {
+                            class: 'import-outline__meta',
+                            text: words(collection.videos, 'video') +
+                                (collection.playlist ? ' · from a YouTube playlist' : '')
+                        })
+                    ]));
+                });
+            });
+            if (view.tree.length) inner.appendChild(outline);
+
+            inner.appendChild(h('div', { class: 'stats' }, [
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: String(view.counts.categories) }),
+                    h('p', { class: 'stat__label', text: 'Categories' })
+                ]),
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: String(view.counts.collections) }),
+                    h('p', { class: 'stat__label', text: 'Collections' })
+                ]),
+                h('div', { class: 'stat' }, [
+                    h('p', { class: 'stat__value', text: String(view.counts.videos) }),
+                    h('p', { class: 'stat__label', text: 'Videos' })
+                ])
+            ]));
+
+            inner.appendChild(h('p', { class: 'panel__note', text: describeChanges(view.changes) }));
+
+            if (view.counts.unplayable) {
+                inner.appendChild(banner('warn', words(view.counts.unplayable, 'video') + ' will not play yet',
+                    'They will appear in your child’s library, but they cannot play until you allow the ' +
+                    'YouTube source they came from. You can do that in Settings.',
+                    []));
+            }
+            if (view.counts.hidden) {
+                inner.appendChild(h('p', { class: 'panel__note', text: words(view.counts.hidden, 'item') + ' in this file are hidden from your child.' }));
+            }
+
+            var go = withListener(h('button', { type: 'button', class: 'btn btn--primary', text: 'Import catalog' }),
+                'click', function () { close(true); });
+            var cancel = withListener(h('button', { type: 'button', class: 'btn', text: 'Cancel' }),
+                'click', function () { close(false); });
+
+            inner.appendChild(h('div', { class: 'dialog__actions' }, [go, cancel]));
+        });
+
+        return modal.closed.then(function (value) { return value === true; });
+    }
+
+    function describeChanges(changes) {
+        var parts = [];
+        if (changes.added.length) parts.push(words(changes.added.length, 'item') + ' added');
+        if (changes.removed.length) parts.push(words(changes.removed.length, 'item') + ' removed');
+        if (changes.renamed.length) parts.push(words(changes.renamed.length, 'item') + ' renamed');
+        if (changes.reordered) parts.push(words(changes.reordered, 'list') + ' reordered');
+        if (changes.hidden) parts.push(words(changes.hidden, 'item') + ' hidden');
+        if (changes.shown) parts.push(words(changes.shown, 'item') + ' shown again');
+        return parts.length
+            ? 'Compared with your library now: ' + parts.join(', ') + '.'
+            : 'Compared with your library now: nothing changes.';
+    }
+
+    /**
+     * Applies an imported catalog.
+     *
+     * One document, published through the path every other edit uses: the whole library in a single
+     * write at the version this page read, so a failure - a version conflict, a refusal from the TV,
+     * a lost connection - leaves the previous catalog exactly as it was. The TV then picks it up
+     * through its own synchronization, and the allowed sources are untouched: what a child may watch
+     * is decided there, not here.
+     */
+    async function applyImport(nodes) {
+        var previous = state.session;
+        state.session = CatalogEditor.normalize({
+            catalogVersion: previous.catalogVersion,
+            nodes: nodes,
+            savedNodes: previous.savedNodes,
+            newId: previous.newId
+        });
+
+        var saved = await publish('Imported catalog');
+
+        // A refused or conflicting import leaves the file's contents as the working copy, the same
+        // way any other unsaved edit does: the parent can see what they asked for, fix it, try
+        // again or reload - and nothing has reached the TV in the meantime.
+        if (saved) toast('Your allowed sources were left alone.', 'ok');
+    }
+
     function describeSource(source) {
         var kind = source.sourceType === 'yt_channel' ? 'Channel'
             : (source.sourceType === 'yt_video' ? 'Video' : 'Playlist');
@@ -2840,6 +3064,8 @@
         'remove-source': function (element) { removeSource(element.getAttribute('data-id')); },
         'export-sources': function () { exportSources(); },
         'import-sources': function () { importSources(); },
+        'export-catalog': function () { exportCatalog(); },
+        'import-catalog': function () { importCatalog(); },
 
         'install-homescreen': function () { installHomescreen(); },
         'dismiss-homescreen': function () { dismissHomescreen(); },

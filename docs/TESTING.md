@@ -53,8 +53,12 @@ cd tv-app && ./gradlew connectedDebugAndroidTest \
 # The dashboard JavaScript has no build step, so CI parses it
 node --check tv-app/app/src/main/assets/app.js
 
-# The dashboard's model and its guards, as plain Node tests (no browser, no dependencies)
+The dashboard's model and its guards, as plain Node tests (no browser, no dependencies)
 cd tv-app && node --test scripts/dashboard-*.test.js
+
+# The catalog file, on the real TV: export it, import it back, edit it, refuse a broken one, and put
+# the library back. Drives the real dashboard in Chrome over CDP and reads the real server and TV.
+node catalog-file.js <outDir> <shotDir> <pin>     # W9 live harness (kept outside the repository)
 ```
 
 **`connectedDebugAndroidTest` uninstalls the app when it finishes.** That wipes the app's private
@@ -63,15 +67,24 @@ positions and time-limit configuration. It happened during W8 and cost a device'
 run it as the last thing before a device demo, and if you do run it, re-approve the sources and
 publish the catalog again afterwards.
 
-The three dashboard suites are `dashboard-catalog-editor.test.js` (the model: every mutation and the
+The four dashboard suites are `dashboard-catalog-editor.test.js` (the model: every mutation and the
 save/reload conversation), `dashboard-catalog-import.test.js` (the import rules and the ordering they
-produce) and `dashboard-catalog-ui.test.js` (the shell that ships: the theme rule, the token palette,
-the action table, what the browser is allowed to store, and that no Apps/Kiosk surface is left in any
-dashboard file). They run against the real asset files, so a page and a script that disagree fail
-here rather than on a phone.
+produce), `dashboard-catalog-yaml.test.js` (the catalog file: the format, the validation, the preview,
+and the round trip) and `dashboard-catalog-ui.test.js` (the shell that ships: the theme rule, the token
+palette, the action table, what the browser is allowed to store, and that no Apps/Kiosk surface is left
+in any dashboard file). They run against the real asset files, so a page and a script that disagree
+fail here rather than on a phone.
+
+The W9 live harness (`catalog-file.js`, above) is the one that checks what unit tests cannot: it
+exports the real library from the real dashboard in a real browser, imports the file back and asserts
+the tree comes back node for node, imports an edited file and asserts the library became what the file
+said, watches the TV's own installed version catch up, checks that the allowed sources are
+byte-identical before and after, and puts the original library back — verifying that it did. It runs
+36 checks and needs the TV's current PIN (see the e2e harness for how the PIN is acquired).
 
 CI (`.github/workflows/ci.yml`) runs `./gradlew --no-daemon --stacktrace assembleDebug
-testDebugUnitTest`, checks `app.js` parses, and uploads the debug APK.
+testDebugUnitTest`, checks the dashboard scripts parse, runs the four dashboard suites, and uploads the
+debug APK.
 
 `--offline` is used in this project's own acceptance runs because all dependencies are already in the
 Gradle cache. **If a build needs a dependency that is not cached, drop `--offline`** rather than
@@ -102,6 +115,7 @@ Test count history (each measured, not estimated):
 | W7 redesign (`a6f51ba`) | 846 | +13: `GET /catalog/artwork` and `POST /catalog/refresh`, the resolver's single-video link, and the redesigned dashboard shell. Measured on `testDebugUnitTest` and `testReleaseUnitTest`, both 846/846, plus 117 dashboard JavaScript tests |
 | W8 polish | 846 | no Kotlin changed; the dashboard suites went 117 → 128 (`dashboard-catalog-ui.test.js` gained 11 guards for the loading state, the vocabulary, the reorder arrows, the remove copy, the error translator and the artwork fallback) |
 | W8.1 now playing | 846 | still no Kotlin change; the dashboard suites went 128 → 135 (the seventh group guards the live status card: the five states, the freshness rule, the playhead ticker, the polling cadence and the fact that it reads `/status` and never the watch history) |
+| W9 catalog file | 850 | +2: the two `catalog-yaml.js` routes. No Kotlin model changed — the file is a client-side reader/writer over the existing atomic `PUT /catalog`. The dashboard suites went 143 → 186: `dashboard-catalog-yaml.test.js` is a new suite of 36 (the format, the refusals, the preview, the round trip) and `dashboard-catalog-ui.test.js` gained 7 guards (the panel, the export, the preview gate, the one write path, and that an imported file can never grant playback) |
 
 **205 of the 542 tests are catalog-era** (Phases 2–4) and live in 11 classes:
 
