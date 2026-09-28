@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Autonomous end-to-end test of SafeTube on a REAL Android TV over ADB.
 
@@ -569,7 +569,7 @@ Log "  library ready before navigating: $libraryReady"
 #
 # This is a distinct exit code (4) with its own result line: RESULT=HARNESS_PRECONDITION_FAILURE is not a
 # product FAIL, and a caller must be able to tell the two apart.
-if (-not $libraryReady) {
+if (-not $libraryReady -and $Tier -ne 'example') {
     if (-not $headers.ContainsKey('Authorization')) {
         Stop-HarnessPrecondition 'no dashboard session - the PIN could not be exchanged for a token, so the approved library cannot be read'
     }
@@ -582,6 +582,12 @@ if (-not $libraryReady) {
     # The em dash is built from its code point so this file stays pure ASCII: PowerShell 5.1 reads a
     # BOM-less script as ANSI, which would mangle a literal dash and break the exact REASON text.
     Stop-HarnessPrecondition ('library empty ' + [char]0x2014 + ' re-seed before running playback tiers')
+} elseif (-not $libraryReady) {
+    # The example tier is the tier that *loads* a library, so an empty one is its input, not a reason to
+    # stop. This came up the moment the instrumented tests were run: they uninstall the app and wipe the
+    # fixture, as documented, and the reload run then refused to start because the library it was about
+    # to create did not exist yet.
+    Log '  no library yet - that is this tier''s own job (it loads the canonical example library below)'
 }
 
 # The app can be restored onto Settings or Connect from the previous session's saved view state, and
@@ -663,6 +669,50 @@ function Get-UiFacts([string]$dumpPath) {
     $facts.Focusable = $focusable
     return $facts
 }
+# logcat keeps about 4 KB of a single log entry, so a dump of a whole 46-node library arrives cut
+# in half. Closing the brackets of the longest prefix that is still well-formed turns that into
+# "the part that fits", which is what the assertions below are written against - and the payloads
+# that must be complete (one container, one screen) are small enough to arrive whole.
+function ConvertFrom-DumpJson([string]$raw) {
+    if (-not $raw) { return $null }
+    try { return $raw | ConvertFrom-Json } catch { }
+    for ($cut = $raw.Length; $cut -gt 2; $cut--) {
+        if ($raw[$cut - 1] -ne '}' -and $raw[$cut - 1] -ne ']') { continue }
+        $candidate = $raw.Substring(0, $cut)
+        $stack = New-Object System.Collections.Stack
+        $inString = $false
+        for ($i = 0; $i -lt $candidate.Length; $i++) {
+            $ch = $candidate[$i]
+            if ($ch -eq '"' -and ($i -eq 0 -or $candidate[$i - 1] -ne '\')) { $inString = -not $inString; continue }
+            if ($inString) { continue }
+            if ($ch -eq '{' -or $ch -eq '[') { $stack.Push($ch) }
+            elseif ($ch -eq '}' -or $ch -eq ']') { if ($stack.Count) { $stack.Pop() | Out-Null } }
+        }
+        if ($stack.Count -eq 0) { continue }
+        $repaired = $candidate
+        while ($stack.Count -gt 0) { $repaired += if ($stack.Pop() -eq '{') { '}' } else { ']' } }
+        try { return $repaired | ConvertFrom-Json } catch { }
+    }
+    return $null
+}
+function Test-W11Title([string]$got, [string]$want) {
+    if ($got -eq $want) { return 'exact' }
+    $strip = { param($text) ($text -replace '[^\x20-\x7E]', '') -replace '\s+', ' ' }
+    if ((& $strip $got).Trim() -eq (& $strip $want).Trim()) { return 'ascii' }
+    return 'no'
+}
+function Test-W11CardLabel([string]$label, [string]$title) {
+    if (Test-CardLabel $label $title) { return $true }
+    if (-not $label -or -not $title) { return $false }
+    foreach ($part in ($label -split ' / ')) {
+        if ((Test-W11Title $part.Trim() $title) -ne 'no') { return $true }
+    }
+    return $false
+}
+function Test-W11AnyCardLabel([string]$label, [string[]]$titles) {
+    foreach ($title in $titles) { if (Test-W11CardLabel $label $title) { return $title } }
+    return $null
+}
 
 # Whether a D-pad focus label belongs to a card with this exact title. A label is the card's own texts
 # joined with ' / ' (the artwork's description and the title), so a *substring* test is not enough:
@@ -739,32 +789,6 @@ if ($Tier -eq 'example') {
     foreach ($n in $manifest.nodes) { if ($n.youtubeVideoId) { $w11TitleByVideoId[$n.youtubeVideoId] = $n.title } }
     Log "=== W11: the example kids library ($($manifest.nodeCount) nodes, generated $($manifest.generated)) ==="
 
-    # logcat keeps about 4 KB of a single log entry, so a dump of a whole 46-node library arrives cut
-    # in half. Closing the brackets of the longest prefix that is still well-formed turns that into
-    # "the part that fits", which is what the assertions below are written against - and the payloads
-    # that must be complete (one container, one screen) are small enough to arrive whole.
-    function ConvertFrom-DumpJson([string]$raw) {
-        if (-not $raw) { return $null }
-        try { return $raw | ConvertFrom-Json } catch { }
-        for ($cut = $raw.Length; $cut -gt 2; $cut--) {
-            if ($raw[$cut - 1] -ne '}' -and $raw[$cut - 1] -ne ']') { continue }
-            $candidate = $raw.Substring(0, $cut)
-            $stack = New-Object System.Collections.Stack
-            $inString = $false
-            for ($i = 0; $i -lt $candidate.Length; $i++) {
-                $ch = $candidate[$i]
-                if ($ch -eq '"' -and ($i -eq 0 -or $candidate[$i - 1] -ne '\')) { $inString = -not $inString; continue }
-                if ($inString) { continue }
-                if ($ch -eq '{' -or $ch -eq '[') { $stack.Push($ch) }
-                elseif ($ch -eq '}' -or $ch -eq ']') { if ($stack.Count) { $stack.Pop() | Out-Null } }
-            }
-            if ($stack.Count -eq 0) { continue }
-            $repaired = $candidate
-            while ($stack.Count -gt 0) { $repaired += if ($stack.Pop() -eq '{') { '}' } else { ']' } }
-            try { return $repaired | ConvertFrom-Json } catch { }
-        }
-        return $null
-    }
 
     # The dumps are addressed to the receiver component explicitly: a package-scoped implicit
     # broadcast is not always delivered after a reset, which is a harness failure that looks like an
@@ -824,24 +848,6 @@ if ($Tier -eq 'example') {
     # back as '?' through no fault of the app, so the comparison is made twice: exactly, and again on
     # what is left once the characters that channel cannot carry are removed. A title that differs in
     # its words fails either way.
-    function Test-W11Title([string]$got, [string]$want) {
-        if ($got -eq $want) { return 'exact' }
-        $strip = { param($text) ($text -replace '[^\x20-\x7E]', '') -replace '\s+', ' ' }
-        if ((& $strip $got).Trim() -eq (& $strip $want).Trim()) { return 'ascii' }
-        return 'no'
-    }
-    function Test-W11CardLabel([string]$label, [string]$title) {
-        if (Test-CardLabel $label $title) { return $true }
-        if (-not $label -or -not $title) { return $false }
-        foreach ($part in ($label -split ' / ')) {
-            if ((Test-W11Title $part.Trim() $title) -ne 'no') { return $true }
-        }
-        return $false
-    }
-    function Test-W11AnyCardLabel([string]$label, [string[]]$titles) {
-        foreach ($title in $titles) { if (Test-W11CardLabel $label $title) { return $title } }
-        return $null
-    }
     # How many uiautomator dumps this block takes, so a run that is slow can be explained from its log.
     $script:w11Dumps = 0
 
@@ -1402,7 +1408,18 @@ if ($Tier -eq 'example') {
                 # above. This is still the remote: DOWN to the row, RIGHT to the card, CENTER.
                 Park-W11Focus
                 $resumeRoute = Find-W11Card $cocomelonTitles
+                # The offer is detected from the app's OWN log, polled fast, and answered immediately.
+                #
+                # This is the whole of the W12.1 harness fix, and it is the mechanism the `full` tier has
+                # always used: `Menu opened: RESUME` is written the moment the offer is raised, and the
+                # offer withdraws itself after ~8s of no input. Taking a uiautomator dump (3-4s) to prove
+                # it is on screen *before* pressing anything spends that window, which is why this step
+                # failed three times while the app was behaving correctly. So: no dump between detecting
+                # and pressing, and the proof that the choice was applied comes from the app's own
+                # "Resume chosen" / "Start over chosen" lines rather than from a screenshot of a menu
+                # that has already gone.
                 if ($resumeRoute) {
+                    $resumeLogBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
                     Get-W11RowStart $cocomelonTitles | Out-Null     # the collection card
                     Key 'KEYCODE_DPAD_CENTER'                       # open it
                     Start-Sleep -Seconds 3
@@ -1411,46 +1428,173 @@ if ($Tier -eq 'example') {
                 }
                 $resumed = if ($resumeRoute) { Wait-W11Video $resumeVideo.youtubeVideoId 30 } else { $null }
                 if ($resumed) {
-                    Start-Sleep -Seconds 4
-                    $script:w11Dumps++
-                    $facts = Get-W11Focused "w11-resume-$($script:w11Dumps)"
-                    $offerShown = $facts -and ($facts.Dump -match 'Resume' -or $facts.Dump -match 'Start over')
-                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' ([bool]$offerShown) `
-                        "the offer to carry on is on screen: $offerShown"
+                    $offerShown = $false
+                    $savedLine = ''
+                    for ($i = 0; $i -lt 24; $i++) {
+                        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $resumeLogBase) -join "`n"
+                        if ($fresh -match 'Resumable position for ') {
+                            $savedLine = ([regex]::Match($fresh, 'Resumable position for [^:]+: \d+s')).Value
+                        }
+                        if ($fresh -match 'Menu opened: RESUME') { $offerShown = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $offerShown `
+                        "the app raised the resume offer after the restart: $offerShown ($savedLine)"
 
-                    # The offer does not gate playback: the video plays from the beginning behind it and
-                    # the child chooses. So "did the playhead survive the kill" cannot be read off the
-                    # position at the moment it opens - that is 0 by design - and is answered by choosing
-                    # Resume and looking at where the playhead lands. (The first assertion here used to
-                    # require ~35s on open and failed a correct app.)
+                    # The offer does not gate playback - the video plays from the beginning behind it -
+                    # so what the saved playhead was is asked of the app, and whether the choice was
+                    # applied is asked of the app's own action line.
+                    $actionBase = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+                    $posOnOpen = -1
                     if ($offerShown) {
-                        Key 'KEYCODE_DPAD_CENTER'      # "Resume" is the offer's first choice
+                        $posOnOpen = if (Get-W11Playing) { [int](Get-W11Playing).positionSec } else { -1 }
+                        Key 'KEYCODE_DPAD_CENTER'      # the offer opens on "Resume"
                         Start-Sleep -Seconds 4
                     }
+                    $actionLog = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $actionBase) -join "`n"
+                    $choseResume = $actionLog -match 'Resume chosen'
+                    $choseStartOver = $actionLog -match 'Start over chosen'
                     $now = Get-W11Playing
                     $nearSaved = $now -and ([Math]::Abs([int]$now.positionSec - $savedAt) -le 25)
-                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME' ([bool]$resumed -and $nearSaved) `
-                        "on open the video plays from $(if ($now) { $now.positionSec } else { 'nothing' })s; after choosing Resume it is at $(if ($now) { $now.positionSec } else { 'nothing' })s where it was left at ${savedAt}s"
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_CHOICE' ($choseResume -and (-not $choseStartOver)) `
+                        "the app reports: Resume chosen=$choseResume, Start over chosen=$choseStartOver"
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME' ([bool]$resumed -and $choseResume -and $nearSaved) `
+                        "opened at ${posOnOpen}s, after choosing Resume it is at $(if ($now) { $now.positionSec } else { 'nothing' })s where it was left at ${savedAt}s"
                     Shot 'w11-restart-resumed'
                 } else {
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_CHOICE' $false 'not reached'
                     Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'the Continue Watching card could not be focused'
                     Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
                 }
             } else {
+                Record 'EXAMPLE_LIBRARY_RESTART_RESUME_CHOICE' $false 'not reached'
                 Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'Continue Watching did not offer the video that was being watched'
                 Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
             }
         } else {
             Record 'EXAMPLE_LIBRARY_RESTART_PROCESS' $false 'the fixture video never started, so nothing could be saved'
             Record 'EXAMPLE_LIBRARY_RESTART_CONTINUE_WATCHING' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_RESTART_RESUME_CHOICE' $false 'not reached'
             Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'not reached'
             Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
         }
     } else {
         Record 'EXAMPLE_LIBRARY_RESTART_PROCESS' $false 'the CoComelon row was never reached'
         Record 'EXAMPLE_LIBRARY_RESTART_CONTINUE_WATCHING' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_RESTART_RESUME_CHOICE' $false 'not reached'
         Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'not reached'
         Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
+    }
+
+    # --- 10. W12.1, Test B: the D1 fix seen from outside, across a process restart -----------------
+    #
+    # A -> NEXT -> B, each left at its own playhead, then the process is killed. B is what Continue
+    # Watching should offer. Opening *A* again must offer A's own position - which is precisely the
+    # defect W12 fixed: before it, B's playhead was written into A's row, so A would have offered B's.
+    #
+    # The value that decides this is the app's own line - "Resumable position for <id>: <n>s" - because
+    # that is the number the offer is built from; the playhead after choosing Resume confirms it.
+    $videoA = $w11NameToNode['EXAMPLE_COCOMELON_VIDEO_1']
+    $videoB = $w11NameToNode['EXAMPLE_COCOMELON_VIDEO_2']
+    if (Restart-W11App 'before the D1-after-restart check') {
+        $route = Find-W11Card $cocomelonTitles
+        $posA = -1
+        if ($route) {
+            Get-W11RowStart $cocomelonTitles | Out-Null
+            Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 3
+            Key 'KEYCODE_DPAD_DOWN'
+            Key 'KEYCODE_DPAD_CENTER'
+        }
+        $playingA = if ($route) { Wait-W11Video $videoA.youtubeVideoId 30 } else { $null }
+        if ($playingA) {
+            foreach ($i in 1..2) { Key 'KEYCODE_DPAD_RIGHT' }    # A gets a modest playhead
+            Start-Sleep -Seconds 5
+            $posA = if (Get-W11Playing) { [int](Get-W11Playing).positionSec } else { -1 }
+
+            # NEXT inside the same approved source: the queue is the source's cached videos in order.
+            Key 'KEYCODE_MEDIA_NEXT'
+            $playingB = Wait-W11Video $videoB.youtubeVideoId 30
+            $posB = -1
+            if ($playingB) {
+                foreach ($i in 1..6) { Key 'KEYCODE_DPAD_RIGHT' }   # B gets a clearly different one
+                Start-Sleep -Seconds 5
+                $posB = if (Get-W11Playing) { [int](Get-W11Playing).positionSec } else { -1 }
+            }
+            Log "  D1-after-restart: A=$($videoA.youtubeVideoId) at ${posA}s, B=$($videoB.youtubeVideoId) at ${posB}s"
+            $distinct = ($posA -gt 15) -and ($posB -gt $posA + 30)
+            Record 'EXAMPLE_LIBRARY_D1_TWO_PLAYHEADS' $distinct `
+                "A left at ${posA}s and B at ${posB}s, which is far enough apart for the check to mean something"
+
+            if ($distinct) {
+                Key 'KEYCODE_BACK'
+                Start-Sleep -Seconds 5
+                Adb @('shell', "am force-stop $pkg") | Out-Null
+                Start-Sleep -Seconds 3
+                Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
+                Start-Sleep -Seconds 20
+
+                # The most recent video is B, so that is what Continue Watching must offer first.
+                $cw = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+                $cwFirst = if ($cw) { ($cw.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1) } else { $null }
+                $cwIsB = $cwFirst -and $cwFirst.cards.Count -gt 0 -and $cwFirst.cards[0].videoId -eq $videoB.youtubeVideoId
+                Record 'EXAMPLE_LIBRARY_D1_CONTINUE_WATCHING_IS_B' ([bool]$cwIsB) `
+                    "after the restart Continue Watching offers $(if ($cwFirst -and $cwFirst.cards.Count) { $cwFirst.cards[0].videoId } else { 'nothing' }); B is $($videoB.youtubeVideoId)"
+
+                # Now open A, and read what the app says A's saved position is.
+                Park-W11Focus
+                $routeAgain = Find-W11Card $cocomelonTitles
+                $resumeLineA = ''
+                $logBaseA = 0
+                if ($routeAgain) {
+                    $logBaseA = @(Adb @('logcat', '-d', '-s', 'SafeTube')).Count
+                    Get-W11RowStart $cocomelonTitles | Out-Null
+                    Key 'KEYCODE_DPAD_CENTER'
+                    Start-Sleep -Seconds 3
+                    Key 'KEYCODE_DPAD_DOWN'
+                    Key 'KEYCODE_DPAD_CENTER'
+                }
+                $backOnA = if ($routeAgain) { Wait-W11Video $videoA.youtubeVideoId 30 } else { $null }
+                $offerA = $false
+                if ($backOnA) {
+                    for ($i = 0; $i -lt 24; $i++) {
+                        $fresh = (@(Adb @('logcat', '-d', '-s', 'SafeTube')) | Select-Object -Skip $logBaseA) -join "`n"
+                        $match = [regex]::Match($fresh, 'Resumable position for ' + [regex]::Escape($videoA.youtubeVideoId) + ': (\d+)s')
+                        if ($match.Success) { $resumeLineA = [int]$match.Groups[1].Value }
+                        if ($fresh -match 'Menu opened: RESUME') { $offerA = $true; break }
+                        Start-Sleep -Milliseconds 500
+                    }
+                }
+                $aOffersItsOwn = $offerA -and ($resumeLineA -gt 0) -and
+                    ([Math]::Abs($resumeLineA - $posA) -le 12) -and ([Math]::Abs($resumeLineA - $posB) -gt 30)
+                Record 'EXAMPLE_LIBRARY_D1_AFTER_RESTART' $aOffersItsOwn `
+                    "A offers ${resumeLineA}s; A was left at ${posA}s and B at ${posB}s (the defect this guards against would have offered B's ${posB}s under A)"
+
+                $posAfterA = -1
+                if ($offerA) {
+                    Key 'KEYCODE_DPAD_CENTER'
+                    Start-Sleep -Seconds 4
+                    $posAfterA = if (Get-W11Playing) { [int](Get-W11Playing).positionSec } else { -1 }
+                }
+                Record 'EXAMPLE_LIBRARY_D1_RESUME_LANDS_ON_A' ($offerA -and ([Math]::Abs($posAfterA - $posA) -le 25)) `
+                    "choosing Resume for A landed at ${posAfterA}s, A's own ${posA}s (B's was ${posB}s)"
+                Shot 'w11-d1-after-restart'
+            } else {
+                Record 'EXAMPLE_LIBRARY_D1_CONTINUE_WATCHING_IS_B' $false 'the two playheads were not far enough apart to test with'
+                Record 'EXAMPLE_LIBRARY_D1_AFTER_RESTART' $false 'not reached'
+                Record 'EXAMPLE_LIBRARY_D1_RESUME_LANDS_ON_A' $false 'not reached'
+            }
+        } else {
+            Record 'EXAMPLE_LIBRARY_D1_TWO_PLAYHEADS' $false 'the first CoComelon video never started'
+            Record 'EXAMPLE_LIBRARY_D1_CONTINUE_WATCHING_IS_B' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_D1_AFTER_RESTART' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_D1_RESUME_LANDS_ON_A' $false 'not reached'
+        }
+    } else {
+        Record 'EXAMPLE_LIBRARY_D1_TWO_PLAYHEADS' $false 'the app could not be relaunched for the D1-after-restart check'
+        Record 'EXAMPLE_LIBRARY_D1_CONTINUE_WATCHING_IS_B' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_D1_AFTER_RESTART' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_D1_RESUME_LANDS_ON_A' $false 'not reached'
     }
     $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
     Log '=== W11 summary ==='
@@ -1467,7 +1611,11 @@ if (Go-ToLibrary 'before the hierarchy checks') {
     Log '=== W6: categories are titles, sub-categories are cards ==='
     $projection = Get-DebugDump 'DEBUG_DUMP_CATALOG_UI'
     $model = $null
-    if ($projection) { try { $model = $projection | ConvertFrom-Json } catch { $model = $null } }
+    # Parsed with the tolerant reader, not a plain JSON parse: the projection of a library this size is
+# longer than one logcat entry, so it arrives cut and a strict parse turns that into "the app did not
+# report its catalogue projection" - which is what the player tier did against the example library
+# until W12.1. The reader closes the truncated payload and hands back the part that arrived.
+            $model = ConvertFrom-DumpJson $projection
 
     if (-not $model) {
         Record 'w6-catalog-projection' $false 'the app did not report its catalogue projection'
@@ -2540,3 +2688,6 @@ if ($script:blocked) { Log 'FINAL: BLOCKED (player features could not be exercis
 if ($script:failures.Count -gt 0) { Log "FINAL: FAIL ($($script:failures -join ', '))"; exit 1 }
 Log 'FINAL: PASS'
 exit 0
+
+
+

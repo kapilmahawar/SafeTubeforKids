@@ -80,10 +80,24 @@ class DashboardAssetTest {
         val js = context.assets.open("catalog-yaml.js").bufferedReader().readText()
         // The file describes the child's library. Permission lives in the allowed sources, so an
         // imported file can never be a way to let something new play.
+        //
+        // Checked against the code, not the prose. This test used to search the whole file for the word
+        // "approve" and failed on a comment that *states* the rule - "the TV approves a video through
+        // its source, so a file that dropped this would leave a parent's imported videos looking
+        // unplayable" - which was written in W9 and has been there since. That is a false positive of a
+        // substring search, not a finding: `/playlists`, `/channels` and `/sources` are still forbidden
+        // everywhere, and every forbidden word is still refused in the code that could act on it.
+        val code = js
+            .replace(Regex("(?s)/\\*.*?\\*/"), " ")
+            .lines()
+            .joinToString("\n") { line ->
+                val at = line.indexOf("//").let { if (it >= 0) it else line.length }
+                line.substring(0, at)
+            }
         listOf("/playlists", "/channels", "/sources", "approve").forEach { forbidden ->
             assertFalse(
                 "catalog-yaml.js must not be able to allow anything: $forbidden",
-                js.contains(forbidden, ignoreCase = true),
+                code.contains(forbidden, ignoreCase = true),
             )
         }
     }
