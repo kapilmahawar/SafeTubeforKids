@@ -14,6 +14,8 @@ D5_END_OF_VIDEO_ORACLE=FIXED           D5_NEGATIVE_TEST=PASS
 D6_DPAD_HANDLER=REMOVED                D7_REJECTED_PLAYER_SURFACE=DISPROVEN
 RENAMED_ITEM_CONTINUE_WATCHING=FIXED   REMOVED_VIDEO_RESUME_CLEANUP=DOCUMENTED
 PLAYLIST_CACHE_CONSISTENCY=VERIFIED    SECURITY_INVARIANT=PASS
+PROCESS_RESTART_RESUME=PARTIAL         (the saved playhead survives the kill and is offered; the
+                                        harness could not press the offer's Resume in time)
 ```
 
 ## D1 — the playhead was saved against the wrong video after NEXT
@@ -159,8 +161,35 @@ refused while the tree still lists them.
 | `gradlew test` | **930/930 debug and 930/930 release**, 64 classes each, 0 failures |
 | dashboard suites | **213/213** across 5 suites (editor 73, import 29, ui 50, yaml 36, parent-access 25) |
 | `PlaybackControllerTest` | 18/18, and 9/18 fail with the fixes reverted |
-| example tier on the Mi Box | see the W12 final report; every D1/D2/D3/D5/D7 check passes |
 | dashboard in a browser | 5 unplayable videos → 1, after the source-model fix |
+| device, attempt 1 (`2026-09-28-185733`) | 31 checks, 3 failed |
+| device, attempt 2 (`2026-09-28-191516`) | 31 checks, 2 failed |
+| device, attempt 3 (`2026-09-28-193221`) | **31 checks, 1 failed** |
+
+### What each attempt proved, and the one step the harness could not finish
+
+Every check of D3, D5, D7, the playlist walk, the security refusal, the hidden item, the empty shelf,
+the category order, the four-source playback (attempt 3 leaves it passing) and the restart itself
+passes. The single remaining failure is the *last* step of the restart/resume sequence:
+
+```text
+saved before the kill   35s of 185s, then BACK           PASS (attempts 1-3)
+process killed          gone, then running again          PASS (attempts 1-3)
+Continue Watching       offers that exact video id        PASS (attempts 1-3)
+the offer is on screen  "Resume" / "Start over" shown     PASS (attempts 2-3)
+choosing Resume         playhead jumps to the saved point FAIL (harness)
+```
+
+W11's claim was that nothing restarted a process holding a saved position; that claim is now
+disproven — the position is written before the kill, survives it, and the app offers to resume it
+afterwards, on the real device, three times. What the harness does not do is press the offer's
+*Resume* choice in time: the offer withdraws itself on its own idle timer, and this harness's dump-then-
+press sequence spends that window, so its CENTER lands on the player instead. Reported as a harness
+limitation rather than rounded up: the choice-application step is covered by the `full` tier's
+`resume-choice-applied` / `resume-continues-position` checks (which drive the offer successfully from a
+different state) and by `PlaybackControllerTest`'s resume tests, and the fix is to press the choice
+before taking the dump that proves it is there.
+
 
 ## What is still not covered
 
