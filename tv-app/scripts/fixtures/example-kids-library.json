@@ -198,7 +198,7 @@
       "position": 0,
       "enabled": true,
       "youtubeVideoId": "7PBDE0051wc",
-      "youtubePlaylistId": null
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg"
     },
     {
       "id": "ex-bluey-video-2",
@@ -208,7 +208,7 @@
       "position": 1,
       "enabled": true,
       "youtubeVideoId": "mNt8QH-fyyY",
-      "youtubePlaylistId": null
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg"
     },
     {
       "id": "ex-bluey-video-3",
@@ -218,7 +218,7 @@
       "position": 2,
       "enabled": true,
       "youtubeVideoId": "rX0NbuympHQ",
-      "youtubePlaylistId": null
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg"
     },
     {
       "id": "ex-peppa",
@@ -488,7 +488,7 @@
       "position": 0,
       "enabled": true,
       "youtubeVideoId": "7PBDE0051wc",
-      "youtubePlaylistId": null
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg"
     },
     {
       "id": "ex-mixed-cocomelon",
@@ -667,7 +667,7 @@
       "nodeId": "ex-bluey-video-1",
       "type": "VIDEO",
       "youtubeVideoId": "7PBDE0051wc",
-      "youtubePlaylistId": null,
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg",
       "title": "FULL EPISODES 💙 🍼 Baby Bluey Rolls Over! 🥹 | Bluey",
       "source": "Bluey - Official Channel",
       "sourceId": "UCVzLLZkDuFGAE2BGdBuBNBg",
@@ -682,7 +682,7 @@
       "nodeId": "ex-bluey-video-2",
       "type": "VIDEO",
       "youtubeVideoId": "mNt8QH-fyyY",
-      "youtubePlaylistId": null,
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg",
       "title": "FULL EPISODES 💙 🖍️ Creating a Hotel with Bluey and Bingo ✨ | Bluey",
       "source": "Bluey - Official Channel",
       "sourceId": "UCVzLLZkDuFGAE2BGdBuBNBg",
@@ -697,7 +697,7 @@
       "nodeId": "ex-bluey-video-3",
       "type": "VIDEO",
       "youtubeVideoId": "rX0NbuympHQ",
-      "youtubePlaylistId": null,
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg",
       "title": "Bluey and Bingo Can't Speak! 🤫 | Sibling Games 💙🧡 | Bluey",
       "source": "Bluey - Official Channel",
       "sourceId": "UCVzLLZkDuFGAE2BGdBuBNBg",
@@ -1057,7 +1057,7 @@
       "nodeId": "ex-mixed-bluey",
       "type": "VIDEO",
       "youtubeVideoId": "7PBDE0051wc",
-      "youtubePlaylistId": null,
+      "youtubePlaylistId": "UCVzLLZkDuFGAE2BGdBuBNBg",
       "title": "FULL EPISODES 💙 🍼 Baby Bluey Rolls Over! 🥹 | Bluey",
       "source": "Bluey - Official Channel",
       "sourceId": "UCVzLLZkDuFGAE2BGdBuBNBg",

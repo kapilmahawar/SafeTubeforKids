@@ -274,6 +274,13 @@ object CatalogPayloadValidator {
      * [ContentSourceParser.videoIdProblem], the playlist resolver too: an id is turned into the
      * canonical URL and must come back out unchanged. One rule, three callers - so an id the resolver
      * accepts cannot be one the catalog then refuses, and the other way round.
+     *
+     * `youtubePlaylistId` records **where a node's content came from**, and the app approves content
+     * by source of three kinds: a playlist, a channel, or a single video. So that field is checked
+     * against all three kinds ([ContentSourceParser.sourceIdProblem]) rather than against playlists
+     * alone - a channel id is a different kind of source, not a malformed playlist id. The field name
+     * is historical; the check is not weakened, only widened to the sources this app really supports,
+     * and it is still provenance: nothing here grants permission to play anything.
      */
     private fun youtubeProblems(node: CatalogNodeDto, where: String, problems: MutableList<Problem>) {
         node.youtubeVideoId?.let { id ->
@@ -290,6 +297,15 @@ object CatalogPayloadValidator {
                     "$where.youtubePlaylistId",
                     "a youtubePlaylistId must not be blank; leave it out for a container with no import",
                 )
+
+                // The field means two things, and they are not the same rule. On a **video** it records
+                // where the video came from, and the app can allow three kinds of source - a playlist,
+                // a channel or a single video - so any of them is a well-formed value there. On a
+                // **container** it records the playlist that container imports, which is a playlist
+                // and nothing else: the ingest resolves it as one.
+                node.nodeType == CATALOG_NODE_TYPE_VIDEO -> ContentSourceParser.sourceIdProblem(id)?.let {
+                    problems += Problem("$where.youtubePlaylistId", it)
+                }
 
                 else -> ContentSourceParser.playlistIdProblem(id)?.let {
                     problems += Problem("$where.youtubePlaylistId", it)

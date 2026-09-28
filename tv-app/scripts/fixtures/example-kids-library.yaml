@@ -65,14 +65,17 @@ catalog:
           youtube: 7PBDE0051wc
           title: FULL EPISODES 💙 🍼 Baby Bluey Rolls Over! 🥹 | Bluey
           order: 0
+          playlist: UCVzLLZkDuFGAE2BGdBuBNBg
         - id: ex-bluey-video-2
           youtube: mNt8QH-fyyY
           title: FULL EPISODES 💙 🖍️ Creating a Hotel with Bluey and Bingo ✨ | Bluey
           order: 1
+          playlist: UCVzLLZkDuFGAE2BGdBuBNBg
         - id: ex-bluey-video-3
           youtube: rX0NbuympHQ
           title: Bluey and Bingo Can't Speak! 🤫 | Sibling Games 💙🧡 | Bluey
           order: 2
+          playlist: UCVzLLZkDuFGAE2BGdBuBNBg
     - id: ex-peppa
       name: Peppa Pig
       order: 2
@@ -205,6 +208,7 @@ catalog:
           youtube: 7PBDE0051wc
           title: FULL EPISODES 💙 🍼 Baby Bluey Rolls Over! 🥹 | Bluey
           order: 0
+          playlist: UCVzLLZkDuFGAE2BGdBuBNBg
         - id: ex-mixed-cocomelon
           youtube: pRn3fdmSY7w
           title: This is the Way Bedroom! Bedtime Routine Song 🛌🏻 | NEW 😴 CoComelon Animal Time | Animals for Kids

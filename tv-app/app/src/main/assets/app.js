@@ -1202,38 +1202,41 @@
     /**
      * Whether a video can actually play, mirroring the rule the TV enforces.
      *
-     * The app approves a video only while its *source* is allowed, so a video is playable when its
-     * playlist is allowed, or when it was allowed on its own. Nothing about being in the library
-     * makes a video playable - which is exactly why this is computed from the allowed sources rather
-     * than from the library.
+     * The app approves a video only while its *source* is allowed, and its source may be any of the
+     * three kinds it can allow: a playlist, a whole channel, or one video pasted on its own. So a
+     * video node is playable when the source id it carries is allowed, whatever kind that source is -
+     * checking playlists alone reported every channel-sourced video as unplayable while the TV played
+     * it (W11's D3, fixed here with the catalog field it reads, W12's D4).
+     *
+     * Nothing about being in the library makes a video playable, which is exactly why this is computed
+     * from the allowed sources rather than from the library. This decides what a *parent* is told; the
+     * TV still decides what a *child* can play, in PlaybackAuthorization, from the approved cache.
      */
     function allowedSourceMaps() {
-        var playlists = {};
+        var sources = {};
         var videos = {};
         state.playlists.forEach(function (source) {
-            if (source.sourceType === 'yt_playlist') playlists[source.sourceId] = true;
+            if (!source || !source.sourceId) return;
+            sources[source.sourceId] = source;
             if (source.sourceType === 'yt_video') videos[source.sourceId] = true;
         });
-        return { playlists: playlists, videos: videos };
+        return { sources: sources, videos: videos };
     }
 
     function canPlay(node, maps) {
         if (node.nodeType !== CatalogEditor.VIDEO) return true;
         if (!node.youtubeVideoId) return false;
         var allowed = maps || allowedSourceMaps();
-        if (node.youtubePlaylistId && allowed.playlists[node.youtubePlaylistId]) return true;
+        if (node.youtubePlaylistId && allowed.sources[node.youtubePlaylistId]) return true;
         return !!allowed.videos[node.youtubeVideoId];
     }
 
     function sourceNameFor(node) {
         if (!node.youtubePlaylistId) return 'Added by you';
-        var found = null;
-        state.playlists.forEach(function (source) {
-            if (source.sourceType === 'yt_playlist' && source.sourceId === node.youtubePlaylistId) {
-                found = source.displayName || source.sourceId;
-            }
-        });
-        return found ? 'From ' + found : 'From a YouTube source that is not allowed yet';
+        var allowed = allowedSourceMaps().sources;
+        var source = allowed[node.youtubePlaylistId];
+        return source ? 'From ' + (source.displayName || source.sourceId)
+            : 'From a YouTube source that is not allowed yet';
     }
 
     function nodeMeta(node, maps) {
@@ -3110,7 +3113,9 @@
             }
 
             var allowed = allowedSourceMaps();
-            var view = CatalogYaml.preview(read.nodes, state.session.nodes, allowed.playlists);
+            // The same map the library screen uses, so the preview cannot promise a different set of
+            // playable videos than the screen it is previewing into - and it now carries channels too.
+            var view = CatalogYaml.preview(read.nodes, state.session.nodes, allowed.sources);
             var confirmed = await askImport(file.name, read, view);
             if (confirmed) await applyImport(read.nodes);
         });

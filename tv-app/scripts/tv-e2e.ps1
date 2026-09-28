@@ -735,6 +735,8 @@ if ($Tier -eq 'example') {
         }
     }
     foreach ($item in $manifest.items) { $w11NameToNode[$item.name] = $item }
+    $w11TitleByVideoId = @{}
+    foreach ($n in $manifest.nodes) { if ($n.youtubeVideoId) { $w11TitleByVideoId[$n.youtubeVideoId] = $n.title } }
     Log "=== W11: the example kids library ($($manifest.nodeCount) nodes, generated $($manifest.generated)) ==="
 
     # logcat keeps about 4 KB of a single log entry, so a dump of a whole 46-node library arrives cut
@@ -852,12 +854,25 @@ if ($Tier -eq 'example') {
     # at each step which card is focused, because a computed number of DOWN presses is not reliable -
     # measured, not assumed: pressing DOWN twice from the top landed on the third row, and a library
     # that scrolls makes the arithmetic worse, not better.
+    # Clears the saved playheads, so Continue Watching is not a row while a phase navigates.
+    #
+    # Its cards carry the same titles as the shelves below it - a video that was watched is also a card
+    # in its category - so a walk that looks for a title can land in the wrong row and press the wrong
+    # thing. That is not hypothetical: it is how the player-controls check ended up driving a video from
+    # a different source and then failing on a seek that raced a queue advance. This is the app's own
+    # debug instrument, and this is what it is for.
+    function Clear-W11Progress {
+        Adb @('shell', "am broadcast -a $pkg.DEBUG_CLEAR_RESUME_POSITIONS -n $pkg/.debug.DebugReceiver") | Out-Null
+        Start-Sleep -Seconds 3
+    }
+
     function Restart-W11App([string]$why) {
         Log "  restarting the app ($why) so focus starts from the top of the library"
         Adb @('shell', "am force-stop $pkg") | Out-Null
         Start-Sleep -Seconds 3
         Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
         Start-Sleep -Seconds 18
+        Clear-W11Progress
         return (ForegroundPackage) -eq $pkg
     }
     # Walks the library downwards until a card with one of these titles is focused, and says which
@@ -875,6 +890,13 @@ if ($Tier -eq 'example') {
         return $null
     }
     # From anywhere in a row, the leftmost card: LEFT stops at the row's first card.
+    # Focus parked at the top-left of whatever screen is up: every walk below is relative to that, and
+    # after a relaunch the app decides for itself where focus starts.
+    function Park-W11Focus {
+        for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_UP' }
+        for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_LEFT' }
+    }
+
     function Get-W11RowStart([string[]]$titles) {
         for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_LEFT' }
         $script:w11Dumps++
@@ -889,6 +911,39 @@ if ($Tier -eq 'example') {
         if (-not $w11Children.ContainsKey($containerId)) { return , @() }
         return , @($w11Children[$containerId] | Sort-Object { [int]$_.position } | ForEach-Object { $_.title })
     }
+    # W12, D5: an oracle that can tell "the queue ended" from "playback stopped". It lives up here,
+    # with the other helpers, because the playlist phase below uses it: PowerShell defines a function
+    # when execution reaches it, so a helper defined after its first caller is a runtime error.
+    function Test-W11OnLibraryScreen {
+        $script:w11Dumps++
+        $facts = Get-W11Focused "w11-screen-$($script:w11Dumps)"
+        if (-not $facts) { return $null }
+        return (($facts.Dump -match 'SafeTube for Kids') -and ($facts.Dump -match 'Refresh'))
+    }
+    function Get-W11QueueEnd([int]$TimeoutSec = 25, [switch]$NoWait) {
+        $stopped = if ($NoWait) { -not (Get-W11Playing) } else { Wait-W11NoPlay $TimeoutSec }
+        if (-not $stopped) {
+            return [pscustomobject]@{ Verdict = 'STILL_PLAYING'; SaidFinished = $false; OnLibrary = $null }
+        }
+        $log = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
+        $saidFinished = $log -match 'Approved queue finished'
+        # "Out of the player", not necessarily home: a playlist opened from a collection returns to that
+        # collection, and calling that PARTIAL would have failed a correct end-of-queue. Any catalogue
+        # screen of this fixture counts - the home screen, or a container.
+        $onLibrary = Test-W11OnLibraryScreen
+        if (-not $onLibrary) {
+            $script:w11Dumps++
+            $outFacts = Get-W11Focused "w11-outofplayer-$($script:w11Dumps)"
+            if ($outFacts) {
+                $onLibrary = @($manifest.categoryOrder | Where-Object { $outFacts.Dump -match [regex]::Escape($_.title) }).Count -gt 0
+            }
+        }
+        $verdict = if ($saidFinished -and $onLibrary) { 'ENDED' }
+            elseif ($saidFinished -or $onLibrary) { 'PARTIAL_EVIDENCE' }
+            else { 'STOPPED_WITHOUT_ENDING' }
+        return [pscustomobject]@{ Verdict = $verdict; SaidFinished = $saidFinished; OnLibrary = $onLibrary }
+    }
+
 
     # --- 1. load ---------------------------------------------------------------------------------
     Log '--- loading the example library (allow its sources, replace the catalog, sync the TV) ---'
@@ -1044,7 +1099,10 @@ if ($Tier -eq 'example') {
         Key 'KEYCODE_DPAD_CENTER'
         Start-Sleep -Seconds 3
         if ($plan.container) {
-            # The card opened a collection: its first video is one press below the heading row.
+            # The card opened a collection: its first video is one press below the heading row. This is
+            # deliberately the same three presses the playlist phase uses to open the same container and
+            # play the same first item, and that phase walks all 17 items - so if this one step fails,
+            # the mechanism is shared and the evidence is not.
             Key 'KEYCODE_DPAD_DOWN'
             Key 'KEYCODE_DPAD_CENTER'
         }
@@ -1061,71 +1119,92 @@ if ($Tier -eq 'example') {
     }
     Record 'EXAMPLE_LIBRARY_PLAYBACK_FOUR_SOURCES' ($sourcesPlayed -eq 4) ($sourceResults -join ' | ')
 
-    # The player's own controls, on whatever is playing now, then BACK and the focus the child comes
-    # back to. Ten seconds of watching is what gives Continue Watching something to remember.
-    if ($lastPlayed) {
-        $controls = @()
-        # The first press on a player whose on-screen controls have auto-hidden *reveals* them; the next
-        # one acts. That is what the player does, so this presses and then waits for the state it asked
-        # for, up to three presses, and reports how many it took - asserting "one press toggles" is an
-        # assumption about the on-screen display, not about the app's pause.
-        $pressesUsed = 0
-        $paused = $null
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
+    # The player's own controls, on a video that has just started, then BACK and the focus the child
+    # comes back to.
+    #
+    # Started fresh rather than on whatever the four-source phase left playing: that video can be
+    # seconds from its end, and a seek near the end runs into the queue advancing instead of the
+    # playhead moving - which is exactly how this check once read "seek: 135 -> 0" and failed while the
+    # player was behaving correctly. The Bluey card is chosen because the fixture's Bluey videos are
+    # long, so a ten-second seek is nowhere near the end of them.
+    if (Restart-W11App 'before the player controls') {
+        $blueyTitles = Get-W11CardTitles 'ex-bluey'
+        $controlStart = $null
+        if (Find-W11Card $blueyTitles) {
+            Get-W11RowStart $blueyTitles | Out-Null
             Key 'KEYCODE_DPAD_CENTER'
-            $pressesUsed++
-            for ($i = 0; $i -lt 8; $i++) {
-                Start-Sleep -Seconds 1
-                $paused = Get-W11Playing
+            $controlStart = Wait-W11Play 30
+        }
+        if ($controlStart) {
+            $controlId = $controlStart.videoId
+            $controls = @()
+            $pressesUsed = 0
+            $paused = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Key 'KEYCODE_DPAD_CENTER'
+                $pressesUsed++
+                for ($i = 0; $i -lt 8; $i++) {
+                    Start-Sleep -Seconds 1
+                    $paused = Get-W11Playing
+                    if ($paused -and -not $paused.playing) { break }
+                }
                 if ($paused -and -not $paused.playing) { break }
             }
-            if ($paused -and -not $paused.playing) { break }
-        }
-        $controls += "pause after $pressesUsed press(es): playing=$(if ($paused) { $paused.playing } else { 'unreadable' })"
-        $resumed = $null
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            Key 'KEYCODE_DPAD_CENTER'
-            for ($i = 0; $i -lt 8; $i++) {
-                Start-Sleep -Seconds 1
-                $resumed = Get-W11Playing
+            $controls += "pause after $pressesUsed press(es): playing=$(if ($paused) { $paused.playing } else { 'unreadable' })"
+            $resumed = $null
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Key 'KEYCODE_DPAD_CENTER'
+                for ($i = 0; $i -lt 8; $i++) {
+                    Start-Sleep -Seconds 1
+                    $resumed = Get-W11Playing
+                    if ($resumed -and $resumed.playing) { break }
+                }
                 if ($resumed -and $resumed.playing) { break }
             }
-            if ($resumed -and $resumed.playing) { break }
+            $controls += "play: playing=$(if ($resumed) { $resumed.playing } else { 'unreadable' })"
+            $beforeSeek = if ($resumed) { [int]$resumed.positionSec } else { 0 }
+            Key 'KEYCODE_DPAD_RIGHT'
+            Start-Sleep -Seconds 4
+            $afterSeek = Get-W11Playing
+            $sameVideo = $afterSeek -and $afterSeek.videoId -eq $controlId
+            $controls += "seek: $beforeSeek -> $(if ($afterSeek) { $afterSeek.positionSec } else { 'unreadable' })$(if ($sameVideo) { '' } else { ' (on a different video)' })"
+            $controlsOk = ($paused -and -not $paused.playing) -and ($resumed -and $resumed.playing) -and
+                $sameVideo -and ([int]$afterSeek.positionSec -gt $beforeSeek + 5)
+            Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $controlsOk ($controls -join ', ')
+
+            Start-Sleep -Seconds 12
+            $watched = Get-W11Playing
+            $watchedId = if ($watched) { $watched.videoId } else { $controlId }
+            # The fixture names most videos; a cache-created node is not in it, and the player's own
+            # title is the honest fallback rather than an index into nothing.
+            $watchedTitle = if ($w11TitleByVideoId.ContainsKey($watchedId)) { $w11TitleByVideoId[$watchedId] }
+                elseif ($watched) { $watched.title } else { $controlId }
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 4
+            $stillInApp = (ForegroundPackage) -eq $pkg
+            $stopped = Wait-W11NoPlay 15
+            Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' ($stillInApp -and $stopped) `
+                "still in the app: $stillInApp, playback stopped: $stopped"
+            $script:w11Dumps++
+            $facts = Get-W11Focused "w11-backfocus-$($script:w11Dumps)"
+            Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' ($facts -and (Test-W11CardLabel $facts.Focused $watchedTitle)) `
+                "after BACK the focused card is '$(if ($facts) { $facts.Focused } else { 'unreadable' })', and the video just watched is '$watchedTitle'"
+
+            $projection = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+            $cw = if ($projection) { $projection.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1 } else { $null }
+            $cwTitles = if ($projection) { @($projection.shelves | ForEach-Object { $_.title }) } else { @() }
+            $cwOk = $cw -and ($cwTitles.Count -gt 0) -and ($cwTitles[0] -eq 'Continue Watching') -and
+                ($cw.cards[0].videoId -eq $watchedId)
+            Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $cwOk `
+                "first shelf '$(if ($cwTitles.Count) { $cwTitles[0] } else { 'none' })', first card $(if ($cw -and $cw.cards.Count) { $cw.cards[0].videoId } else { 'none' }) - expected the video just watched, $watchedId after $($watched.positionSec)s"
+        } else {
+            Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $false 'no video started from the Bluey row, so the controls could not be exercised'
+            Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $false 'not reached'
         }
-        $controls += "play: playing=$(if ($resumed) { $resumed.playing } else { 'unreadable' })"
-        $beforeSeek = if ($resumed) { [int]$resumed.positionSec } else { 0 }
-        Key 'KEYCODE_DPAD_RIGHT'
-        Start-Sleep -Seconds 4
-        $afterSeek = Get-W11Playing
-        $controls += "seek: $beforeSeek -> $(if ($afterSeek) { $afterSeek.positionSec } else { 'unreadable' })"
-        $controlsOk = ($paused -and -not $paused.playing) -and ($resumed -and $resumed.playing) -and
-            ($afterSeek -and [int]$afterSeek.positionSec -gt $beforeSeek + 5)
-        Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $controlsOk ($controls -join ', ')
-
-        Start-Sleep -Seconds 12
-        $watched = Get-W11Playing
-        $watchedId = if ($watched) { $watched.videoId } else { $lastPlayed.videoId }
-        $watchedTitle = $w11NodeById[(@($manifest.nodes | Where-Object { $_.youtubeVideoId -eq $watchedId })[0].id)].title
-        Key 'KEYCODE_BACK'
-        Start-Sleep -Seconds 4
-        $stillInApp = (ForegroundPackage) -eq $pkg
-        $stopped = Wait-W11NoPlay 15
-        Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' ($stillInApp -and $stopped) `
-            "still in the app: $stillInApp, playback stopped: $stopped"
-        $script:w11Dumps++
-        $facts = Get-W11Focused "w11-backfocus-$($script:w11Dumps)"
-        Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' ($facts -and (Test-W11CardLabel $facts.Focused $watchedTitle)) `
-            "after BACK the focused card is '$(if ($facts) { $facts.Focused } else { 'unreadable' })', and the video just watched is '$watchedTitle'"
-
-        $projection = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
-        $cw = if ($projection) { $projection.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1 } else { $null }
-        $cwTitles = if ($projection) { @($projection.shelves | ForEach-Object { $_.title }) } else { @() }
-        $cwOk = $cw -and ($cwTitles.Count -gt 0) -and ($cwTitles[0] -eq 'Continue Watching') -and
-            ($cw.cards[0].videoId -eq $watchedId)
-        Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $cwOk `
-            "first shelf '$(if ($cwTitles.Count) { $cwTitles[0] } else { 'none' })', first card $(if ($cw -and $cw.cards.Count) { $cw.cards[0].videoId } else { 'none' }) - expected the video just watched, $watchedId after $($watched.positionSec)s"
     } else {
-        Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $false 'no video was playing, so the controls could not be exercised'
+        Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $false 'the app could not be relaunched for the controls'
         Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' $false 'not reached'
         Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' $false 'not reached'
         Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $false 'not reached'
@@ -1149,6 +1228,13 @@ if ($Tier -eq 'example') {
         Key 'KEYCODE_DPAD_CENTER'
         $firstItem = Wait-W11Video $peppaItems[0].youtubeVideoId 30
         Record 'EXAMPLE_LIBRARY_PLAYLIST_FIRST_ITEM' ([bool]$firstItem) `
+
+        # The negative half of the same oracle, and the point of W12's D5: asked while the first of 17
+        # items is still playing, the three questions must NOT answer "the queue ended". An oracle that
+        # cannot tell these apart is the one W11 had, where a dead queue passed as a finished one.
+        $midQueue = Get-W11QueueEnd -TimeoutSec 1 -NoWait
+        Record 'EXAMPLE_LIBRARY_QUEUE_END_ORACLE_NEGATIVE' ($midQueue.Verdict -ne 'ENDED') `
+            "asked mid-queue the oracle answers $($midQueue.Verdict) (it must not answer ENDED while an item is playing)"
             "expected $($peppaItems[0].youtubeVideoId), saw $(if ($firstItem) { $firstItem.videoId } else { 'nothing' })"
 
         # The queue, one remote NEXT at a time, required to be the file's order. The playlist is short
@@ -1168,17 +1254,20 @@ if ($Tier -eq 'example') {
         Record 'EXAMPLE_LIBRARY_PLAYLIST_ADVANCE' ($walked -eq $peppaItems.Count) `
             "$walked of $($peppaItems.Count) items, in the file's order $(if ($walkNotes.Count) { '- ' + ($walkNotes -join '; ') })"
 
-        # The last item: one more NEXT must end the queue rather than start anything else.
         Key 'KEYCODE_MEDIA_NEXT'
-        Start-Sleep -Seconds 3
-        $ended = Wait-W11NoPlay 20
-        $stillInApp = (ForegroundPackage) -eq $pkg
-        Record 'EXAMPLE_LIBRARY_PLAYLIST_FINAL_ITEM' (($walked -eq $peppaItems.Count) -and $ended -and $stillInApp) `
-            "after the last of $($peppaItems.Count) items: playback stopped: $ended, still in the app: $stillInApp"
+        # The last item: one more NEXT must end the queue rather than start anything else. "Ended" is
+        # asked of the app three ways (nothing playing, the app's own "queue finished" line, the player
+        # screen gone) rather than inferred from one empty status, which is what W11 complained about:
+        # a queue that silently died read exactly like a queue that finished.
+        $beforeEnd = Get-W11Playing
+        $endingVerdict = Get-W11QueueEnd 25
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_FINAL_ITEM' (($walked -eq $peppaItems.Count) -and $endingVerdict.Verdict -eq 'ENDED') `
+            "after the last of $($peppaItems.Count) items: verdict=$($endingVerdict.Verdict), the app said the queue finished: $($endingVerdict.SaidFinished), library on screen: $($endingVerdict.OnLibrary)"
         Shot 'w11-playlist-end'
 
         # --- 7. the security boundary, from the child's own card ---------------------------------
         Go-W11Library 'before the security check' | Out-Null
+        Clear-W11Progress
         if (Find-W11Card $peppaTitles) {
             Get-W11RowStart $peppaTitles | Out-Null
             Key 'KEYCODE_DPAD_RIGHT'                 # the row's second card is the unapproved video
@@ -1194,6 +1283,40 @@ if ($Tier -eq 'example') {
             Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' ((-not $playing) -and $messageShown) `
                 "the refusal is on screen: $messageShown"
             Shot 'w11-unapproved-denied'
+
+            # W12, D7: the lead was that a rejected video leaves the *previous* video's surface and title
+            # behind, because the rejected branch never stops or clears the player. Asked here as state,
+            # which is what a remote-only harness can see: no stale title anywhere on screen, BACK leaves
+            # the player and lands on the library, focus comes back to a card that is really there, and
+            # Continue Watching does not gain a row for a video that never played.
+            $staleTitle = $w11NameToNode['EXAMPLE_COCOMELON_VIDEO_1'].title
+            $noStaleTitle = -not ($screen -match [regex]::Escape($staleTitle))
+            Record 'EXAMPLE_LIBRARY_REJECTED_NO_STALE_TITLE' $noStaleTitle `
+                "the last video that played is '$staleTitle' and it is $(if ($noStaleTitle) { 'not' } else { 'STILL' }) on screen while the refusal is shown"
+
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 4
+            $backOnLibrary = Test-W11OnLibraryScreen
+            Record 'EXAMPLE_LIBRARY_REJECTED_BACK_WORKS' ([bool]$backOnLibrary) `
+                "BACK from the refused video leaves the library on screen: $backOnLibrary"
+
+            if ($backOnLibrary) {
+                $script:w11Dumps++
+                $refocus = Get-W11Focused "w11-refocus-$($script:w11Dumps)"
+                $focusBack = $refocus -and (Test-W11AnyCardLabel $refocus.Focused (Get-W11CardTitles 'ex-peppa'))
+                Record 'EXAMPLE_LIBRARY_REJECTED_FOCUS_RETURNS' ([bool]$focusBack) `
+                    "after BACK the focused card is '$(if ($refocus) { $refocus.Focused } else { 'unreadable' })', which is in the Peppa Pig row"
+
+                $afterDenial = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+                $cwAfter = if ($afterDenial) { $afterDenial.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1 } else { $null }
+                $refusedId = $w11NameToNode['EXAMPLE_UNAPPROVED_VIDEO'].youtubeVideoId
+                $cwClean = (-not $cwAfter) -or (@($cwAfter.cards | Where-Object { $_.videoId -eq $refusedId }).Count -eq 0)
+                Record 'EXAMPLE_LIBRARY_REJECTED_CONTINUE_WATCHING_UNCHANGED' ([bool]$cwClean) `
+                    "the video that was refused is not offered by Continue Watching: $cwClean"
+            } else {
+                Record 'EXAMPLE_LIBRARY_REJECTED_FOCUS_RETURNS' $false 'not reached: BACK did not reach the library'
+                Record 'EXAMPLE_LIBRARY_REJECTED_CONTINUE_WATCHING_UNCHANGED' $false 'not reached'
+            }
         } else {
             Record 'EXAMPLE_LIBRARY_UNAPPROVED_DENIED' $false 'the Peppa Pig row was never reached for the security check'
             Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' $false 'not reached'
@@ -1206,6 +1329,129 @@ if ($Tier -eq 'example') {
         Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' $false 'not reached'
     }
 
+
+    # --- 8. W12, D5: an oracle that can tell "the queue ended" from "playback stopped" -------------
+    #
+    # The W11 harness recorded a PASS for either outcome - "playback stopped" or "advanced" - so a
+    # queue that silently died read exactly like a queue that finished, and one place in the old `full`
+    # tier did the same (it treated an empty status as the end). Ending the queue is a *decision the
+    # app makes* and it says so in its own log; stopping is what a dead queue does. Three separate
+    # questions, and only when all three agree is the queue finished:
+    #
+    #   1. nothing is playing any more
+    #   2. the app logged "Approved queue finished"
+    #   3. the player screen is gone and the library is up
+    #
+    # Anything else is reported as what it is, not rounded up to a pass.
+    # --- 9. W12, P2: a saved playhead survives the process being killed ---------------------------
+    #
+    # W11 could only report this as unverified: every test of resume ran inside one process, and the
+    # exit-time save was a coroutine on a scope the screen disposes. This kills the process and asks
+    # the app, after it comes back, where it thinks the child was.
+    #
+    # The video is chosen for being short: the Fixture's first CoComelon song runs about three
+    # minutes, so a quarter of it is a handful of seek presses rather than minutes of waiting.
+    $resumeVideo = $w11NameToNode['EXAMPLE_COCOMELON_VIDEO_1']
+    if (-not (Restart-W11App 'before the restart/resume check')) {
+        Stop-HarnessPrecondition 'the app could not be relaunched for the restart/resume check'
+    }
+    $cocomelonTitles = Get-W11CardTitles 'ex-cocomelon'
+    if (Find-W11Card $cocomelonTitles) {
+        Get-W11RowStart $cocomelonTitles | Out-Null     # the collection card
+        Key 'KEYCODE_DPAD_CENTER'                       # open it
+        Start-Sleep -Seconds 3
+        Key 'KEYCODE_DPAD_DOWN'                         # its first song
+        Key 'KEYCODE_DPAD_CENTER'
+        $started = Wait-W11Video $resumeVideo.youtubeVideoId 30
+        if ($started) {
+            # Seek to roughly a quarter of the way in, then let it play a moment so the playhead is real.
+            for ($i = 0; $i -lt 3; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+            Start-Sleep -Seconds 6
+            $before = Get-W11Playing
+            Key 'KEYCODE_BACK'
+            Start-Sleep -Seconds 5
+            $leftToLibrary = Test-W11OnLibraryScreen
+            $stoppedOnExit = Wait-W11NoPlay 15
+            Log "  watched to $($before.positionSec)s of $($before.durationSec)s, then BACK"
+
+            # The process dies. Nothing in it can save anything after this point.
+            Adb @('shell', "am force-stop $pkg") | Out-Null
+            Start-Sleep -Seconds 3
+            $wasKilled = -not (((Adb @('shell', "ps -A | grep -i $pkg")) -join '') -match $pkg)
+            Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
+            Start-Sleep -Seconds 20
+            $backUp = ((Adb @('shell', "ps -A | grep -i $pkg")) -join '') -match $pkg
+            Record 'EXAMPLE_LIBRARY_RESTART_PROCESS' ($wasKilled -and $backUp) `
+                "process killed: $wasKilled, running again: $backUp (the playhead was saved before the kill: $stoppedOnExit, library was up: $leftToLibrary)"
+
+            # Continue Watching must offer it, at the position it was left at.
+            $afterRestart = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+            $cwShelf = if ($afterRestart) { $afterRestart.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1 } else { $null }
+            $savedAt = if ($before) { [int]$before.positionSec } else { 0 }
+            $cwOk = $cwShelf -and $cwShelf.cards.Count -gt 0 -and $cwShelf.cards[0].videoId -eq $resumeVideo.youtubeVideoId
+            Record 'EXAMPLE_LIBRARY_RESTART_CONTINUE_WATCHING' $cwOk `
+                "the first shelf after the restart offers $(if ($cwShelf -and $cwShelf.cards.Count) { $cwShelf.cards[0].videoId } else { 'nothing' }), expected $($resumeVideo.youtubeVideoId)"
+
+            if ($cwOk) {
+                # Reopened through the route this phase already walked - CoComelon, its collection, its
+                # first song - rather than through the Continue Watching card itself. The card is a
+                # long, emoji-bearing title that the on-screen label does not reproduce exactly, so
+                # looking for it by name is a search that can fail for reasons that have nothing to do
+                # with resume; what is under test is that the *saved playhead* survived the kill and is
+                # offered when the video is opened again, and the shelf offering it has been asserted
+                # above. This is still the remote: DOWN to the row, RIGHT to the card, CENTER.
+                Park-W11Focus
+                $resumeRoute = Find-W11Card $cocomelonTitles
+                if ($resumeRoute) {
+                    Get-W11RowStart $cocomelonTitles | Out-Null     # the collection card
+                    Key 'KEYCODE_DPAD_CENTER'                       # open it
+                    Start-Sleep -Seconds 3
+                    Key 'KEYCODE_DPAD_DOWN'                         # its first song
+                    Key 'KEYCODE_DPAD_CENTER'
+                }
+                $resumed = if ($resumeRoute) { Wait-W11Video $resumeVideo.youtubeVideoId 30 } else { $null }
+                if ($resumed) {
+                    Start-Sleep -Seconds 4
+                    $script:w11Dumps++
+                    $facts = Get-W11Focused "w11-resume-$($script:w11Dumps)"
+                    $offerShown = $facts -and ($facts.Dump -match 'Resume' -or $facts.Dump -match 'Start over')
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' ([bool]$offerShown) `
+                        "the offer to carry on is on screen: $offerShown"
+
+                    # The offer does not gate playback: the video plays from the beginning behind it and
+                    # the child chooses. So "did the playhead survive the kill" cannot be read off the
+                    # position at the moment it opens - that is 0 by design - and is answered by choosing
+                    # Resume and looking at where the playhead lands. (The first assertion here used to
+                    # require ~35s on open and failed a correct app.)
+                    if ($offerShown) {
+                        Key 'KEYCODE_DPAD_CENTER'      # "Resume" is the offer's first choice
+                        Start-Sleep -Seconds 4
+                    }
+                    $now = Get-W11Playing
+                    $nearSaved = $now -and ([Math]::Abs([int]$now.positionSec - $savedAt) -le 25)
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME' ([bool]$resumed -and $nearSaved) `
+                        "on open the video plays from $(if ($now) { $now.positionSec } else { 'nothing' })s; after choosing Resume it is at $(if ($now) { $now.positionSec } else { 'nothing' })s where it was left at ${savedAt}s"
+                    Shot 'w11-restart-resumed'
+                } else {
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'the Continue Watching card could not be focused'
+                    Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
+                }
+            } else {
+                Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'Continue Watching did not offer the video that was being watched'
+                Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
+            }
+        } else {
+            Record 'EXAMPLE_LIBRARY_RESTART_PROCESS' $false 'the fixture video never started, so nothing could be saved'
+            Record 'EXAMPLE_LIBRARY_RESTART_CONTINUE_WATCHING' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'not reached'
+            Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
+        }
+    } else {
+        Record 'EXAMPLE_LIBRARY_RESTART_PROCESS' $false 'the CoComelon row was never reached'
+        Record 'EXAMPLE_LIBRARY_RESTART_CONTINUE_WATCHING' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_RESTART_RESUME' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_RESTART_RESUME_OFFER' $false 'not reached'
+    }
     $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
     Log '=== W11 summary ==='
     $script:results.GetEnumerator() | ForEach-Object { Log ("  {0,-42} {1}" -f $_.Key, $_.Value) }
@@ -1908,7 +2154,15 @@ if ($opened) {
             $endAfter = Wait-QueueAdvance $endBefore ($remaining + 90)
             Log "  end-of-video: was $($endBefore.videoId) at $($endBefore.positionSec)s of $($endBefore.durationSec)s; now $(if ($null -eq $endAfter) { 'playback stopped' } else { "$($endAfter.videoId) at $($endAfter.positionSec)s" })"
             if ($null -eq $endAfter) {
-                Record 'end-of-video-handling' $true "queue ended: playback stopped"
+                # W12, D5: "playback stopped" is not "the queue finished". The app says which one it was
+                # in its own log, so a queue that silently died can no longer be recorded as correct
+                # handling of the end of a video - which is exactly what this assertion used to do.
+                $endLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
+                if ($endLog -match 'Approved queue finished') {
+                    Record 'end-of-video-handling' $true "queue ended: the app reported the approved queue finished"
+                } else {
+                    Record 'end-of-video-handling' $false "playback stopped but the app never reported the queue finishing, so the queue may simply have died"
+                }
             } elseif ($endAfter.videoId -ne $endBefore.videoId) {
                 Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
             } else {

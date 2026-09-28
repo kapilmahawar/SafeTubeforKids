@@ -144,8 +144,9 @@ CatalogHomeFlowTest            13   the flows the home screen observes, against 
 ```
 
 The remaining 337 tests are the Phase 1 suites — auth/PIN/sessions (35), the embedded server's other
-routes (75), playback policy (`AutoQualityTest` 23, `StreamSelectorTest`, `DpadKeyHandlerTest`,
-`SeekStepTest`, `PlaybackCommandBusTest`), time limits (49), relay (60), and the data/util suites.
+routes (75), playback policy (`AutoQualityTest` 23, `StreamSelectorTest`, `PlaybackKeysTest`,
+`SeekStepTest`, `PlaybackCommandBusTest`, `PlaybackControllerTest`), time limits (49), relay (60), and
+the data/util suites.
 
 ### What the important suites actually assert
 

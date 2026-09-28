@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Puts the example kids library on a TV, reproducibly.
  *
  * A parent does this by hand: Settings -> Library file -> choose the file -> Import. This does the
@@ -37,7 +37,6 @@ const flag = (name) => process.argv.indexOf('--' + name) >= 0;
 const HOST = arg('host', '172.16.1.2');
 const PIN = arg('pin', '482913');
 const FILE = arg('file', path.join(__dirname, 'example-kids-library.yaml'));
-const MANIFEST = arg('manifest', path.join(__dirname, 'example-kids-library.json'));
 const BASE = 'http://' + HOST + ':8080';
 const REPLACE = flag('replace-sources');
 const WAIT_SECONDS = Number(arg('wait', '180'));
@@ -70,11 +69,11 @@ async function main() {
 
     // 1. The sources this file's items come from.
     //
-    //    Two places, because one of them cannot say everything: the file itself names the playlist of
-    //    every item it holds, but a *channel* cannot be named by a video node at all - the catalog
-    //    contract validates `youtubePlaylistId` as a playlist id and refuses a `UC…` channel id, so a
-    //    channel-sourced item carries no source in the file. The manifest that ships beside the file
-    //    records those channels, and it is read here so loading the fixture needs no second argument.
+    //    Read from the file itself, which is the only thing that decides what has to be allowed. The
+    //    file can name every kind of source the app supports - a playlist, a channel or a single video
+    //    - because W12 fixed the catalog contract to check an id against all three. (Until then a
+    //    channel could not be written into a video node at all, and this loader had to read the
+    //    manifest for it; the manifest is documentation now, not an input.)
     const sources = [];
     const addSource = (id, url) => {
         if (!id || sources.some((entry) => entry.id === id)) return;
@@ -86,18 +85,7 @@ async function main() {
         });
     };
     read.nodes.forEach((node) => addSource(node.youtubePlaylistId, null));
-    let recordedChannels = 0;
-    if (fs.existsSync(MANIFEST)) {
-        const manifest = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
-        (manifest.sources || []).forEach((source) => {
-            const before = sources.length;
-            addSource(source.playlistId || source.channelId, source.url);
-            if (sources.length > before && !source.playlistId) recordedChannels++;
-        });
-        console.log('sources: %d named by the file, %d more (channels) from %s',
-            read.nodes.some((n) => n.youtubePlaylistId) ? sources.length - recordedChannels : 0,
-            recordedChannels, path.basename(MANIFEST));
-    }
+    console.log('sources named by the file: %d', sources.length);
 
     const existing = await call('GET', '/playlists', bearer);
     const have = new Set((existing.body || []).map((entry) => entry.sourceId));
@@ -184,3 +172,4 @@ main().catch((error) => {
     console.error('FAILED: ' + error.message);
     process.exit(1);
 });
+

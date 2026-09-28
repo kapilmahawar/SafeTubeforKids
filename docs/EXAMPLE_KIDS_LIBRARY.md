@@ -205,19 +205,27 @@ network, but a video that is unavailable in a given region will resolve to nothi
 will say "Couldn't play this video" - which is a resolution failure, not a permission failure. The two
 messages are deliberately different strings in the app.
 
-## Two limitations this fixture ran into
+## The two limitations this fixture ran into, and what became of them
 
-Both are real product behaviour, found while building the fixture, and neither is worked around
-silently:
+Both were real product behaviour found while building the fixture. **W12 fixed both**, and the fixture
+now writes what it always should have:
 
-1. **A catalog file cannot name a channel as a video's source.** The catalog contract validates
-   `youtubePlaylistId` as a *playlist* id, and a channel id (`UC…`) is refused with
-   `Could not find a video, playlist, or channel in this YouTube URL`. So the three Bluey items carry
-   no source in the file, and the loader reads the manifest's `sources` to know the channel has to be
-   allowed. They still play - approval reads the TV's cache, not this field.
-2. **The dashboard then reports those items as unplayable.** `app.js` decides playability from
-   `node.youtubePlaylistId` against a map that only ever contains playlists
-   (`allowedSourceMaps` puts `yt_playlist` sources in `allowed.playlists` and nothing else), so a
-   channel-sourced video shows *"Can't play yet — its YouTube source is not allowed for your child"*
-   even while that channel is an allowed source and the video plays on the TV. Verified on the device
-   during W11: the Bluey items play, the dashboard's row says they cannot.
+1. **A catalog file could not name a channel as a video's source.** The catalog contract validated
+   `youtubePlaylistId` as a *playlist* id and refused a channel id (`UC…`) with `Could not find a
+   video, playlist, or channel in this YouTube URL`, so the three Bluey items carried no source in the
+   file and the loader had to read the manifest for the channel. W12 made that field be checked against
+   the three kinds of source the app can allow - a playlist, a channel or a single video - on a **video**
+   node (a *container* still names a playlist and nothing else, because that is what it imports). The
+   Bluey items now name `UCVzLLZkDuFGAE2BGdBuBNBg` in the file itself, and the loader reads its sources
+   from the file alone.
+2. **The dashboard reported those items as unplayable.** `app.js` decided playability from
+   `node.youtubePlaylistId` against a map that only ever contained playlists, so a channel-sourced video
+   said *"Can't play yet — its YouTube source is not allowed for your child"* while that channel was an
+   allowed source and the video played on the TV. The map now holds every allowed source and the check
+   is made against all of them. Measured in a real browser before and after: the same library went from
+   **"5 videos can't play yet, allow these 4 sources"** to **"1 video can't play yet"** - and the one
+   left is the deliberately unapproved item this fixture exists to test with.
+
+The field is still called `youtubePlaylistId`, which is now a historical name for "the YouTube source
+this came from". Renaming it would be a wire-format change for no behavioural gain.
+

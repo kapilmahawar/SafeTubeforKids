@@ -177,7 +177,7 @@ object CatalogUiProjection {
         val visible = VisibleCatalog(tree)
 
         val shelves = buildList {
-            continueWatchingShelf(resumable, visible)?.let { add(it) }
+            continueWatchingShelf(resumable, visible, catalogTitles(tree))?.let { add(it) }
             categoryShelves(tree, artwork, representatives).forEach { add(it) }
         }
 
@@ -293,14 +293,22 @@ object CatalogUiProjection {
      * what says so: either an enabled video node the tree reaches through enabled containers, or a
      * video belonging to a playlist an enabled container imports. Anything else is dropped, so an empty
      * or fully-disabled catalog yields no shelf at all and the empty state shows instead.
+     *
+     * [catalogTitles] is what the parent calls each video *now*. The saved position comes from the
+     * approval cache, whose title is whatever YouTube called the video when it was resolved, so a video
+     * the parent renamed kept its old name on this shelf - the one place in the app where a name comes
+     * from somewhere other than the catalog. The video id stays the identity either way (it is the key
+     * of the position row, and of the card); only the words are taken from the catalog when the catalog
+     * has any to offer.
      */
     private fun continueWatchingShelf(
         resumable: List<ResumableVideoRow>,
         visible: VisibleCatalog,
+        catalogTitles: Map<String, String>,
     ): CatalogShelfUi? {
         val cards = resumable
             .filter { visible.contains(it.videoId, it.playlistId) }
-            .map { it.toCard() }
+            .map { it.toCard(catalogTitles[it.videoId]) }
         if (cards.isEmpty()) return null
         return CatalogShelfUi(
             id = CONTINUE_WATCHING_ID,
@@ -309,15 +317,37 @@ object CatalogUiProjection {
         )
     }
 
-    private fun ResumableVideoRow.toCard(): CatalogCardUi = CatalogCardUi(
+    private fun ResumableVideoRow.toCard(catalogTitle: String?): CatalogCardUi = CatalogCardUi(
         id = "$CONTINUE_WATCHING_ID:$videoId",
-        title = title,
+        title = catalogTitle?.takeIf { it.isNotBlank() } ?: title,
         kind = CatalogCardKind.CONTINUE_WATCHING,
         thumbnailUrl = thumbnailUrl.takeIf { it.isNotBlank() },
         badgeText = resumeBadge(positionMs, durationMs, durationSeconds),
         videoId = videoId,
         playlistId = playlistId,
     )
+
+    /**
+     * What the catalog calls each of these videos, preferring a node the child can actually reach.
+     *
+     * Two nodes may name the same video - the same episode in two shelves - and only one of them can
+     * label the card; an enabled one wins, because a hidden node is not what the parent is showing.
+     */
+    private fun catalogTitles(tree: List<CatalogNodeEntity>): Map<String, String> {
+        val titles = mutableMapOf<String, String>()
+        val fromEnabled = mutableSetOf<String>()
+        tree.forEach { node ->
+            val videoId = node.youtubeVideoId?.takeIf { it.isNotBlank() } ?: return@forEach
+            if (node.nodeType != CatalogNodeType.VIDEO) return@forEach
+            if (node.enabled) {
+                titles[videoId] = node.title
+                fromEnabled += videoId
+            } else if (videoId !in fromEnabled && videoId !in titles) {
+                titles[videoId] = node.title
+            }
+        }
+        return titles
+    }
 
     /** "12 min left" where the duration is known, otherwise how far in the child already is. */
     private fun resumeBadge(positionMs: Long, durationMs: Long, durationSeconds: Long): String {

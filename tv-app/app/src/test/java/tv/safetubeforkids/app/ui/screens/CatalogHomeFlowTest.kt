@@ -365,9 +365,78 @@ class CatalogHomeFlowTest {
         )
     }
 
+    /**
+     * W12, the resume-row lifecycle: what happens to a saved position when a video leaves the *catalog*.
+     *
+     * The intended lifecycle, and now the pinned one: a saved position belongs to the **approved
+     * cache**, not to the catalog. The catalog is what the parent publishes, so removing a node hides
+     * the card - and nothing else. The row stays, because the video is still approved and the parent
+     * removing a shelf is not the child un-watching something; it is deleted when the video is finished
+     * (at the >=95% rule on the next open), when the child chooses "Start over", and by the destructive
+     * reset. That is also why re-publishing a video brings the child back to where they were instead of
+     * starting again.
+     *
+     * Nothing can grow without bound either: the row is keyed by the video id, so a video that comes
+     * and goes has one row rather than one per appearance, and a row whose video is no longer in the
+     * approved cache is never read (`observeResumable` joins through it).
+     */
     @Test
-    fun aBarelyStartedOrNearlyFinishedVideoIsNotOfferedForResuming() {
+    fun removingAVideoFromTheCatalogKeepsItsPositionAndOnlyHidesItsCard() {
         approveSource("PLapproved")
+        cacheVideos("PLapproved", listOf("vid1" to 0))
+        installCatalog(
+            1L,
+            listOf(
+                category(
+                    "cat-approved", "Approved", 0,
+                    listOf(videoItem("i-vid1", "Twinkle", 0, "vid1")),
+                )
+            ),
+        )
+        runBlocking { db.playbackPositionDao().upsert(PlaybackPositionEntity("vid1", 60_000, 600_000, 200)) }
+        assertEquals("the video is published, so the card is there", 1, uiState().shelves.first().cards.size)
+
+        // The parent takes the video out of the library and the TV syncs version 2.
+        installCatalog(2L, listOf(category("cat-approved", "Approved", 0, emptyList())))
+
+        assertTrue(
+            "nothing is published, so there is no card to offer",
+            uiState().shelves.none { it.title == "Continue Watching" },
+        )
+        assertEquals(
+            "and the playhead is kept: removing a shelf is not un-watching a video",
+            60_000L,
+            runBlocking { db.playbackPositionDao().get("vid1") }?.positionMs,
+        )
+
+        // The parent puts it back under a new name, and the child carries on where they were.
+        installCatalog(
+            3L,
+            listOf(
+                category(
+                    "cat-approved", "Approved", 0,
+                    listOf(videoItem("i-vid1-again", "Twinkle (back)", 0, "vid1")),
+                )
+            ),
+        )
+        val card = uiState().shelves.first { it.title == "Continue Watching" }.cards.single()
+        assertEquals("the video id is still the identity", "vid1", card.videoId)
+        assertEquals(
+            "the child resumes 60s in, not from the start",
+            60_000L,
+            runBlocking { db.playbackPositionDao().get("vid1") }?.positionMs,
+        )
+        assertEquals(
+            "and there is one row, not one per appearance",
+            listOf("vid1"),
+            runBlocking {
+                db.playbackPositionDao().observeResumable(20_000, 95).first().map { it.videoId }
+            },
+        )
+    }
+
+    @Test
+    fun aBarelyStartedOrNearlyFinishedVideoIsNotOfferedForResuming() {        approveSource("PLapproved")
         cacheVideos("PLapproved", listOf("vid-early" to 0, "vid-late" to 1, "vid-good" to 2))
         installCatalog(1L, listOf(category("cat-approved", "Approved", 0, listOf(playlistItem("i-approved", "Approved", 0, "PLapproved")))))
         runBlocking {
@@ -593,10 +662,13 @@ class CatalogHomeFlowTest {
         runBlocking { db.playbackPositionDao().upsert(PlaybackPositionEntity("vidB", 60_000, 600_000, 5)) }
 
         // The video is published because the tree reaches it through an enabled container - no item
-        // names it directly, which is exactly the case W6's tree rule exists for. (The card's title is
-        // the approved cache's, which is what Continue Watching has always shown.)
+        // names it directly, which is exactly the case W6's tree rule exists for. The name is the
+        // catalog's ("Video 2", what the parent called that node), which since W12 is where every card's
+        // words come from; the *position* still comes from the approved cache, which is what this shelf
+        // is for. Before W12 this showed "Cached vidB" - the resolver's title - and a rename was
+        // invisible here while it was visible on every other shelf.
         assertEquals(
-            listOf("Cached vidB"),
+            listOf("Video 2"),
             uiState().shelves.first { it.id.startsWith("shelf-continue-watching") }.cards.map { it.title },
         )
     }

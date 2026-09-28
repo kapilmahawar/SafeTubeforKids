@@ -68,7 +68,7 @@ player.** There is no path from a catalog row to a playing video that skips the 
 |---|---|---|---|
 | **Android entry** | `SafeTubeApp`, `MainActivity`, `ServiceLocator` | Process init, server startup, background work wiring, process-wide singletons | Contain business rules |
 | **UI (child)** | `HomeScreen`, `HomeViewModel`, `CatalogCard`, `AppCard`, `VideoCard`, `CatalogUiState`/`CatalogUiProjection` | Rendering the catalog, focus, D-pad, empty states, turning a card press into a player destination | Perform HTTP; decide permission; touch DAOs or the player directly |
-| **UI (player)** | `TvPlayerScreen`, `PlayerMenu`, `DpadKeyHandler` | Drawing the player and mapping remote keys to controller calls | Hold media state or start playback itself |
+| **UI (player)** | `TvPlayerScreen`, `PlayerMenu`, `PlaybackKeys` | Drawing the player and mapping remote keys to controller calls | Hold media state or start playback itself |
 | **UI (parent)** | `ConnectScreen`, `SettingsScreen`, `LockScreen` | PIN/QR display, device settings, time-limit lock screen | Approve content from the TV |
 | **Navigation** | `AppNavigation` (`NavHost`) | The five destinations | Instantiate a player around authorization |
 | **Playback** | `PlaybackController` | Authorization call, queue, play/pause, seek, watch-time accounting, resume persistence, menus, media3 wiring | Be bypassed by any other caller of `VideoResolver` |

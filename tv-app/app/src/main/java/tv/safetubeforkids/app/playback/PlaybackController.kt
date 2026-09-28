@@ -86,6 +86,16 @@ class PlaybackController(
     private val scope: CoroutineScope,
     private val onExit: () -> Unit,
     private val onLocked: (String) -> Unit,
+    /**
+     * The media pipeline and the resolver are injectable so that everything about playback which is
+     * *not* media can be tested: which video is current, what the queue does at its boundaries, what a
+     * withdrawn source does to a queue built before it was withdrawn, and which row a playhead is
+     * saved against. Production passes neither and gets exactly what it always had - an ExoPlayer
+     * built here and the real resolver - while `PlaybackControllerTest` passes a stand-in player whose
+     * playhead it controls and a resolver it can fail on purpose.
+     */
+    injectedPlayer: ExoPlayer? = null,
+    private val resolveMedia: suspend (String) -> ResolvedMedia? = { VideoResolver.resolve(it) },
 ) {
     /**
      * Owned here so Auto quality can ask what the connection has actually delivered. The same
@@ -93,7 +103,7 @@ class PlaybackController(
      */
     private val bandwidthMeter = DefaultBandwidthMeter.Builder(context).build()
 
-    val player: ExoPlayer = ExoPlayer.Builder(context)
+    val player: ExoPlayer = injectedPlayer ?: ExoPlayer.Builder(context)
         .setBandwidthMeter(bandwidthMeter)
         .build()
         .apply { playWhenReady = true }
@@ -298,7 +308,13 @@ class PlaybackController(
         isQualityReopen: Boolean = false,
     ) {
         errorMessage = null
-        val media = VideoResolver.resolve(videoId)
+        // Which video this controller is on, recorded here because *every* path that starts or moves
+        // playback goes through this one function: start(), next(), previous(), a retry, the quality
+        // reopens and the DASH fallback. This is the id a playhead is saved against, so a queue move
+        // that left it behind saved the new video's position into the previous video's resume row -
+        // and then read it back as that video's resume point.
+        currentVideoId = videoId
+        val media = resolveMedia(videoId)
         if (media == null) {
             // YouTube throttles anonymous access from an IP that has asked too often. That passes,
             // so it must not be reported the same way as a video that cannot be played at all.
@@ -442,11 +458,35 @@ class PlaybackController(
         }
     }
 
+    /**
+     * The queue as it is *now*, and whether anything in it is still approved.
+     *
+     * The queue is a snapshot taken when playback started, and a parent can withdraw a source while a
+     * child is watching. A snapshot is not permission: an approved queue is a list of videos that were
+     * approved *when it was built*, so every move onto a queue item asks the same two tables again
+     * through [PlaybackAuthorization.approvedQueue] - the single authorization boundary, unchanged.
+     * A withdrawn video therefore simply is not in the queue any more when the queue is next read,
+     * and the item after it becomes reachable instead. Nothing here grants anything; it can only
+     * refuse, which is why it is safe for a revoked video to disappear mid-session.
+     *
+     * The current video is not interrupted by a withdrawal: this runs when playback *moves*, and
+     * there is no revocation watcher (documented in `docs/SECURITY_MODEL.md`).
+     */
+    private suspend fun refreshQueue(): Boolean {
+        val refreshed = PlaybackAuthorization.approvedQueue(db, sourceId)
+        if (refreshed.isEmpty()) return false
+        queue = refreshed
+        index = queue.indexOfFirst { it.videoId == currentVideoId }
+            .takeIf { it >= 0 }
+            ?: index.coerceIn(0, queue.size - 1)
+        return true
+    }
+
     fun next() {
         scope.launch {
             endCurrentEvent(100)
-            val nextIndex = index + 1
-            if (nextIndex < queue.size) {
+            val nextIndex = if (refreshQueue()) index + 1 else -1
+            if (nextIndex in queue.indices) {
                 index = nextIndex
                 updateQueueLabel()
                 prepare(queue[nextIndex].videoId)
@@ -460,7 +500,7 @@ class PlaybackController(
     fun previous() {
         scope.launch {
             endCurrentEvent(0)
-            val previousIndex = index - 1
+            val previousIndex = if (refreshQueue()) index - 1 else -1
             if (previousIndex >= 0) {
                 index = previousIndex
                 updateQueueLabel()

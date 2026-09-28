@@ -211,4 +211,26 @@ class PlaylistImportResolutionTest {
         assertNotNull(tv.safetubeforkids.app.util.ContentSourceParser.playlistIdProblem(""))
         assertNotNull("an auto-generated mix is not a playlist", tv.safetubeforkids.app.util.ContentSourceParser.playlistIdProblem("RDmix"))
     }
+
+    /**
+     * W12, D4: a catalog node records **where its video came from**, and the app approves content by
+     * source of three kinds - a playlist, a channel, or a single video - so that field is checked
+     * against all three. A channel id is a source, not a malformed playlist id; a handle is neither,
+     * because the app stores channels by their `UC…` id and a handle would never match one.
+     */
+    @Test
+    fun aSourceIdIsAcceptedForEveryKindOfSourceTheAppCanAllow() {
+        assertNull(tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem("PLb8WrhcvGhOjFm2xrfaUZq3ytKuWQL5wE"))
+        assertNull(tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem("UCVzLLZkDuFGAE2BGdBuBNBg"))
+        assertNull(tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem("DuXwFlL8Usk"))
+
+        assertNotNull(
+            "a handle is not an id",
+            tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem("@BlueyOfficialChannel"),
+        )
+        assertNotNull(tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem(""))
+        assertNotNull(tv.safetubeforkids.app.util.ContentSourceParser.sourceIdProblem("not an id at all"))
+        // (`RDmix` is refused as a *playlist*, and that is the rule that matters for a container. As a
+        //  source id it is only ever a label on a video: approval reads the cache, never this field.)
+    }
 }

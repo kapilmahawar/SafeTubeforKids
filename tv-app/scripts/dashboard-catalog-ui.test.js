@@ -283,6 +283,35 @@ test('“cannot play yet” warns only about what the child can actually see', (
         'a hidden video is not a problem to report');
 });
 
+// W11 found the dashboard calling a channel-sourced video unplayable while the TV played it: the
+// source map held playlists only, so a video whose source is a channel matched nothing. The app can
+// allow three kinds of source, and the field a video node carries records which one it came from, so
+// the check has to be made against all of them.
+test('a video is playable when the source it names is allowed, whatever kind of source that is', () => {
+    const app = code('app.js');
+    const maps = app.slice(app.indexOf('function allowedSourceMaps'), app.indexOf('function sourceNameFor'));
+    const canPlay = app.slice(app.indexOf('function canPlay'), app.indexOf('function sourceNameFor'));
+
+    assert.match(maps, /sources\[source\.sourceId\] = source;/,
+        'every allowed source is in the map, not just playlists');
+    assert.doesNotMatch(maps, /sourceType === 'yt_playlist'/,
+        'and nothing narrows it to playlists again');
+    assert.match(canPlay, /allowed\.sources\[node\.youtubePlaylistId\]/,
+        'a video node is playable when the source it names is allowed');
+    assert.match(canPlay, /allowed\.videos\[node\.youtubeVideoId\]/,
+        'or when the video itself was allowed on its own');
+});
+
+test('the row says which source a video came from, including when that source is a channel', () => {
+    const app = code('app.js');
+    const block = app.slice(app.indexOf('function sourceNameFor'), app.indexOf('function nodeMeta'));
+
+    assert.match(block, /allowedSourceMaps\(\)\.sources/, 'the name is looked up among allowed sources');
+    assert.match(block, /source\.displayName \|\| source\.sourceId/, 'and falls back to the id');
+    assert.doesNotMatch(block, /sourceType === 'yt_playlist'/,
+        'a channel-sourced video is no longer told its source is missing');
+});
+
 test('a collection never offers to hold another collection', () => {
     const app = code('app.js');
     const builder = app.slice(app.indexOf('function addActions(parent)'), app.indexOf('function unplayableHere'));
@@ -695,8 +724,8 @@ test('importing shows what the file would do before anything is written', () => 
     assert.match(block, /CatalogYaml\.readDocument\(text\)/, 'the file is validated by the format model');
     assert.match(block, /if \(!read\.ok\) \{[\s\S]*?openImportProblems\(file\.name, read\.problems\);/,
         'a refused file is explained, not imported');
-    assert.match(block, /CatalogYaml\.preview\(read\.nodes, state\.session\.nodes, allowed\.playlists\)/,
-        'the preview compares the file with the library on screen');
+    assert.match(block, /CatalogYaml\.preview\(read\.nodes, state\.session\.nodes, allowed\.sources\)/,
+        'the preview compares the file with the library on screen, against every kind of allowed source');
     assert.match(block, /await askImport\(file\.name, read, view\)/, 'the parent is asked');
     assert.match(block, /if \(confirmed\) await applyImport\(read\.nodes\)/,
         'and nothing is applied unless they say yes');

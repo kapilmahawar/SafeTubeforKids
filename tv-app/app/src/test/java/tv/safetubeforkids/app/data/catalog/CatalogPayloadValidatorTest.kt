@@ -131,6 +131,73 @@ class CatalogPayloadValidatorTest {
         )
     }
 
+    // ------------------------------------------- a node may name any kind of source (W12, D4)
+
+    /**
+     * The three kinds of source SafeTube can allow. A video node records where it came from, and that
+     * may be a playlist, a whole channel or a single video - W11 loaded a channel into a file and was
+     * refused, which is how the dashboard ended up calling playable videos unplayable while the TV
+     * played them. Naming a channel here is not a weaker check: it is still round-tripped through the
+     * parser as the kind of source it claims to be.
+     */
+    @Test
+    fun aVideoMayNameAPlaylistAChannelOrASingleVideoAsItsSource() {
+        listOf(
+            "PLb8WrhcvGhOjFm2xrfaUZq3ytKuWQL5wE",
+            "UCVzLLZkDuFGAE2BGdBuBNBg",
+            "DuXwFlL8Usk",
+        ).forEach { sourceId ->
+            assertValid(
+                listOf(
+                    category(position = 0),
+                    video(id = "i-source", position = 0, playlistId = sourceId),
+                )
+            )
+        }
+    }
+
+    @Test
+    fun aContainerStillImportsAPlaylistAndNothingElse() {
+        // The field means "where this came from" on a video and "what this imports" on a container, and
+        // only the second is playlist-only: the ingest resolves a container's source as a playlist, so
+        // a channel there would be a container that can never load anything.
+        listOf("UCVzLLZkDuFGAE2BGdBuBNBg", "DuXwFlL8Usk").forEach { notAPlaylist ->
+            val problems = reasons(
+                listOf(category(position = 0), container(id = "i-bluey", position = 0, playlistId = notAPlaylist))
+            )
+            assertTrue(
+                "a container must name a playlist, got $problems",
+                problems.any { it.contains("youtubePlaylistId") },
+            )
+        }
+    }
+
+    @Test
+    fun aSourceThatIsNotAnyKindOfYouTubeSourceIsStillRefused() {
+        val reasons = reasons(
+            listOf(
+                category(position = 0),
+                video(id = "i-source", position = 0, playlistId = "@BlueyOfficialChannel"),
+            )
+        )
+        assertTrue(
+            "a handle is not an id: the app stores channels by their UC… id, so a handle would " +
+                "never match an allowed source. Got: $reasons",
+            reasons.any { it.contains("not a usable YouTube playlist, channel or video id") },
+        )
+    }
+
+    @Test
+    fun aBlankSourceIdIsStillRefused() {
+        val reasons = reasons(
+            listOf(
+                category(position = 0),
+                video(id = "i-source", position = 0, playlistId = "   "),
+            )
+        )
+        assertTrue("blank is not a source: $reasons", reasons.any { it.contains("must not be blank") })
+    }
+
     @Test
     fun aRecursiveTreeOfThreeLevelsIsValid() {
         assertValid(

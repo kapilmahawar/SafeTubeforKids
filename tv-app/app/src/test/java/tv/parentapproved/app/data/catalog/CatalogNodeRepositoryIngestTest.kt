@@ -174,9 +174,59 @@ class CatalogNodeRepositoryIngestTest {
         assertTrue("provenance is kept on every imported video", episodes.all { it.youtubePlaylistId == playlist })
     }
 
+    /**
+     * W12, the playlist/cache invariant, pinned as a security property rather than a layout one.
+     *
+     * A container backed by an approved playlist is filled from the **approved cache**, so it can list a
+     * video the catalog document never named - the W11 fixture's ChuChu shelf names 3 videos and shows
+     * 200. That is not an exposure: a video is in that cache *because* the parent allowed the source it
+     * came from, and every one of them still passes `PlaybackAuthorization`, which reads the cache and
+     * the allowed sources and nothing else. What this pins is that "being in a container" is not a
+     * permission either - the tree can be full of nodes while the gate refuses all of them.
+     */
     @Test
-    fun aPlaylistWithNothingCachedBecomesAnEmptyContainer() = runBlocking {
-        seedCategory("cat-music", "Music", 0)
+    fun everyVideoAContainerGrowsToIsStillIndividuallyApproved() = runBlocking {
+        seedCategory("cat-cartoon", "Cartoon", 0)
+        seedItem("i-cocomelon", "cat-cartoon", ContentItemType.PLAYLIST, "Cocomelon", 0, playlistId = playlist)
+        seedCachedVideos("vidA", "vidB", "vidC", "vidD")
+        db.channelDao().insert(
+            tv.safetubeforkids.app.data.cache.ChannelEntity(
+                sourceType = "yt_playlist",
+                sourceId = playlist,
+                sourceUrl = "https://www.youtube.com/playlist?list=$playlist",
+                displayName = "Cocomelon",
+            )
+        )
+
+        ingest()
+
+        val shown = repo.childrenOf("i-cocomelon")
+        assertEquals("the container grew to the whole approved cache", 4, shown.size)
+        shown.forEach { episode ->
+            val approval = tv.safetubeforkids.app.playback.PlaybackAuthorization
+                .authorize(db, episode.youtubeVideoId!!)
+            assertTrue(
+                "${episode.youtubeVideoId} is listed in a container and must be approved",
+                approval is tv.safetubeforkids.app.playback.PlaybackApproval.Approved,
+            )
+        }
+
+        // Withdraw the source: every one of those videos is refused, and the container still lists them.
+        // The gate, not the container, is what decides - which is the whole point of the invariant.
+        db.channelDao().deleteAll()
+        assertTrue(
+            "a withdrawn source refuses every video in the container",
+            shown.all { episode ->
+                val approval = tv.safetubeforkids.app.playback.PlaybackAuthorization
+                    .authorize(db, episode.youtubeVideoId!!)
+                approval !is tv.safetubeforkids.app.playback.PlaybackApproval.Approved
+            },
+        )
+        assertEquals("and the tree is untouched by an approval change", 4, repo.childrenOf("i-cocomelon").size)
+    }
+
+    @Test
+    fun aPlaylistWithNothingCachedBecomesAnEmptyContainer() = runBlocking {        seedCategory("cat-music", "Music", 0)
         seedItem("i-nursery", "cat-music", ContentItemType.PLAYLIST, "Nursery Songs", 0, playlistId = "PLnursery")
 
         ingest()

@@ -217,6 +217,25 @@ object ContentSourceParser {
     fun playlistIdProblem(id: String): String? = idProblem(id, SourceType.YT_PLAYLIST)
 
     /**
+     * Null when [id] is a usable YouTube **source** id: a playlist, a channel or a single video.
+     *
+     * SafeTube approves content by source, and all three kinds are sources it can allow: a curated
+     * playlist, a whole channel, or one video pasted on its own. What a catalog node records is where
+     * its video came from, so that field has to be able to hold any of the three - a channel id is not
+     * a malformed playlist id, it is a different kind of source.
+     *
+     * The rule itself is unchanged: the id is turned into its canonical URL, parsed back, and must
+     * survive the round trip unchanged *as the same kind of source*. Only the set of kinds it is
+     * asked about has grown, and every one of them is still checked the same way, so nothing here
+     * accepts an id the resolver would not. A channel *handle* (`@name`) is not a source id either:
+     * the app stores channels by their `UC…` id, and this is what keeps the two from being confused.
+     */
+    fun sourceIdProblem(id: String): String? {
+        SourceType.entries.forEach { type -> if (idProblem(id, type) == null) return null }
+        return "not a usable YouTube playlist, channel or video id"
+    }
+
+    /**
      * An id that only *looks* like one cannot slip through by being embedded in a URL: the URL is
      * rebuilt from the id, parsed back, and the parsed id must equal what went in. That rejects a
      * blank id, a stray `&`, a channel handle used as a video, and an auto-generated `RD…`/`UU…` list.
@@ -224,6 +243,7 @@ object ContentSourceParser {
     private fun idProblem(id: String, expected: SourceType): String? {
         val url = when (expected) {
             SourceType.YT_PLAYLIST -> "https://www.youtube.com/playlist?list=$id"
+            SourceType.YT_CHANNEL -> "https://www.youtube.com/channel/$id"
             else -> "https://www.youtube.com/watch?v=$id"
         }
         return when (val parsed = parse(url)) {

@@ -98,6 +98,41 @@ enforced by tests.
   permission, and the shelf is built so that it cannot act like it. Selection still goes through the
   gate regardless.
 
+### Authorization at a queue transition, not only at the start (W12)
+
+A queue is a snapshot: `PlaybackAuthorization.approvedQueue(db, sourceId)` is read when playback starts
+and the child then moves through it with NEXT, PREVIOUS or by letting a video end. A parent can withdraw
+a source *while* a child is watching, which raises the question W12 had to answer explicitly rather
+than leave to whichever code path happened to run:
+
+```text
+A approved, B approved, C approved
+A starts playing
+the parent revokes B (or the whole source)
+the child presses NEXT
+```
+
+**The invariant chosen, and now implemented and tested:** *an item must still be authorized when
+playback transitions to it.* A revoked video must never play merely because it was in a list built
+earlier. `next()` and `previous()` therefore re-read the approved queue from the same two tables
+before they move, so a withdrawn video is not in the queue any more and the item after it becomes
+reachable instead. Nothing about this grants anything - re-reading can only shrink the queue - and it
+does not touch `PlaybackAuthorization` itself, which stays the single decision.
+
+Two consequences worth stating plainly:
+
+- **The video that is already playing is not interrupted.** There is no revocation watcher; a parent
+  who withdraws a source mid-episode stops the *next* transition, not the current frame. Interrupting
+  playback from a background thread would be a new mechanism, and W12 deliberately did not add one.
+- **A skipped item is not played, so it gains no history.** The withdrawn video is never prepared, never
+  resolved and never written to `playback_positions`, so it cannot appear in Continue Watching.
+
+Evidence: `PlaybackControllerTest` (`anItemWithdrawnWhileWatchingIsSkippedRatherThanPlayed`,
+`withdrawingTheLastItemEndsTheQueueRatherThanPlayingIt`,
+`withdrawingTheWholeSourceEndsTheQueueWhenTheChildPressesNext`,
+`aWithdrawnItemLeavesNoContinueWatchingRowBehind`). With the re-read removed, 4 of those 9
+queue/resume tests fail, which is what makes them a regression net rather than a description.
+
 ### What was verified, and how
 
 | Claim | Evidence |

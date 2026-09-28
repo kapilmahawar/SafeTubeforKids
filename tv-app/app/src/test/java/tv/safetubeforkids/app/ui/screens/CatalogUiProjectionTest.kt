@@ -997,6 +997,50 @@ class CatalogUiProjectionTest {
         assertEquals("vid1", card.id.substringAfterLast(':'))
     }
 
+    /**
+     * W12: the parent renames a video, and this shelf kept showing the name YouTube had for it.
+     *
+     * The saved position lives in the approval cache, whose title comes from the resolver, while every
+     * other shelf shows the catalog's own words - so a rename was invisible here and nowhere else. The
+     * video id stays the identity (it keys the position row and the card); the name follows the
+     * catalog, which is what the parent is editing.
+     */
+    @Test
+    fun aRenamedVideoIsListedUnderTheNameTheCatalogGivesItNow() {
+        val beforeRename = build(
+            catalog = catalogPublishingApprovedWithVideo("Twinkle Twinkle"),
+            resumable = listOf(resumable("vid1", "Twinkle Twinkle Little Star (official)")),
+        )
+        assertEquals(
+            "before the rename the catalog's own name is already the one shown",
+            listOf("Twinkle Twinkle"),
+            beforeRename.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }.cards.map { it.title },
+        )
+
+        // The parent renames the node; the saved position is untouched, and the shelf is rebuilt.
+        val afterRename = build(
+            catalog = catalogPublishingApprovedWithVideo("Twinkle, our bedtime song"),
+            resumable = listOf(resumable("vid1", "Twinkle Twinkle Little Star (official)")),
+        )
+        val card = afterRename.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }.cards.single()
+        assertEquals("the current catalog name is what the child sees", "Twinkle, our bedtime song", card.title)
+        assertEquals("and the identity is still the video id", "vid1", card.videoId)
+    }
+
+    @Test
+    fun aHalfWatchedVideoTheCatalogNoLongerNamesKeepsTheNameItWasWatchedUnder() {
+        // A video whose node is not in the tree (the catalog changed under it) still has a position and
+        // a cached title. It is published through the container's playlist, and the name it was watched
+        // under is better than an empty card.
+        val state = build(
+            catalog = catalogPublishingApproved(),
+            resumable = listOf(resumable("vid1", "Twinkle", playlistId = "PLapproved")),
+        )
+
+        val card = state.shelves.first { it.id == CatalogUiProjection.CONTINUE_WATCHING_ID }.cards.single()
+        assertEquals("Twinkle", card.title)
+    }
+
     @Test
     fun aContinueWatchingCardShowsHowMuchIsLeft() {
         val state = build(
@@ -1091,6 +1135,17 @@ class CatalogUiProjectionTest {
         category(
             "cat-approved", "Approved", 0,
             items = listOf(playlist("i-approved", "Approved", 0, playlistId)),
+        ),
+    )
+
+    /** The same shelf, plus a video node of its own, so a rename can be asserted. */
+    private fun catalogPublishingApprovedWithVideo(videoTitle: String) = listOf(
+        category(
+            "cat-approved", "Approved", 0,
+            items = listOf(
+                video("i-approved-video", videoTitle, 0, "vid1"),
+                playlist("i-approved", "Approved", 1, "PLapproved"),
+            ),
         ),
     )
 

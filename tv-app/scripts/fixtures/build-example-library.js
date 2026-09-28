@@ -177,20 +177,18 @@ function collection(id, parentId, title, position, playlistId, videos) {
 /**
  * A video node that came from a *channel*.
  *
- * `youtubePlaylistId` is left null on purpose, and this is a real limitation rather than a choice:
- * the catalog contract validates that field as a playlist id
- * (`CatalogPayloadValidator.youtubeProblems` -> `ContentSourceParser.playlistIdProblem`), so a
- * channel id - `UC…` - is refused there, and a video node has nowhere else to say which source it
- * came from. The channel videos here still play, because playback approval reads the TV's own cache
- * of the allowed source, not this field; but the dashboard's library screen reads *this* field, so it
- * will report them as "Can't play yet" while the channel is in fact allowed (`app.js` `isPlayable`).
- * That is recorded in docs/EXAMPLE_KIDS_LIBRARY.md as a finding, not hidden.
+ * The node names the channel in `youtubePlaylistId`, which is the field that records where a video
+ * came from. W11 could not write it: the catalog contract validated that field as a playlist id, so a
+ * channel id was refused and the fixture had to keep the channel outside the file, in the manifest.
+ * W12 fixed the contract to check an id against the three kinds of source the app can allow - a
+ * playlist, a channel or a single video - so the file can now say what the resolver already knew, and
+ * the dashboard can tell that these videos play.
  */
 function channelVideo(video, id, parentId, position) {
     return node({
         id, parentId, title: video.title, position,
         youtubeVideoId: video.videoId,
-        youtubePlaylistId: null,
+        youtubePlaylistId: SOURCES.blueyChannel.channelId,
     });
 }
 
