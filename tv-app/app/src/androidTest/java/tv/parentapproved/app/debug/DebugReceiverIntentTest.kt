@@ -28,10 +28,21 @@ class DebugReceiverIntentTest {
         val db = CacheDatabase.getInMemoryInstance(context)
         // W10: a credential is created, not generated. The instrument tests install one they know,
         // exactly as the e2e harness does through DEBUG_SET_PIN.
+        //
+        // The session issuer is part of the fixture, and leaving it out is what made
+        // debugSetPin_installsAKnownCredential fail - not any shared state between tests. `validate`
+        // answers with a session or not at all ("a correct PIN is an authentication only if a session
+        // can actually be issued for it"), so a manager without an issuer returns NotConfigured for
+        // every correct PIN, and the assertion that a known PIN validates can never pass. The app wires
+        // this lambda in ServiceLocator, and the sibling auth suites wire it too; this one did not.
+        val sessions = SessionManager()
         ServiceLocator.initForTest(
             db,
-            PinManager(store = InMemoryParentCredentialStore()).also { it.setup(TEST_PIN, TEST_PIN) },
-            SessionManager(),
+            PinManager(
+                store = InMemoryParentCredentialStore(),
+                onPinValidated = { sessions.createSession() ?: "" },
+            ).also { it.setup(TEST_PIN, TEST_PIN) },
+            sessions,
         )
         receiver = DebugReceiver()
     }
@@ -51,8 +62,13 @@ class DebugReceiverIntentTest {
         receiver.onReceive(context, intent)
 
         assertTrue(ServiceLocator.pinManager.isConfigured())
+        // The result is named in the message: an earlier version of this test failed with a bare
+        // AssertionError, which left the actual answer - no session issuer in the fixture - to be guessed
+        // at twice.
+        val result = ServiceLocator.pinManager.validate("135790")
         assertTrue(
-            ServiceLocator.pinManager.validate("135790") is tv.safetubeforkids.app.auth.PinResult.Success,
+            "the PIN the receiver installed should sign in, but validate answered $result",
+            result is tv.safetubeforkids.app.auth.PinResult.Success,
         )
     }
 

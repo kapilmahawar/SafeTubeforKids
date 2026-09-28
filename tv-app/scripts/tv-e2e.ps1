@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Autonomous end-to-end test of SafeTube on a REAL Android TV over ADB.
 
@@ -695,6 +695,38 @@ function ConvertFrom-DumpJson([string]$raw) {
     }
     return $null
 }
+# One uiautomator dump, up to three attempts: an unreadable dump must be reported as unknown, not
+# turned into a missing card.
+function Get-W11Focused([string]$name) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $file = "$name-$attempt"
+        Dump $file
+        $facts = Get-UiFacts (Join-Path $out "$file.xml")
+        if ($facts -and $facts.Focusable.Count -gt 0) { return $facts }
+    }
+    return $null
+}
+# Walks the library downwards until a card with one of these titles is focused, and says which
+# title it found. One dump per press, so the walk cannot pass the target without noticing.
+function Find-W11Card([string[]]$titles, [int]$MaxPresses = 14) {
+    for ($i = 0; $i -le $MaxPresses; $i++) {
+        $script:w11Dumps++
+        $facts = Get-W11Focused "w11-find-$($script:w11Dumps)"
+        if ($facts) {
+            $found = Test-W11AnyCardLabel $facts.Focused $titles
+            if ($found) { return [pscustomobject]@{ Title = $found; Label = $facts.Focused; Presses = $i } }
+        }
+        Key 'KEYCODE_DPAD_DOWN'
+    }
+    return $null
+}
+# From anywhere in a row, the leftmost card: LEFT stops at the row's first card.
+# Focus parked at the top-left of whatever screen is up: every walk below is relative to that, and
+# after a relaunch the app decides for itself where focus starts.
+function Park-W11Focus {
+    for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_UP' }
+    for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_LEFT' }
+}
 function Test-W11Title([string]$got, [string]$want) {
     if ($got -eq $want) { return 'exact' }
     $strip = { param($text) ($text -replace '[^\x20-\x7E]', '') -replace '\s+', ' ' }
@@ -833,17 +865,6 @@ if ($Tier -eq 'example') {
         }
         return $false
     }
-    # One uiautomator dump, up to three attempts: an unreadable dump must be reported as unknown, not
-    # turned into a missing card.
-    function Get-W11Focused([string]$name) {
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            $file = "$name-$attempt"
-            Dump $file
-            $facts = Get-UiFacts (Join-Path $out "$file.xml")
-            if ($facts -and $facts.Focusable.Count -gt 0) { return $facts }
-        }
-        return $null
-    }
     # A title that survives the trip. logcat and the console are a text channel, and an emoji can come
     # back as '?' through no fault of the app, so the comparison is made twice: exactly, and again on
     # what is left once the characters that channel cannot carry are removed. A title that differs in
@@ -880,27 +901,6 @@ if ($Tier -eq 'example') {
         Start-Sleep -Seconds 18
         Clear-W11Progress
         return (ForegroundPackage) -eq $pkg
-    }
-    # Walks the library downwards until a card with one of these titles is focused, and says which
-    # title it found. One dump per press, so the walk cannot pass the target without noticing.
-    function Find-W11Card([string[]]$titles, [int]$MaxPresses = 14) {
-        for ($i = 0; $i -le $MaxPresses; $i++) {
-            $script:w11Dumps++
-            $facts = Get-W11Focused "w11-find-$($script:w11Dumps)"
-            if ($facts) {
-                $found = Test-W11AnyCardLabel $facts.Focused $titles
-                if ($found) { return [pscustomobject]@{ Title = $found; Label = $facts.Focused; Presses = $i } }
-            }
-            Key 'KEYCODE_DPAD_DOWN'
-        }
-        return $null
-    }
-    # From anywhere in a row, the leftmost card: LEFT stops at the row's first card.
-    # Focus parked at the top-left of whatever screen is up: every walk below is relative to that, and
-    # after a relaunch the app decides for itself where focus starts.
-    function Park-W11Focus {
-        for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_UP' }
-        for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_LEFT' }
     }
 
     function Get-W11RowStart([string[]]$titles) {
@@ -1656,27 +1656,73 @@ if (Go-ToLibrary 'before the hierarchy checks') {
             Record 'w6-category-title-not-focusable' ($titleFocusable.Count -eq 0) `
                 "shelf title '$($shelf.title)' is a heading; focusable labels: $($homeFacts.Focusable.Count)"
 
-            # 2. the shelf's cards are focusable, in the configured order
-            $orderedLabels = @()
-            foreach ($card in $shelf.cards) {
-                $orderedLabels += @($homeFacts.Focusable | Where-Object { Test-CardLabel $_ $card.title } | Select-Object -First 1)
-            }
-            $present = @($orderedLabels | Where-Object { $_ })
+            # 2. the shelf's first card is a card, not a heading.
             Record 'w6-subcategory-is-a-card' ($first.kind -eq 'CONTAINER') "first card '$($first.title)' kind=$($first.kind)"
-            Record 'w6-cards-are-focusable' ($present.Count -ge [Math]::Min(2, $shelf.cards.Count)) `
-                "focusable cards on screen: $($present.Count) of $($shelf.cards.Count)"
 
-            # 3. focus the first card with the D-pad alone
+            # 3. focus the first card with the D-pad alone.
+            #
+            # Focus is *polled* for rather than read from one snapshot. Android TV settles focus a frame
+            # or two after the key, so a dump taken immediately can report "focused ''" while the card is
+            # focused a moment later - which is exactly how this check reported a failure against a
+            # perfectly focused row. Each press is followed by a bounded series of dumps, and a failure
+            # says what was on screen, what was focusable and which key was last sent.
+            # Parked at the top of the library and then walked row by row, checking the focused label
+            # after every press. Pressing DOWN a fixed number of times scrolls the library *past* the row
+            # being looked for - a dump contains only what is rendered, so the CoComelon row was no longer
+            # in the hierarchy by the time the old loop had pressed six times, and the check reported
+            # "focused '" against a perfectly focusable row. This walk is the one the example tier uses
+            # to reach all six of its rows.
             $focused = ''
-            for ($press = 0; $press -lt 6; $press++) {
-                Key 'KEYCODE_DPAD_DOWN'
-                Dump "w6-b-focus-$press"
-                $facts = Get-UiFacts (Join-Path $out "w6-b-focus-$press.xml")
-                if (Test-W11CardLabel $facts.Focused $first.title) { $focused = $facts.Focused; break }
+            $lastDpadAction = 'KEYCODE_DPAD_DOWN'
+            Park-W11Focus
+            $walked = Find-W11Card @($first.title)
+            if ($walked) { $focused = $walked.Label }
+            Dump 'w6-b-focus-final'
+            $facts = Get-UiFacts (Join-Path $out 'w6-b-focus-final.xml')
+            if ($focused -eq '') {
+                # Everything a reader needs to tell "the row is not focusable" from "the dump was taken
+                # at the wrong moment" or "the app is not on the screen this check assumes".
+                Log "  W6 focus diagnostics: foreground=$(ForegroundPackage) lastKey=$lastDpadAction"
+                Log "  W6 focus diagnostics: focused='$($facts.Focused)'"
+                Log "  W6 focus diagnostics: focusable=[$((@($facts.Focusable | Where-Object { $_ })) -join ' | ')]"
+                Log "  W6 focus diagnostics: expected card '$($first.title)' of $($shelf.cards.Count) in '$($shelf.title)'"
             }
-            Record 'w6-dpad-reaches-the-first-card' ($focused -ne '') "focused '$focused'"
+            Record 'w6-dpad-reaches-the-first-card' ($focused -ne '') "focused '$focused' after $lastDpadAction"
             if ($focused -ne '') {
                 Log "  D-pad focus: $focused"
+
+                # 2b. the row's cards are reachable with the D-pad.
+                #
+                # This is the W6 check that required every card of a row to be in one dump. A dump holds
+                # what is *rendered*, and a row is not obliged to fit on screen at once - the example
+                # library's CoComelon row holds a collection and a video, of which one may be drawn - so
+                # what is asserted is that the row can be walked: RIGHT moves focus onto another card,
+                # and the label it lands on is one of the cards the app says that row holds. A single-card
+                # row passes, because there is nothing to walk to.
+                $rowTitles = @($shelf.cards | ForEach-Object { $_.title })
+                $moved = ''
+                if ($rowTitles.Count -gt 1) {
+                    Key 'KEYCODE_DPAD_RIGHT'
+                    for ($poll = 0; $poll -lt 8 -and $moved -eq ''; $poll++) {
+                        $snapName = "w6-b-right-$poll"
+                        Dump $snapName
+                        $rightFacts = Get-UiFacts (Join-Path $out "$snapName.xml")
+                        if ($rightFacts.Focused -and ($rightFacts.Focused -ne $focused)) {
+                            $onto = @($rowTitles | Where-Object { Test-W11CardLabel $rightFacts.Focused $_ } | Select-Object -First 1)
+                            if ($onto) { $moved = $rightFacts.Focused }
+                        }
+                        if ($moved -eq '' -and $poll -lt 7) { Start-Sleep -Milliseconds 350 }
+                    }
+                    if ($moved -eq '') {
+                        Log "  W6 row diagnostics: focus after RIGHT stayed '$($rightFacts.Focused)' of [$((@($rightFacts.Focusable | Where-Object { $_ })) -join ' | ')]"
+                    }
+                    # Back to the first card, which the container checks below press.
+                    Key 'KEYCODE_DPAD_LEFT'
+                    Start-Sleep -Milliseconds 500
+                }
+                Record 'w6-cards-are-focusable' (($rowTitles.Count -le 1) -or ($moved -ne '')) `
+                    "the row holds $($rowTitles.Count) card(s); after RIGHT focus is on '$(if ($moved) { $moved } else { 'nothing' })'$(if ($rowTitles.Count -le 1) { ' (a single-card row has nothing to walk to)' } else { '' })"
+
                 if ($first.kind -eq 'CONTAINER') {
                     # 4. Enter opens the container - and must not start playing anything
                     Key 'KEYCODE_DPAD_CENTER'
@@ -1685,24 +1731,43 @@ if (Go-ToLibrary 'before the hierarchy checks') {
                     Record 'w6-container-card-does-not-autoplay' ($null -eq $playingAfterEnter) `
                         $(if ($null -eq $playingAfterEnter) { 'nothing started' } else { "started $($playingAfterEnter.videoId)" })
 
-                    # 5. the container's own children are what is shown
+                    # 5. the container's own children are what is shown.
+                    #
+                    # Compared with the tolerant title match (Test-W11Title) rather than with -eq or a
+                    # regex on the raw text: the children's titles carry emoji, and the logcat/UI paths
+                    # cannot carry those characters intact, so an exact comparison fails on a screen
+                    # that is showing exactly the right thing. The match is still on the *container's
+                    # name* and on its *first child*, both of which must appear, and on this being the
+                    # container's screen rather than the home screen - so opening the wrong container,
+                    # or none, still fails. What is normalised: characters outside printable ASCII are
+                    # dropped and runs of whitespace are collapsed before comparing, which is the same
+                    # rule the example tier uses for the same reason.
                     $children = Get-DebugDump 'DEBUG_DUMP_CONTAINER_UI' "--es container_id $($first.containerId)"
-                    $childModel = $null
-                    if ($children) { try { $childModel = $children | ConvertFrom-Json } catch { $childModel = $null } }
+                    $childModel = ConvertFrom-DumpJson $children
                     $childTitles = @()
-                    if ($childModel) { $childTitles = @($childModel.cards | ForEach-Object { $_.title }) }
+                    $childIds = @()
+                    if ($childModel) {
+                        $childTitles = @($childModel.cards | ForEach-Object { $_.title })
+                        $childIds = @($childModel.cards | ForEach-Object { $_.id })
+                    }
                     Dump 'w6-c-container'
                     $inside = Get-UiFacts (Join-Path $out 'w6-c-container.xml')
                     # Only the cards that fit on screen are in the hierarchy dump, so the check is that
                     # the container's own name and its *first* child are there, and that this is the
                     # container's screen rather than the home screen (which carries the Refresh button).
                     $firstChild = if ($childTitles.Count -gt 0) { $childTitles[0] } else { '' }
-                    $openedChildren = ($childTitles.Count -gt 0) -and
-                        ($inside.Dump -match [regex]::Escape($first.title)) -and
-                        ($inside.Dump -match [regex]::Escape($firstChild)) -and
-                        ($inside.Dump -notmatch 'Refresh')
+                    $screenIsContainer = ($inside.Dump -match [regex]::Escape($first.title)) -or
+                        (@($inside.Focusable | Where-Object { Test-W11Title $_ $first.title -ne 'no' }).Count -gt 0)
+                    $screenHasFirstChild = $childTitles.Count -gt 0 -and
+                        (@($inside.Focusable | Where-Object { (Test-W11Title $_ $firstChild) -ne 'no' }).Count -gt 0)
+                    $openedChildren = ($childTitles.Count -gt 0) -and $screenIsContainer -and
+                        $screenHasFirstChild -and ($inside.Dump -notmatch 'Refresh')
                     Record 'w6-container-opens-its-children' $openedChildren `
-                        "container '$($first.title)' shows its first child '$firstChild' (of $($childTitles.Count))"
+                        "container '$($first.title)' (id $($first.containerId)) shows its first child '$(if ($firstChild) { $firstChild } else { '(none)' })' of $($childTitles.Count) [child ids: $($childIds -join ',')]; on screen: '$($inside.Focused)'"
+                    if (-not $openedChildren) {
+                        Log "  W6 container diagnostics: focusable=[$((@($inside.Focusable | Where-Object { $_ })) -join ' | ')]"
+                        Log "  W6 container diagnostics: the app lists children [$(($childTitles | Select-Object -First 3) -join ' | ')]"
+                    }
                     if ($childTitles.Count -eq 0) {
                         Log '  (the container is empty, so there is nothing to show inside it)'
                     }
