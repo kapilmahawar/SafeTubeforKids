@@ -51,7 +51,7 @@ class RelayConnector(
         shouldReconnect = true
         startTime = clock()
         scope = CoroutineScope(dispatcher + SupervisorJob())
-        AppLogger.log("Relay connecting to ${config.relayUrl}")
+        AppLogger.log("Relay connecting")
         doConnect()
     }
 
@@ -93,7 +93,7 @@ class RelayConnector(
                 state = RelayConnectionState.CONNECTED
                 currentBackoffMs = 1000 // reset backoff on successful connect
                 startHeartbeat(ws)
-                AppLogger.success("Relay connected to ${config.relayUrl}")
+                AppLogger.success("Relay connected")
             }
 
             override fun onMessage(ws: WebSocket, text: String) {

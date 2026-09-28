@@ -515,8 +515,8 @@ rather than a silent overwrite.
 - **YouTube is an external service.** Playback fetches the video from YouTube, so YouTube sees the
   request as it would from any player. SafeTube adds no tracking of its own, and it is not an official
   YouTube client.
-- **Remote access is off by default** and is inherited upstream code pointing at infrastructure this
-  fork does not run (see [Known limitations](#known-limitations)).
+- **Remote access is off by default.** It is inherited upstream code that points at a relay service
+  this fork neither runs nor maintains (see [Known limitations](#known-limitations)).
 
 ## Development
 
@@ -641,8 +641,10 @@ README.
   dashboard says what went wrong instead of failing silently.
 - **Multi-track switching reopens the stream** while preserving position, rather than using Media3
   track overrides, because the videos tested so far expose no DASH manifest.
-- **The relay is inherited and unusable.** Remote access points at upstream infrastructure this fork
-  does not run; on-network access to the dashboard is what works. It is off by default.
+- **The relay belongs to the upstream project.** Remote access (the gear on the **Connect Phone**
+  screen) connects to a relay service that comes from the project SafeTube forked from, and this fork
+  neither runs nor maintains it — it can change or disappear without notice. Reaching the dashboard
+  over your own network needs none of it, which is why remote access is off by default.
 - **One device, one family.** SafeTube has no notion of multiple child profiles; the library, the
   limits and the PIN belong to the TV.
 - **Kiosk mode is not parent-facing.** Locking the TV to a whitelist of apps still exists in the app

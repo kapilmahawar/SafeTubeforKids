@@ -273,35 +273,6 @@ fun ConnectScreen(onBack: () -> Unit = {}, onParentAccess: () -> Unit = {}) {
 
                     Spacer(modifier = Modifier.height(16.dp))
 
-                    // Charityware
-                    Text(
-                        text = "SafeTube for Kids is free to use.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = KidTextDim,
-                    )
-                    Text(
-                        text = "If it\u2019s been useful to your family,",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = KidTextDim,
-                    )
-                    Text(
-                        text = "consider supporting loving-kindness meditation.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = KidTextDim,
-                    )
-                    Text(
-                        text = "India: mettavipassana.org/donate",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = KidTextDim,
-                    )
-                    Text(
-                        text = "Worldwide: donate to a Buddhist charity near you.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = KidTextDim,
-                    )
-
-                    Spacer(modifier = Modifier.height(20.dp))
-
                     Button(
                         onClick = onBack,
                         colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
@@ -436,9 +407,9 @@ private fun ConnectSettingsPanel(
         Spacer(modifier = Modifier.height(4.dp))
 
         if (localRelayEnabled) {
-            relayConfig?.let {
-                Text("Relay: ${it.relayUrl}", style = MaterialTheme.typography.bodySmall, color = KidTextDim)
-            }
+            // The relay's address is not shown: it points at the upstream project's infrastructure,
+            // which this fork does not run, and printing that hostname on the TV was the last place the
+            // old project's name appeared on screen. The connection status below is what a parent needs.
             relayState?.let { state ->
                 val statusText = when (state) {
                     RelayConnectionState.CONNECTED -> "Connected"

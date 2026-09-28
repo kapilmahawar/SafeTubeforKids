@@ -58,7 +58,10 @@ fun SettingsScreen(
             .background(KidBackground)
             .padding(OverscanPadding),
     ) {
-        // Left column: settings
+        // One column of settings. The right-hand column that used to sit beside it held third-party
+        // support text inherited from the project SafeTube forked from - it was not SafeTube's, it is
+        // not shown anywhere any more, and this comment stays so that nobody reinstates it. The row
+        // itself stays because it is what applies the screen's padding.
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -162,39 +165,6 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.height(12.dp))
                 LogPanel()
             }
-        }
-
-        Spacer(modifier = Modifier.width(32.dp))
-
-        // Right column: charityware
-        Column(
-            modifier = Modifier
-                .weight(0.4f)
-                .padding(top = 64.dp),
-            verticalArrangement = Arrangement.Top,
-        ) {
-            Text(
-                text = "SafeTube for Kids is free to use.",
-                style = MaterialTheme.typography.bodySmall,
-                color = KidTextDim,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "If it\u2019s been useful to your family, consider supporting loving-kindness meditation.",
-                style = MaterialTheme.typography.bodySmall,
-                color = KidTextDim,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "India: mettavipassana.org/donate",
-                style = MaterialTheme.typography.bodySmall,
-                color = KidTextDim,
-            )
-            Text(
-                text = "Worldwide: donate to a Buddhist charity near you.",
-                style = MaterialTheme.typography.bodySmall,
-                color = KidTextDim,
-            )
         }
     }
 }
