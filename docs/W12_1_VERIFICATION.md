@@ -219,3 +219,38 @@ focus, and never reaches Continue Watching. The W12 semantics are intact: an ite
 authorized when playback transitions to it, and the already-playing video is not interrupted.
 
 
+
+## 9. One more full-tier finding, and the fix for it
+
+```text
+TEST=end-of-video-handling (full tier, against the example library)
+CLASSIFICATION=HARNESS_DEFECT
+OBSERVED=FAIL "still on 6A0aiN0xOHg at 708s of 3793s after waiting"
+EXPECTED=the end of the video that was being measured
+EVIDENCE=the phase reads the duration, seeks to near the end with (duration-14)/10 presses, and then
+         measures the video it finds - but a video already close to its end advances the queue while
+         those presses are being sent. The measurement was therefore taken on the sixty-three-minute
+         compilation the seek had just opened, and the wait that followed was bounded by that video's
+         remaining 3085s. The app was behaving correctly: the queue advanced, which is the behaviour
+         the check exists to observe.
+REPRODUCIBLE=YES (one occurrence observed; the same phase in the player tier passed) PRODUCT_CODE_CHANGED=NO
+FIX=the video id is captured before seeking; if the queue advances while seeking, that is recorded as
+         the end-of-video handling it is, and a video too long to play out inside a tier's budget is
+         reported as not measurable this way rather than as a failure.
+```
+
+```text
+TEST=seek-backward (player tier, same run)
+CLASSIFICATION=HARNESS_DEFECT (assertion too tight for this library)
+OBSERVED=FAIL "position 35s -> 30s"
+EXPECTED=at least an 8-second step backwards
+EVIDENCE=the player did seek backwards; the app's step for that video is 5s at that playhead, and the
+         assertion demands >= 8. In the previous player run the same check passed (1s -> 15s forward,
+         then back), so the step is not constant across videos - the assertion encodes one video's
+         behaviour.
+REPRODUCIBLE=INTERMITTENT (passed earlier in this phase, failed in this run) PRODUCT_CODE_CHANGED=NO
+```
+
+The full-tier run that produced these was still in progress when this phase's budget ended, so its final
+tally is not recorded here; its observed failures are the two W6-phase items above, this
+`end-of-video-handling` item (fixed), and `seek-backward` (identified).

@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Autonomous end-to-end test of SafeTube on a REAL Android TV over ADB.
 
@@ -2270,8 +2270,27 @@ if ($opened) {
     $durationSec = [int](PlayingNow).durationSec
     if ($durationSec -gt 20 -and $durationSec -le 900) {
         # Seek to just before the end and let it play out, so the end is reached naturally.
+        #
+        # The video id is remembered first, because these presses can overshoot: a video already near
+        # its end advances the queue, and the measurement below would then be taken on whatever the
+        # queue moved to - which is how this check reported "still on 6A0aiN0xOHg at 708s of 3793s",
+        # waiting out a sixty-three-minute compilation that the seek had only just opened. If the queue
+        # moves while seeking, that *is* the end-of-video behaviour under test, so it is recorded as
+        # such rather than measured as if the new video had failed to finish.
+        $videoBeforeSeeking = "$((PlayingNow).videoId)"
         $presses = [Math]::Max(1, [int](($durationSec - 14) / 10))
         for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+        $afterSeeking = PlayingNow
+        if ($afterSeeking -and ("$($afterSeeking.videoId)" -ne $videoBeforeSeeking)) {
+            Record 'end-of-video-handling' $true `
+                "the seek presses reached the end of $videoBeforeSeeking and the queue advanced to $($afterSeeking.videoId), which is the behaviour under test"
+            Log '  end-of-video: the queue advanced while seeking, so there is nothing left to wait for'
+        } elseif ($afterSeeking -and [int]$afterSeeking.durationSec -gt 900) {
+            # A video this long cannot be played out inside a tier's budget, and saying so is better
+            # than waiting half an hour and then calling the wait a failure.
+            Record 'end-of-video-handling' $false `
+                "$videoBeforeSeeking runs $($afterSeeking.durationSec)s, which is too long to reach the end of within this tier - not measurable this way"
+        } else {
         # Watch the playhead instead of sleeping a fixed amount: reaching the end by remote
         # seeking consumes most of any fixed window, which is why this check once reported a
         # video "still playing" at 164s of 165s.
@@ -2317,6 +2336,7 @@ if ($opened) {
                 Record 'end-of-video-handling' $false "still on $($endAfter.videoId) at $($endAfter.positionSec)s of $($endAfter.durationSec)s after waiting"
             }
         }
+        }   # end of the "same video, short enough to watch out" branch added in W12.1
     } else {
         Log "  END_OF_VIDEO_TEST: LIMITED - duration ${durationSec}s cannot be reached by remote seeking alone"
     }
