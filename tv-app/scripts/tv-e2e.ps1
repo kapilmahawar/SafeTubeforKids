@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Autonomous end-to-end test of SafeTube on a REAL Android TV over ADB.
 
@@ -1766,6 +1766,34 @@ if (Go-ToLibrary 'before the hierarchy checks') {
                 # and the label it lands on is one of the cards the app says that row holds. A single-card
                 # row passes, because there is nothing to walk to.
                 $rowTitles = @($shelf.cards | ForEach-Object { $_.title })
+
+                # D-pad focus enters a row wherever the app decides, and everything below assumes it is on
+                # the row's *first* card: RIGHT walks from there, and the container checks press CENTER on
+                # it. This is normally already true (measured: "0 LEFT press(es)" when it is), and the loop
+                # below is the bounded correction for when it is not.
+                #
+                # It cannot be made unconditional with a park-then-descend walk: the app restores focus to
+                # the card it last had, so a later descent enters the row on whatever card it remembers,
+                # and a descent that only stops on the first card's title overshoots into the next row
+                # (observed: 3 DOWN presses ending on 'Peppa Pig Tales 2026 ...').
+                $firstTitle = $first.title
+                $backPresses = 0
+                $onFirstCard = Test-W11CardLabel $focused $firstTitle
+                while ((-not $onFirstCard) -and ($backPresses -lt 4)) {
+                    Key 'KEYCODE_DPAD_LEFT'
+                    $backPresses++
+                    $navName = "w6-first-card-$backPresses"
+                    Dump $navName
+                    $navFacts = Get-UiFacts (Join-Path $out "$navName.xml")
+                    if (Test-W11CardLabel $navFacts.Focused $firstTitle) { $onFirstCard = $true }
+                }
+                if ($onFirstCard) {
+                    Log "  W6 row focus is on the row's first card after $backPresses LEFT press(es)"
+                    if ($backPresses -gt 0 -and $navFacts -and $navFacts.Focused) { $focused = $navFacts.Focused }
+                } else {
+                    Log "  W6 row diagnostics: focus is not on the row's first card '$firstTitle' after $backPresses LEFT press(es); it is '$($navFacts.Focused)'"
+                }
+
                 $moved = ''
                 if ($rowTitles.Count -gt 1) {
                     Key 'KEYCODE_DPAD_RIGHT'
@@ -1782,9 +1810,30 @@ if (Go-ToLibrary 'before the hierarchy checks') {
                     if ($moved -eq '') {
                         Log "  W6 row diagnostics: focus after RIGHT stayed '$($rightFacts.Focused)' of [$((@($rightFacts.Focusable | Where-Object { $_ })) -join ' | ')]"
                     }
-                    # Back to the first card, which the container checks below press.
-                    Key 'KEYCODE_DPAD_LEFT'
-                    Start-Sleep -Milliseconds 500
+                    # Back to the first card, which the container checks below press - verified, because an
+                    # unverified single LEFT press leaves focus on the wrong card when the walk moved more
+                    # than one card, and CENTER would then open the wrong thing (or nothing).
+                    #
+                    # This is the step that still fails, and the diagnostics say why: the focused *video*
+                    # card owns an inline player whose controls are focusable, so LEFT from it enters those
+                    # controls rather than moving to the sibling card (observed focus after four LEFT
+                    # presses: '3:04 / 0:01 / Forward 10 seconds / ... / Pause / 5 of 105 / <title>'), and
+                    # the CENTER that follows opens nothing. The row's card membership cannot be tested by
+                    # title here either: the row's second card is a *featured video* card that rotates
+                    # ('Wheels on the Bus Lullaby' with '5 of 105' in one run, 'This is the Way Bedroom'
+                    # with '6 of 105' in the next), so the titles captured from the projection at the start
+                    # of the phase no longer describe what is on screen.
+                    $backPresses = 0
+                    $onFirstCard = Test-W11CardLabel $rightFacts.Focused $firstTitle
+                    while ((-not $onFirstCard) -and ($backPresses -lt 4)) {
+                        Key 'KEYCODE_DPAD_LEFT'
+                        $backPresses++
+                        $navName = "w6-first-card-back-$backPresses"
+                        Dump $navName
+                        $navFacts = Get-UiFacts (Join-Path $out "$navName.xml")
+                        if (Test-W11CardLabel $navFacts.Focused $firstTitle) { $onFirstCard = $true }
+                    }
+                    Log "  W6 row focus returned to the row's first card: $onFirstCard (after $backPresses LEFT press(es), focus '$(if ($navFacts -and $navFacts.Focused) { $navFacts.Focused } else { $rightFacts.Focused })')"
                 }
                 Record 'w6-cards-are-focusable' (($rowTitles.Count -le 1) -or ($moved -ne '')) `
                     "the row holds $($rowTitles.Count) card(s); after RIGHT focus is on '$(if ($moved) { $moved } else { 'nothing' })'$(if ($rowTitles.Count -le 1) { ' (a single-card row has nothing to walk to)' } else { '' })"
