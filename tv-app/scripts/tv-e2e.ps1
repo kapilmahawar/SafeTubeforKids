@@ -85,7 +85,36 @@ function Adb([string[]]$adbArgs) {
         $ErrorActionPreference = $previous
     }
 }
-function Key([string]$code) { Adb @('shell', 'input', 'keyevent', $code) | Out-Null; Start-Sleep -Milliseconds 700 }
+# Every key press goes through here, and a press is only delivered when SafeTube is the focused app.
+#
+# This is not defensive decoration. The TV this runs against is a real living-room device with ZEE5,
+# SonyLIV, Hotstar, JioTV, Shemaroo and others installed. A phase that presses keys while the app is
+# not in front does not fail - it drives the launcher, and a CENTER on a tile *starts another app*,
+# which then receives the rest of the run's input. That is what happened during W12.3: the launch left
+# the launcher focused, the run pressed its way into ZEE5, and everything measured afterwards was the
+# wrong program. When the app is not in front this relaunches it and DROPS the key, so a stray press
+# can neither reach another app nor be spent on a screen the harness is not testing.
+#
+# The check is throttled and targeted so it does not cost a dumpsys per keystroke: at most every few
+# seconds, and always before a key that activates something (CENTER/ENTER/play).
+function Test-WrongAppInFront([string]$keyCode) {
+    $activating = @('KEYCODE_DPAD_CENTER', 'KEYCODE_ENTER', 'KEYCODE_NUMPAD_ENTER', 'KEYCODE_MEDIA_PLAY_PAUSE', 'KEYCODE_BUTTON_A') -contains $keyCode
+    if (-not $activating -and $script:lastForegroundCheck -and ((Get-Date) - $script:lastForegroundCheck).TotalSeconds -lt 4) {
+        return $false
+    }
+    $script:lastForegroundCheck = Get-Date
+    if ((ForegroundPackage) -eq $pkg) { return $false }
+    Log "  NOT delivering ${keyCode}: $(ForegroundPackage) is in front, not $pkg - relaunching the app instead"
+    Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
+    Start-Sleep -Seconds 12
+    $script:wrongAppDrops = $script:wrongAppDrops + 1
+    return $true
+}
+function Key([string]$code) {
+    if (Test-WrongAppInFront $code) { return }
+    Adb @('shell', 'input', 'keyevent', $code) | Out-Null
+    Start-Sleep -Milliseconds 700
+}
 function Shot([string]$name) {
     $device = "/sdcard/$name.png"
     Adb @('shell', "screencap -p $device") | Out-Null
@@ -1666,26 +1695,63 @@ if (Go-ToLibrary 'before the hierarchy checks') {
             # focused a moment later - which is exactly how this check reported a failure against a
             # perfectly focused row. Each press is followed by a bounded series of dumps, and a failure
             # says what was on screen, what was focusable and which key was last sent.
-            # Parked at the top of the library and then walked row by row, checking the focused label
-            # after every press. Pressing DOWN a fixed number of times scrolls the library *past* the row
-            # being looked for - a dump contains only what is rendered, so the CoComelon row was no longer
-            # in the hierarchy by the time the old loop had pressed six times, and the check reported
-            # "focused '" against a perfectly focusable row. This walk is the one the example tier uses
-            # to reach all six of its rows.
+            # 3. focus the category's first card with the D-pad alone, navigating by the row's position in
+            #    the library projection rather than by looking for its title as the walk descends.
+            #
+            #    The projection is the library's own order, so a row's index is known even when that row
+            #    is not on screen - and a dump only contains what is rendered, which is why the previous
+            #    two forms failed: pressing DOWN a fixed number of times scrolls past the row, and walking
+            #    while looking for the title cannot match a row that has already scrolled out of the
+            #    hierarchy. What is pressed is therefore derived from the projection, and every press is
+            #    followed by a bounded poll of the focused card.
+            $rowTitles = @($shelf.cards | ForEach-Object { $_.title })
+            $projectionTitles = @($model.shelves | ForEach-Object { $_.title })
+            $targetRowIndex = [array]::IndexOf($projectionTitles, $shelf.title)
+            if ($targetRowIndex -lt 0) { $targetRowIndex = 0 }
+            Park-W11Focus
             $focused = ''
             $lastDpadAction = 'KEYCODE_DPAD_DOWN'
-            Park-W11Focus
-            $walked = Find-W11Card @($first.title)
-            if ($walked) { $focused = $walked.Label }
-            Dump 'w6-b-focus-final'
-            $facts = Get-UiFacts (Join-Path $out 'w6-b-focus-final.xml')
+            $pressCount = 0
+            $navigation = @()
+            $facts = $null
+            # The allowance is not a fudge: the top bar has focusables of its own (Refresh, Connect
+            # Phone, Settings), so the first DOWN or two move focus *along* the bar before it descends
+            # into the rows - the navigation history shows exactly that ("1:Refresh" then "2:<a card>").
+            # The bound therefore starts from the projection's row index and permits those presses, and
+            # the check still fails if focus lands in a row that is not the target.
+            $maxPresses = $targetRowIndex + 3
+            for ($step = 0; $step -lt $maxPresses -and $focused -eq ''; $step++) {
+                Key 'KEYCODE_DPAD_DOWN'
+                $pressCount++
+                for ($poll = 0; $poll -lt 6 -and $focused -eq ''; $poll++) {
+                    $snapName = "w6-b-focus-$step-$poll"
+                    Dump $snapName
+                    $facts = Get-UiFacts (Join-Path $out "$snapName.xml")
+                    $navigation += "${pressCount}:$($facts.Focused)"
+                    if ($facts.Focused -and (@($rowTitles | Where-Object { Test-W11CardLabel $facts.Focused $_ }).Count -gt 0)) {
+                        $focused = $facts.Focused
+                    } elseif ($poll -lt 5) {
+                        Start-Sleep -Milliseconds 350
+                    }
+                }
+            }
+            if ($focused -eq '' -and -not $facts) { $facts = Get-UiFacts (Join-Path $out 'w6-b-focus-nodump.xml') }
             if ($focused -eq '') {
-                # Everything a reader needs to tell "the row is not focusable" from "the dump was taken
-                # at the wrong moment" or "the app is not on the screen this check assumes".
-                Log "  W6 focus diagnostics: foreground=$(ForegroundPackage) lastKey=$lastDpadAction"
-                Log "  W6 focus diagnostics: focused='$($facts.Focused)'"
-                Log "  W6 focus diagnostics: focusable=[$((@($facts.Focusable | Where-Object { $_ })) -join ' | ')]"
-                Log "  W6 focus diagnostics: expected card '$($first.title)' of $($shelf.cards.Count) in '$($shelf.title)'"
+                # The whole navigation, so a future failure says which press landed where rather than
+                # only that nothing was focused at the end of it.
+                $focusedRow = ''
+                foreach ($candidate in $model.shelves) {
+                    foreach ($card in $candidate.cards) {
+                        if ($facts.Focused -and (Test-W11CardLabel $facts.Focused $card.title)) { $focusedRow = $candidate.title }
+                    }
+                }
+                $visibleRows = @($model.shelves | Where-Object { $row = $_; @($row.cards | Where-Object { $c = $_; @($facts.Focusable | Where-Object { Test-W11CardLabel $_ $c.title }).Count -gt 0 }).Count -gt 0 } | ForEach-Object { $_.title })
+                Log "  W6-C: target_row='$($shelf.title)' target_row_index=$targetRowIndex expected_card='$($first.title)'"
+                Log "  W6-C: current_focused_card='$(if ($facts) { $facts.Focused } else { '' })' current_focused_row='$focusedRow' press_count=$pressCount"
+                Log "  W6-C: navigation_history=[$($navigation -join ' | ')]"
+                Log "  W6-C: visible_rows=[$($visibleRows -join ' | ')]"
+                Log "  W6-C: focusable_elements=[$((@($facts.Focusable | Where-Object { $_ })) -join ' | ')]"
+                Log "  W6-C: foreground=$(ForegroundPackage) lastKey=$lastDpadAction"
             }
             Record 'w6-dpad-reaches-the-first-card' ($focused -ne '') "focused '$focused' after $lastDpadAction"
             if ($focused -ne '') {
@@ -2773,6 +2839,10 @@ if ($script:blocked) { Log 'FINAL: BLOCKED (player features could not be exercis
 if ($script:failures.Count -gt 0) { Log "FINAL: FAIL ($($script:failures -join ', '))"; exit 1 }
 Log 'FINAL: PASS'
 exit 0
+
+
+
+
 
 
 
