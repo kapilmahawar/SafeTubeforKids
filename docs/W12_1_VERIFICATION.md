@@ -254,3 +254,37 @@ REPRODUCIBLE=INTERMITTENT (passed earlier in this phase, failed in this run) PRO
 The full-tier run that produced these was still in progress when this phase's budget ended, so its final
 tally is not recorded here; its observed failures are the two W6-phase items above, this
 `end-of-video-handling` item (fixed), and `seek-backward` (identified).
+
+## 10. Correction: the end-of-video check is NOT MEASURED against the example library
+
+The full-tier run after the fix (`%TEMP%\w121\full5.log`, artifacts
+`test-results/tv/2026-09-28-235551`) ends:
+
+```text
+FINAL: FAIL (w6-cards-are-focusable, w6-dpad-reaches-the-first-card, seek-backward)
+[00:04:55] END_OF_VIDEO_TEST: LIMITED - duration 2327s cannot be reached by remote seeking alone
+```
+
+`end-of-video-handling` is absent from that list, and it is important to say why: **the check did not
+run.** The phase seeks to the end of the video it is playing and only enters the measured path when the
+duration is between 20 s and 900 s; the example library's videos are half-hour to hour-long
+compilations, so the guard sent this run down its "cannot be reached by remote seeking alone" branch. It
+is neither a pass nor a failure - it is unmeasured, and it was unmeasured in the W12 runs too.
+
+That also means the `bcf47a9` fix (the video id is captured before seeking, so an overshoot is recorded
+as the queue advance it is) is **not exercised by that run**: it addresses the case where the guard is
+entered and the seek overshoots - which is exactly what happened in `full4`, where the guard saw a short
+video's duration and the measurement then landed on a 3793 s one. Both paths are real; only one of them
+can occur per run, and the library decides which.
+
+What would make this measurable, and what is left to do:
+
+* drive the phase with a known short video instead of whatever is playing - the canonical fixture already
+  provides one, `EXAMPLE_COCOMELON_VIDEO_1` at 185 s, which is what the example tier's resume and
+  restart tests use; or
+* record the skip as `NOT MEASURED` with its own result name, so a tier that never measured the end of a
+  video cannot be read as one that measured it and was satisfied.
+
+Until then, the end-of-video behaviour is verified by the example tier (which walks a 17-item playlist to
+its last item and asserts the app's own "Approved queue finished" line plus the player leaving the
+screen) and not by the `full` tier.
