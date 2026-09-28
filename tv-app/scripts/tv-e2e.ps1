@@ -32,10 +32,11 @@ param(
     [string]$Adb = '',
     [string]$ApiHost = '',
     [switch]$SkipBuild,
-    [ValidateSet('smoke', 'player', 'full')]
+    [ValidateSet('smoke', 'player', 'full', 'example')]
     [string]$Tier = 'full',
     [switch]$ClearState,
     [switch]$QualityProbe,
+    [string]$Node = 'node',
     [int]$LaunchWaitSec = 25
 )
 
@@ -694,6 +695,527 @@ function Go-ToLibrary([string]$why) {
     return $false
 }
 
+# ---------------------------------------------------------------- W11: the example kids library
+#
+# One fixture, loaded and then verified from both ends: the catalog file in
+# `scripts/fixtures/example-kids-library.yaml` and what the TV actually stored, draws, focuses and
+# plays. The library is loaded first (so the tier is reproducible on its own), then every claim is
+# checked against the app - its own debug projection, its own Room rows, the status API, the screen
+# itself - and every key that navigates is a remote key. No touch input is used anywhere here.
+#
+# The expectations are not written into this script twice: they are read from the fixture's manifest,
+# which is generated from what YouTube actually returned. A title that changes upstream is therefore
+# reported as a difference between the file and the TV, not silently tolerated.
+if ($Tier -eq 'example') {
+    $fixtureDir = Join-Path $PSScriptRoot 'fixtures'
+    $fixtureYaml = Join-Path $fixtureDir 'example-kids-library.yaml'
+    $fixtureJson = Join-Path $fixtureDir 'example-kids-library.json'
+
+    foreach ($required in @($fixtureYaml, $fixtureJson)) {
+        if (-not (Test-Path $required)) {
+            Stop-HarnessPrecondition "the example library fixture is missing: $required"
+        }
+    }
+    $manifest = Get-Content $fixtureJson -Raw -Encoding UTF8 | ConvertFrom-Json
+    # The fixture's titles are the real ones, and the real ones contain emoji. PowerShell 5.1 decodes
+    # a native command's output with the console code page unless it is told otherwise, which turns
+    # every emoji in a dump into "?" and makes a correct TV look like it stored the wrong title. This
+    # block therefore speaks UTF-8 end to end.
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding = [System.Text.Encoding]::UTF8
+
+    $w11NodeById = @{}
+    $w11NameToNode = @{}
+    $w11Children = @{}
+    foreach ($n in $manifest.nodes) {
+        $w11NodeById[$n.id] = $n
+        if ($n.parentId) {
+            if (-not $w11Children.ContainsKey($n.parentId)) { $w11Children[$n.parentId] = @() }
+            $w11Children[$n.parentId] += $n
+        }
+    }
+    foreach ($item in $manifest.items) { $w11NameToNode[$item.name] = $item }
+    Log "=== W11: the example kids library ($($manifest.nodeCount) nodes, generated $($manifest.generated)) ==="
+
+    # logcat keeps about 4 KB of a single log entry, so a dump of a whole 46-node library arrives cut
+    # in half. Closing the brackets of the longest prefix that is still well-formed turns that into
+    # "the part that fits", which is what the assertions below are written against - and the payloads
+    # that must be complete (one container, one screen) are small enough to arrive whole.
+    function ConvertFrom-DumpJson([string]$raw) {
+        if (-not $raw) { return $null }
+        try { return $raw | ConvertFrom-Json } catch { }
+        for ($cut = $raw.Length; $cut -gt 2; $cut--) {
+            if ($raw[$cut - 1] -ne '}' -and $raw[$cut - 1] -ne ']') { continue }
+            $candidate = $raw.Substring(0, $cut)
+            $stack = New-Object System.Collections.Stack
+            $inString = $false
+            for ($i = 0; $i -lt $candidate.Length; $i++) {
+                $ch = $candidate[$i]
+                if ($ch -eq '"' -and ($i -eq 0 -or $candidate[$i - 1] -ne '\')) { $inString = -not $inString; continue }
+                if ($inString) { continue }
+                if ($ch -eq '{' -or $ch -eq '[') { $stack.Push($ch) }
+                elseif ($ch -eq '}' -or $ch -eq ']') { if ($stack.Count) { $stack.Pop() | Out-Null } }
+            }
+            if ($stack.Count -eq 0) { continue }
+            $repaired = $candidate
+            while ($stack.Count -gt 0) { $repaired += if ($stack.Pop() -eq '{') { '}' } else { ']' } }
+            try { return $repaired | ConvertFrom-Json } catch { }
+        }
+        return $null
+    }
+
+    # The dumps are addressed to the receiver component explicitly: a package-scoped implicit
+    # broadcast is not always delivered after a reset, which is a harness failure that looks like an
+    # app failure.
+    function Get-W11Dump([string]$action, [string]$extra = '') {
+        Adb @('logcat', '-c') | Out-Null
+        $command = "am broadcast -a $pkg.$action -n $pkg/.debug.DebugReceiver"
+        if ($extra) { $command = "$command $extra" }
+        Adb @('shell', $command) | Out-Null
+        Start-Sleep -Seconds 3
+        $lines = Adb @('logcat', '-d', '-s', 'SafeTube-Intent')
+        $text = ($lines | ForEach-Object { if ($_ -match 'D SafeTube-Intent: (.*)$') { $Matches[1] } else { $_ } }) -join ''
+        $start = $text.IndexOfAny([char[]]@('[', '{'))
+        if ($start -lt 0) { return $null }
+        return $text.Substring($start)
+    }
+    function Get-W11Playing {
+        $state = ApiState
+        if ($state -and $state.currentlyPlaying) { return $state.currentlyPlaying }
+        return $null
+    }
+    function Wait-W11Play([int]$TimeoutSec = 30) {
+        for ($i = 0; $i -lt $TimeoutSec; $i++) {
+            $playing = Get-W11Playing
+            if ($playing) { return $playing }
+            Start-Sleep -Seconds 1
+        }
+        return $null
+    }
+    function Wait-W11Video([string]$videoId, [int]$TimeoutSec = 30) {
+        for ($i = 0; $i -lt $TimeoutSec; $i++) {
+            $playing = Get-W11Playing
+            if ($playing -and $playing.videoId -eq $videoId) { return $playing }
+            Start-Sleep -Seconds 1
+        }
+        return $null
+    }
+    function Wait-W11NoPlay([int]$TimeoutSec = 20) {
+        for ($i = 0; $i -lt $TimeoutSec; $i++) {
+            if (-not (Get-W11Playing)) { return $true }
+            Start-Sleep -Seconds 1
+        }
+        return $false
+    }
+    # One uiautomator dump, up to three attempts: an unreadable dump must be reported as unknown, not
+    # turned into a missing card.
+    function Get-W11Focused([string]$name) {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $file = "$name-$attempt"
+            Dump $file
+            $facts = Get-UiFacts (Join-Path $out "$file.xml")
+            if ($facts -and $facts.Focusable.Count -gt 0) { return $facts }
+        }
+        return $null
+    }
+    # A title that survives the trip. logcat and the console are a text channel, and an emoji can come
+    # back as '?' through no fault of the app, so the comparison is made twice: exactly, and again on
+    # what is left once the characters that channel cannot carry are removed. A title that differs in
+    # its words fails either way.
+    function Test-W11Title([string]$got, [string]$want) {
+        if ($got -eq $want) { return 'exact' }
+        $strip = { param($text) ($text -replace '[^\x20-\x7E]', '') -replace '\s+', ' ' }
+        if ((& $strip $got).Trim() -eq (& $strip $want).Trim()) { return 'ascii' }
+        return 'no'
+    }
+    function Test-W11CardLabel([string]$label, [string]$title) {
+        if (Test-CardLabel $label $title) { return $true }
+        if (-not $label -or -not $title) { return $false }
+        foreach ($part in ($label -split ' / ')) {
+            if ((Test-W11Title $part.Trim() $title) -ne 'no') { return $true }
+        }
+        return $false
+    }
+    function Test-W11AnyCardLabel([string]$label, [string[]]$titles) {
+        foreach ($title in $titles) { if (Test-W11CardLabel $label $title) { return $title } }
+        return $null
+    }
+    # How many uiautomator dumps this block takes, so a run that is slow can be explained from its log.
+    $script:w11Dumps = 0
+
+    function Go-W11Library([string]$why) {
+        if (Go-ToLibrary $why) { Start-Sleep -Seconds 2; return $true }
+        return $false
+    }
+    # A fresh launch, which is the only focus state this block assumes: the home screen composed from
+    # the top, with focus on its own first card. Everything below walks *down* from there and verifies
+    # at each step which card is focused, because a computed number of DOWN presses is not reliable -
+    # measured, not assumed: pressing DOWN twice from the top landed on the third row, and a library
+    # that scrolls makes the arithmetic worse, not better.
+    function Restart-W11App([string]$why) {
+        Log "  restarting the app ($why) so focus starts from the top of the library"
+        Adb @('shell', "am force-stop $pkg") | Out-Null
+        Start-Sleep -Seconds 3
+        Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
+        Start-Sleep -Seconds 18
+        return (ForegroundPackage) -eq $pkg
+    }
+    # Walks the library downwards until a card with one of these titles is focused, and says which
+    # title it found. One dump per press, so the walk cannot pass the target without noticing.
+    function Find-W11Card([string[]]$titles, [int]$MaxPresses = 14) {
+        for ($i = 0; $i -le $MaxPresses; $i++) {
+            $script:w11Dumps++
+            $facts = Get-W11Focused "w11-find-$($script:w11Dumps)"
+            if ($facts) {
+                $found = Test-W11AnyCardLabel $facts.Focused $titles
+                if ($found) { return [pscustomobject]@{ Title = $found; Label = $facts.Focused; Presses = $i } }
+            }
+            Key 'KEYCODE_DPAD_DOWN'
+        }
+        return $null
+    }
+    # From anywhere in a row, the leftmost card: LEFT stops at the row's first card.
+    function Get-W11RowStart([string[]]$titles) {
+        for ($i = 0; $i -lt 8; $i++) { Key 'KEYCODE_DPAD_LEFT' }
+        $script:w11Dumps++
+        $facts = Get-W11Focused "w11-rowstart-$($script:w11Dumps)"
+        if (-not $facts) { return $null }
+        return $facts
+    }
+    # `,@(...)` and not `@(...)`: PowerShell unrolls a one-element array on the way out of a function,
+    # so the single video of the "One Video" shelf would arrive as a bare string - and `$titles[0]` on
+    # a string is its first *character*, which is how this check once compared a card against "L".
+    function Get-W11CardTitles([string]$containerId) {
+        if (-not $w11Children.ContainsKey($containerId)) { return , @() }
+        return , @($w11Children[$containerId] | Sort-Object { [int]$_.position } | ForEach-Object { $_.title })
+    }
+
+    # --- 1. load ---------------------------------------------------------------------------------
+    Log '--- loading the example library (allow its sources, replace the catalog, sync the TV) ---'
+    $loader = Join-Path $fixtureDir 'load-example-library.js'
+    $loadOutput = & $Node $loader --host $apiHost --pin $pin --replace-sources 2>&1
+    $loadOutput | Set-Content (Join-Path $out 'example-library-load.log') -Encoding UTF8
+    $loadOk = ($LASTEXITCODE -eq 0) -and (($loadOutput -join "`n") -match 'LOADED')
+    $loadOutput | Select-Object -Last 12 | ForEach-Object { Log "  $_" }
+    Record 'EXAMPLE_LIBRARY_LOAD' $loadOk 'scripts/fixtures/load-example-library.js'
+
+    $catalogNow = $null
+    try { $catalogNow = Invoke-RestMethod -Uri "http://${apiHost}:8080/catalog" -Headers $headers -TimeoutSec 20 } catch { }
+    Record 'EXAMPLE_LIBRARY_CATALOG_DOCUMENT' ($catalogNow -and @($catalogNow.nodes).Count -eq $manifest.nodeCount) `
+        "server catalog version $(if ($catalogNow) { $catalogNow.catalogVersion } else { 'unreadable' }) holds $(if ($catalogNow) { @($catalogNow.nodes).Count } else { 0 }) of $($manifest.nodeCount) nodes"
+
+    if (-not $loadOk) {
+        Log 'RESULT=HARNESS_PRECONDITION_FAILURE'
+        Log 'REASON=the example library could not be loaded onto the TV'
+        $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
+        exit 4
+    }
+
+    EnsureApp 'w11' | Out-Null
+    Go-W11Library 'before the fixture checks' | Out-Null
+
+    # --- 2. what the TV stored vs what the file says ----------------------------------------------
+    $nodeRaw = Get-W11Dump 'DEBUG_DUMP_CATALOG_NODES'
+    $nodeRaw | Set-Content (Join-Path $out 'example-library-rows.json') -Encoding UTF8
+    $rows = ConvertFrom-DumpJson $nodeRaw
+    if (-not $rows) {
+        Record 'EXAMPLE_LIBRARY_ROWS' $false 'the TV did not report its catalog rows'
+    } else {
+        $byId = @{}
+        foreach ($row in $rows) { $byId[$row.id] = $row }
+        $checkable = 0; $differences = @(); $asciiOnly = 0
+        foreach ($want in $manifest.nodes) {
+            $got = $byId[$want.id]
+            if (-not $got) { continue }   # beyond the part of the dump that survived logcat
+            $checkable++
+            $titleVerdict = Test-W11Title $got.title $want.title
+            if ($titleVerdict -eq 'ascii') { $asciiOnly++ }
+            if ($titleVerdict -eq 'no') { $differences += "$($want.id): title" }
+            elseif ([int]$got.position -ne [int]$want.position) { $differences += "$($want.id): position $($got.position) vs $($want.position)" }
+            elseif ([bool]$got.enabled -ne [bool]$want.enabled) { $differences += "$($want.id): enabled $($got.enabled) vs $($want.enabled)" }
+            elseif ([string]$got.type -ne [string]$want.nodeType) { $differences += "$($want.id): type" }
+            elseif (("$($want.parentId)") -ne ("$($got.parentId)")) { $differences += "$($want.id): parent" }
+            elseif (("$($want.youtubeVideoId)") -ne ("$($got.videoId)")) { $differences += "$($want.id): videoId" }
+        }
+        $categories = @($rows | Where-Object { $_.type -eq 'CATEGORY' })
+        $categoryOrder = @($categories | Sort-Object { [int]$_.position } | ForEach-Object { $_.title })
+        $expectedOrder = @($manifest.categoryOrder | ForEach-Object { $_.title })
+        $orderOk = ($categoryOrder.Count -eq $expectedOrder.Count) -and
+            (($categoryOrder -join '|') -eq ($expectedOrder -join '|'))
+        Record 'EXAMPLE_LIBRARY_ROWS' ($differences.Count -eq 0) `
+            "$checkable fixture nodes arrived in the dump; differences: $(if ($differences.Count) { $differences -join '; ' } else { 'none' })$(if ($asciiOnly) { " ($asciiOnly titles compared equal once the characters logcat cannot carry were removed)" })"
+        Record 'EXAMPLE_LIBRARY_CATEGORY_ORDER' $orderOk "on the TV: $($categoryOrder -join ' | ')"
+    }
+
+    # --- 3. what the TV draws --------------------------------------------------------------------
+    $projection = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+    if (-not $projection) {
+        Record 'EXAMPLE_LIBRARY_SHELF_ORDER' $false 'the app did not report its catalogue projection'
+        Record 'EXAMPLE_LIBRARY_EMPTY_SHELF_NOT_DRAWN' $false 'the app did not report its catalogue projection'
+    } else {
+        $shelfTitles = @($projection.shelves | ForEach-Object { $_.title })
+        Log "  shelves ($($projection.shelfCount)): $($shelfTitles -join ' | ')"
+        # Continue Watching is a shelf of its own and sits first when it exists; it is not a category,
+        # so it is set aside before the category order is compared. The projection arrives cut when the
+        # library is large, so the rows that did arrive must be a prefix of the file's order - while
+        # the count, which arrives first and therefore whole, must match exactly.
+        $categoryShelves = @($shelfTitles | Where-Object { $_ -ne 'Continue Watching' })
+        $expectedVisible = @($manifest.categoryOrder | Where-Object { $_.id -ne 'ex-edge-empty' } | ForEach-Object { $_.title })
+        $prefixOk = $true
+        for ($i = 0; $i -lt $categoryShelves.Count; $i++) {
+            if ($categoryShelves[$i] -ne $expectedVisible[$i]) { $prefixOk = $false }
+        }
+        $expectedCount = $expectedVisible.Count + $(if ($shelfTitles -contains 'Continue Watching') { 1 } else { 0 })
+        Record 'EXAMPLE_LIBRARY_SHELF_ORDER' ($prefixOk -and ([int]$projection.shelfCount -eq $expectedCount)) `
+            "$($categoryShelves.Count) category rows readable (in the file's order: $prefixOk), the app reports $($projection.shelfCount) shelves where the file's visible categories plus Continue Watching make $expectedCount"
+        Record 'EXAMPLE_LIBRARY_EMPTY_SHELF_NOT_DRAWN' (-not ($shelfTitles -contains 'Empty Shelf (edge case)')) `
+            "an empty category is stored but is not a row on the TV"
+    }
+
+    # --- 3b. the hidden item: stored, and filtered out of what the child sees ---------------------
+    #
+    # Asked of the container rather than of the whole node dump: a container dump arrives complete
+    # (its card list is capped so that it can), while a 46-node library does not.
+    $hidden = @($manifest.nodes | Where-Object { $_.enabled -eq $false })[0]
+    $hiddenContainer = $hidden.parentId
+    $hiddenSource = $w11NodeById[$hiddenContainer].youtubePlaylistId
+    $containerDump = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CONTAINER_UI' "--es container_id $hiddenContainer")
+    if (-not $containerDump) {
+        Record 'EXAMPLE_LIBRARY_HIDDEN_ITEM' $false "the container $hiddenContainer did not report"
+    } else {
+        $cards = @($containerDump.cards)
+        $titlePresent = @($cards | Where-Object { (Test-W11Title $_.title $hidden.title) -ne 'no' }).Count -gt 0
+        $idPresent = @($cards | Where-Object { $_.videoId -eq $hidden.youtubeVideoId }).Count -gt 0
+        # The source's approved size is the ceiling; one of its videos is hidden, so the container must
+        # offer exactly one fewer card than the source holds.
+        $source = Get-ApprovedSource $hiddenSource
+        $expectedCards = if ($source) { [int]$source.videoCount - 1 } else { -1 }
+        $countOk = $expectedCards -ge 0 -and [int]$containerDump.cardCount -eq $expectedCards
+        Record 'EXAMPLE_LIBRARY_HIDDEN_ITEM' ((-not $titlePresent) -and (-not $idPresent) -and $countOk) `
+            "'$($hidden.title)' is not among the cards (by id: $idPresent, by title: $titlePresent) and the container lists $($containerDump.cardCount) cards where the approved source holds $($expectedCards + 1)"
+    }
+
+    # --- 4. D-pad only: walk every category row, in the file's order ------------------------------
+    $visible = @($manifest.categoryOrder | Where-Object { $_.id -ne 'ex-edge-empty' })
+    if (-not (Restart-W11App 'before the navigation walk')) {
+        Stop-HarnessPrecondition 'the app could not be relaunched for the navigation walk'
+    }
+    $rowEvidence = @(); $rowsFound = 0
+    foreach ($category in $visible) {
+        $titles = Get-W11CardTitles $category.id
+        if (-not $titles.Count) { continue }
+        $found = Find-W11Card $titles
+        if (-not $found) { $rowEvidence += "$($category.title): never reached"; continue }
+        $start = Get-W11RowStart $titles
+        if ($start -and (Test-W11CardLabel $start.Focused $titles[0])) {
+            $rowsFound++
+            $rowEvidence += "$($category.title): '$($titles[0])' after $($found.Presses) DOWN"
+        } else {
+            $rowEvidence += "$($category.title): row start shows '$(if ($start) { $start.Focused } else { 'unreadable' })' instead of '$($titles[0])'"
+        }
+    }
+    Record 'EXAMPLE_LIBRARY_DPAD_NAVIGATION' ($rowsFound -eq $visible.Count) `
+        "$rowsFound of $($visible.Count) category rows reached and leftmost card focused ($($script:w11Dumps) dumps): $($rowEvidence -join ' | ')"
+
+    # --- 5. one item from each of the four sources, and the player's own controls ------------------
+    #
+    # Played the way a child plays it: restart from the top, walk down to the category, step right to
+    # the card, press it - and if that card is a collection, press its first video. The row walk
+    # continues downwards, never upwards, so no number of presses is ever assumed twice.
+    $playPlans = @(
+        [ordered]@{ source = 'CoComelon'; shelf = 'ex-cocomelon'; cardIndex = 1; expect = 'EXAMPLE_COCOMELON_VIDEO_4'; container = $false },
+        [ordered]@{ source = 'Bluey'; shelf = 'ex-bluey'; cardIndex = 0; expect = 'EXAMPLE_BLUEY_VIDEO_1'; container = $false },
+        [ordered]@{ source = 'Peppa Pig'; shelf = 'ex-peppa'; cardIndex = 0; expect = 'EXAMPLE_PEPPA_PLAYLIST_ITEM_01'; container = $true },
+        [ordered]@{ source = 'ChuChu TV'; shelf = 'ex-chuchu'; cardIndex = 1; expect = 'EXAMPLE_CHUCHU_LONG_TITLE'; container = $false }
+    )
+    if (-not (Restart-W11App 'before the four-source playback')) {
+        Stop-HarnessPrecondition 'the app could not be relaunched for the playback phase'
+    }
+    $sourceResults = @(); $sourcesPlayed = 0; $lastPlayed = $null
+    foreach ($plan in $playPlans) {
+        $category = $manifest.categoryOrder | Where-Object { $_.id -eq $plan.shelf }
+        $titles = Get-W11CardTitles $plan.shelf
+        if (-not (Go-W11Library "before playing from $($plan.source)")) { $sourceResults += "$($plan.source): could not reach the library"; continue }
+        $found = Find-W11Card $titles
+        if (-not $found) { $sourceResults += "$($plan.source): the row was never reached"; continue }
+        if (Get-W11RowStart $titles) { } else { $sourceResults += "$($plan.source): the row start was unreadable"; continue }
+        for ($i = 0; $i -lt $plan.cardIndex; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+        $expectedId = $w11NameToNode[$plan.expect].youtubeVideoId
+        Key 'KEYCODE_DPAD_CENTER'
+        Start-Sleep -Seconds 3
+        if ($plan.container) {
+            # The card opened a collection: its first video is one press below the heading row.
+            Key 'KEYCODE_DPAD_DOWN'
+            Key 'KEYCODE_DPAD_CENTER'
+        }
+        $playing = Wait-W11Video $expectedId 30
+        if (-not $playing) {
+            $other = Get-W11Playing
+            $sourceResults += "$($plan.source): expected $expectedId, saw $(if ($other) { $other.videoId } else { 'nothing' })"
+        } else {
+            $approved = Get-ApprovedSource $playing.playlistId
+            $sourcesPlayed++
+            $lastPlayed = $playing
+            $sourceResults += "$($plan.source): $($playing.videoId) from $($playing.playlistId) $(if ($approved) { '(an allowed source)' } else { '(NOT an allowed source)' })"
+        }
+    }
+    Record 'EXAMPLE_LIBRARY_PLAYBACK_FOUR_SOURCES' ($sourcesPlayed -eq 4) ($sourceResults -join ' | ')
+
+    # The player's own controls, on whatever is playing now, then BACK and the focus the child comes
+    # back to. Ten seconds of watching is what gives Continue Watching something to remember.
+    if ($lastPlayed) {
+        $controls = @()
+        # The first press on a player whose on-screen controls have auto-hidden *reveals* them; the next
+        # one acts. That is what the player does, so this presses and then waits for the state it asked
+        # for, up to three presses, and reports how many it took - asserting "one press toggles" is an
+        # assumption about the on-screen display, not about the app's pause.
+        $pressesUsed = 0
+        $paused = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Key 'KEYCODE_DPAD_CENTER'
+            $pressesUsed++
+            for ($i = 0; $i -lt 8; $i++) {
+                Start-Sleep -Seconds 1
+                $paused = Get-W11Playing
+                if ($paused -and -not $paused.playing) { break }
+            }
+            if ($paused -and -not $paused.playing) { break }
+        }
+        $controls += "pause after $pressesUsed press(es): playing=$(if ($paused) { $paused.playing } else { 'unreadable' })"
+        $resumed = $null
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Key 'KEYCODE_DPAD_CENTER'
+            for ($i = 0; $i -lt 8; $i++) {
+                Start-Sleep -Seconds 1
+                $resumed = Get-W11Playing
+                if ($resumed -and $resumed.playing) { break }
+            }
+            if ($resumed -and $resumed.playing) { break }
+        }
+        $controls += "play: playing=$(if ($resumed) { $resumed.playing } else { 'unreadable' })"
+        $beforeSeek = if ($resumed) { [int]$resumed.positionSec } else { 0 }
+        Key 'KEYCODE_DPAD_RIGHT'
+        Start-Sleep -Seconds 4
+        $afterSeek = Get-W11Playing
+        $controls += "seek: $beforeSeek -> $(if ($afterSeek) { $afterSeek.positionSec } else { 'unreadable' })"
+        $controlsOk = ($paused -and -not $paused.playing) -and ($resumed -and $resumed.playing) -and
+            ($afterSeek -and [int]$afterSeek.positionSec -gt $beforeSeek + 5)
+        Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $controlsOk ($controls -join ', ')
+
+        Start-Sleep -Seconds 12
+        $watched = Get-W11Playing
+        $watchedId = if ($watched) { $watched.videoId } else { $lastPlayed.videoId }
+        $watchedTitle = $w11NodeById[(@($manifest.nodes | Where-Object { $_.youtubeVideoId -eq $watchedId })[0].id)].title
+        Key 'KEYCODE_BACK'
+        Start-Sleep -Seconds 4
+        $stillInApp = (ForegroundPackage) -eq $pkg
+        $stopped = Wait-W11NoPlay 15
+        Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' ($stillInApp -and $stopped) `
+            "still in the app: $stillInApp, playback stopped: $stopped"
+        $script:w11Dumps++
+        $facts = Get-W11Focused "w11-backfocus-$($script:w11Dumps)"
+        Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' ($facts -and (Test-W11CardLabel $facts.Focused $watchedTitle)) `
+            "after BACK the focused card is '$(if ($facts) { $facts.Focused } else { 'unreadable' })', and the video just watched is '$watchedTitle'"
+
+        $projection = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CATALOG_UI')
+        $cw = if ($projection) { $projection.shelves | Where-Object { $_.id -eq 'shelf-continue-watching' } | Select-Object -First 1 } else { $null }
+        $cwTitles = if ($projection) { @($projection.shelves | ForEach-Object { $_.title }) } else { @() }
+        $cwOk = $cw -and ($cwTitles.Count -gt 0) -and ($cwTitles[0] -eq 'Continue Watching') -and
+            ($cw.cards[0].videoId -eq $watchedId)
+        Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $cwOk `
+            "first shelf '$(if ($cwTitles.Count) { $cwTitles[0] } else { 'none' })', first card $(if ($cw -and $cw.cards.Count) { $cw.cards[0].videoId } else { 'none' }) - expected the video just watched, $watchedId after $($watched.positionSec)s"
+    } else {
+        Record 'EXAMPLE_LIBRARY_PLAYER_CONTROLS' $false 'no video was playing, so the controls could not be exercised'
+        Record 'EXAMPLE_LIBRARY_BACK_LEAVES_PLAYER' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_FOCUS_RESTORED' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_CONTINUE_WATCHING' $false 'not reached'
+    }
+
+    # --- 6. a playlist from end to end: open, first item, advance, queue, last item ----------------
+    $peppaItems = @($manifest.items | Where-Object { $_.name -like 'EXAMPLE_PEPPA_PLAYLIST_ITEM_*' } |
+        Sort-Object { [int]$_.name.Split('_')[-1] })
+    if (-not (Restart-W11App 'before the playlist walk')) {
+        Stop-HarnessPrecondition 'the app could not be relaunched for the playlist phase'
+    }
+    $peppaTitles = Get-W11CardTitles 'ex-peppa'
+    $containerDump = ConvertFrom-DumpJson (Get-W11Dump 'DEBUG_DUMP_CONTAINER_UI' '--es container_id ex-peppa-birthday')
+    Record 'EXAMPLE_LIBRARY_PLAYLIST_OPEN' ($containerDump -and $containerDump.exists -and ([int]$containerDump.cardCount -eq $peppaItems.Count)) `
+        "the file lists $($peppaItems.Count) items; the container reports cardCount $(if ($containerDump) { $containerDump.cardCount } else { 'unreadable' })"
+    if (Find-W11Card $peppaTitles) {
+        Get-W11RowStart $peppaTitles | Out-Null      # the collection is the row's first card
+        Key 'KEYCODE_DPAD_CENTER'                    # open it
+        Start-Sleep -Seconds 3
+        Key 'KEYCODE_DPAD_DOWN'                      # onto the first video
+        Key 'KEYCODE_DPAD_CENTER'
+        $firstItem = Wait-W11Video $peppaItems[0].youtubeVideoId 30
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_FIRST_ITEM' ([bool]$firstItem) `
+            "expected $($peppaItems[0].youtubeVideoId), saw $(if ($firstItem) { $firstItem.videoId } else { 'nothing' })"
+
+        # The queue, one remote NEXT at a time, required to be the file's order. The playlist is short
+        # on purpose: 17 items is long enough to prove the queue and short enough to reach its end.
+        $walked = 0; $walkNotes = @()
+        if ($firstItem) { $walked = 1 }
+        for ($i = 1; $i -lt $peppaItems.Count; $i++) {
+            Key 'KEYCODE_MEDIA_NEXT'
+            $next = Wait-W11Video $peppaItems[$i].youtubeVideoId 25
+            if (-not $next) {
+                $saw = Get-W11Playing
+                $walkNotes += "item $($i + 1) of $($peppaItems.Count): expected $($peppaItems[$i].youtubeVideoId), saw $(if ($saw) { $saw.videoId } else { 'nothing' })"
+                break
+            }
+            $walked++
+        }
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_ADVANCE' ($walked -eq $peppaItems.Count) `
+            "$walked of $($peppaItems.Count) items, in the file's order $(if ($walkNotes.Count) { '- ' + ($walkNotes -join '; ') })"
+
+        # The last item: one more NEXT must end the queue rather than start anything else.
+        Key 'KEYCODE_MEDIA_NEXT'
+        Start-Sleep -Seconds 3
+        $ended = Wait-W11NoPlay 20
+        $stillInApp = (ForegroundPackage) -eq $pkg
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_FINAL_ITEM' (($walked -eq $peppaItems.Count) -and $ended -and $stillInApp) `
+            "after the last of $($peppaItems.Count) items: playback stopped: $ended, still in the app: $stillInApp"
+        Shot 'w11-playlist-end'
+
+        # --- 7. the security boundary, from the child's own card ---------------------------------
+        Go-W11Library 'before the security check' | Out-Null
+        if (Find-W11Card $peppaTitles) {
+            Get-W11RowStart $peppaTitles | Out-Null
+            Key 'KEYCODE_DPAD_RIGHT'                 # the row's second card is the unapproved video
+            Key 'KEYCODE_DPAD_CENTER'
+            Start-Sleep -Seconds 6
+            $playing = Get-W11Playing
+            $script:w11Dumps++
+            $facts = Get-W11Focused "w11-denied-$($script:w11Dumps)"
+            $screen = if ($facts) { $facts.Dump } else { '' }
+            $messageShown = ($screen -match "can't be played") -or ($screen -match 'could not') -or ($screen -match 'not approved')
+            Record 'EXAMPLE_LIBRARY_UNAPPROVED_DENIED' (-not $playing) `
+                "pressing the unapproved card played: $(if ($playing) { $playing.videoId } else { 'nothing' }) - it is in the library and its source is not allowed"
+            Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' ((-not $playing) -and $messageShown) `
+                "the refusal is on screen: $messageShown"
+            Shot 'w11-unapproved-denied'
+        } else {
+            Record 'EXAMPLE_LIBRARY_UNAPPROVED_DENIED' $false 'the Peppa Pig row was never reached for the security check'
+            Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' $false 'not reached'
+        }
+    } else {
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_FIRST_ITEM' $false 'the Peppa Pig row was never reached'
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_ADVANCE' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_PLAYLIST_FINAL_ITEM' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_UNAPPROVED_DENIED' $false 'not reached'
+        Record 'EXAMPLE_LIBRARY_UNAPPROVED_MESSAGE' $false 'not reached'
+    }
+
+    $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
+    Log '=== W11 summary ==='
+    $script:results.GetEnumerator() | ForEach-Object { Log ("  {0,-42} {1}" -f $_.Key, $_.Value) }
+    Log "  uiautomator dumps taken: $($script:w11Dumps)"
+    $failed = @($script:results.GetEnumerator() | Where-Object { $_.Value -eq 'FAIL' })
+    Log ("W11 EXAMPLE_LIBRARY_TEST: {0} ({1} checks, {2} failed)" -f $(if ($failed.Count) { 'FAIL' } else { 'PASS' }), $script:results.Count, $failed.Count)
+    Log "artifacts: $out"
+    if ($failed.Count) { exit 1 } else { exit 0 }
+}
+
 EnsureApp 'w6' | Out-Null
 if (Go-ToLibrary 'before the hierarchy checks') {
     Log '=== W6: categories are titles, sub-categories are cards ==='
@@ -756,7 +1278,7 @@ if (Go-ToLibrary 'before the hierarchy checks') {
                 Key 'KEYCODE_DPAD_DOWN'
                 Dump "w6-b-focus-$press"
                 $facts = Get-UiFacts (Join-Path $out "w6-b-focus-$press.xml")
-                if (Test-CardLabel $facts.Focused $first.title) { $focused = $facts.Focused; break }
+                if (Test-W11CardLabel $facts.Focused $first.title) { $focused = $facts.Focused; break }
             }
             Record 'w6-dpad-reaches-the-first-card' ($focused -ne '') "focused '$focused'"
             if ($focused -ne '') {

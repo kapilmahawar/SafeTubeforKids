@@ -189,7 +189,8 @@ against the app's own log and its `/status` API rather than against screenshots.
 $env:ANDROID_HOME = "<android-sdk>"
 ./tv-app/scripts/tv-e2e.ps1 -SkipBuild -Tier smoke -Adb "$env:ANDROID_HOME\platform-tools\adb.exe"
 #   -Tier smoke | player | full      (cumulative)
-#   -Serial <ip>:5555  -ApiHost <host>  -ClearState  -QualityProbe  -LaunchWaitSec <n>
+#   -Tier example                    (loads and verifies the example kids library on its own)
+#   -Serial <ip>:5555  -ApiHost <host>  -ClearState  -QualityProbe  -LaunchWaitSec <n>  -Node <node.exe>
 ```
 
 On Windows, PowerShell script execution may need `Set-ExecutionPolicy -Scope Process -ExecutionPolicy
@@ -208,6 +209,16 @@ running, play/pause, seek both ways, media keys reach the player, survives HOME,
 `full` ≈ 7.5 min adds autoplay/queue behaviour, end-of-video, and the security phase
 (unapproved video blocked, unauthenticated API reads/writes refused, no `VIEW` deep-link handler,
 deep link plays nothing, extras cannot start playback), plus quality/audio checks.
+
+`example` ≈ 11 min is **not** cumulative and does not run the phases above: it loads the deterministic
+example kids library (`tv-app/scripts/fixtures/example-kids-library.yaml`, whose generator, loader and
+contents are documented in [`EXAMPLE_KIDS_LIBRARY.md`](EXAMPLE_KIDS_LIBRARY.md)) and then checks that
+the TV has it, draws it, can reach every row with the remote, plays one item from each of the four
+official sources, walks a 17-item playlist from its first item to its last, restores focus and
+Continue Watching after BACK, hides the one item the fixture hides, does not draw the empty category,
+and refuses the one item whose source is not allowed. It needs a TV and a parent PIN, and it writes
+its own artifacts (`example-library-load.log`, `example-library-rows.json`, `example-library-queue.txt`,
+screenshots) beside the usual ones.
 
 Each run writes to `test-results/tv/<timestamp>/` (**gitignored**): `device.txt`, `commit.txt`,
 `install.log`, `test.log`, `logcat.txt`, `result.json` (one key per assertion), `api-*.json`, and
@@ -244,6 +255,9 @@ There are 50+ recorded runs in `test-results/tv/` (gitignored). Summarised hones
 | **full** | `2026-09-24-095942` | **43/43 PASS** | `9abddbe` |
 | full | `2026-09-24-094701`, `-101151` | **38 PASS / 5 FAIL** — stale now-playing state after playback completion; see `HANDOVER.md` → "Open defect" | `9abddbe` |
 | full | `2026-09-24-055858`, `-060050` | BLOCKED — YouTube `LOGIN_REQUIRED` (external; cleared later the same day) | `9abddbe` |
+| **example** (new) | `2026-09-28-162202` | **22/22 PASS** — the deterministic example kids library, loaded and verified end to end with remote keys only | `eeb367a` |
+| example | `2026-09-28-155854` | 21/22 — the harness compared a one-item shelf against the letter "L" (a one-element array collapsed on return) | `eeb367a` |
+| example | `2026-09-28-161034` | 21/22 — `EXAMPLE_LIBRARY_PLAYER_CONTROLS` assumed one CENTER press toggles pause; the first press reveals the controls | `eeb367a` |
 
 **Resolved.** The gap this document used to flag is closed: `player` and `full` have now been run
 against Phase 4 builds. `player` is 32/32 and `full` is 43/43 on three consecutive runs.
