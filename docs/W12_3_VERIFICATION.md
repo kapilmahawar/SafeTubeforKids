@@ -131,3 +131,57 @@ focused but enters the card's inline player controls once that player is up. It 
 recorded here; a future red run of `w6-container-opens-its-children` should be read against §3 before
 being treated as a product regression. D7 remains observable-PASS with its pixel check UNMEASURED, as
 recorded in `docs/W12_CORRECTNESS.md`.
+
+## 7. Reproduction, artifacts, and git/remote verification
+
+Starting commit (W12.2 baseline, verified clean before any edit):
+`eb829d4398730d23d2259468bb49ede54f793074`.
+Final commit (the commit at which the whole matrix below was measured, and the commit the tag points
+at): `2acf8276119ad8b600b5e49c61469fac05ec0e5e`.
+
+Every run was made with the installed W12.2 APK (`-SkipBuild`), which is the correct target because
+`git diff --stat eb829d4..HEAD -- tv-app/app` is empty - no production file changed in this phase.
+
+```powershell
+# the tiers (Java/Android env from docs/TESTING.md)
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tv-app\scripts\tv-e2e.ps1 -Tier player  -SkipBuild
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tv-app\scripts\tv-e2e.ps1 -Tier full    -SkipBuild
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tv-app\scripts\tv-e2e.ps1 -Tier example -SkipBuild   # x3
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tv-app\scripts\resolver-failure-probe.ps1
+cd tv-app; .\gradlew.bat --offline testDebugUnitTest testReleaseUnitTest
+cd tv-app; .\gradlew.bat --offline connectedDebugAndroidTest
+cd tv-app; node --test scripts\dashboard-*.test.js
+```
+
+Artifacts, exact paths. Each e2e run writes its dumps, screenshots and logs to its own directory:
+
+```text
+player  (W6 10/10 PASS, FINAL: PASS)  C:\Users\proxmox\Documents\DeepseekHarness\Kids-Youtube\repo\test-results\tv\2026-09-29-023829
+full    (54 checks, FINAL: PASS)      C:\Users\proxmox\Documents\DeepseekHarness\Kids-Youtube\repo\test-results\tv\2026-09-29-024741
+example 1                             C:\Users\proxmox\Documents\DeepseekHarness\Kids-Youtube\repo\test-results\tv\2026-09-29-030508
+example 2                             C:\Users\proxmox\Documents\DeepseekHarness\Kids-Youtube\repo\test-results\tv\2026-09-29-032359
+example 3                             C:\Users\proxmox\Documents\DeepseekHarness\Kids-Youtube\repo\test-results\tv\2026-09-29-034046
+unit debug/release XML                tv-app\app\build\test-results\testDebugUnitTest  (64 suites), tv-app\app\build\test-results\testReleaseUnitTest
+instrumented results                  tv-app\app\build\outputs\androidTest-results\connected\debug
+run console logs                      %TEMP%\w123\{player6,full1,example1,example2,example3,dashboard1,unit1,instr1,resolver1}.log
+```
+
+Git state at the end of the phase: `git status --porcelain` empty (**worktree clean**), branch `main`,
+`HEAD = 2acf827`, everything pushed to `fork`. `origin` was never written to, nothing was force-pushed,
+and no tag other than `W12-STABLE-2026-09-29` was created or moved.
+
+Remote verification (`git ls-remote fork`):
+
+```text
+9332e6e31cbdb606edf726e0ceec8a9d04312329  refs/tags/W12-STABLE-2026-09-29
+2acf8276119ad8b600b5e49c61469fac05ec0e5e  refs/tags/W12-STABLE-2026-09-29^{}
+2acf8276119ad8b600b5e49c61469fac05ec0e5e  refs/heads/main
+421acc93a3fb34ab15b0cf98b0e3b4f32def8d3c  W10-STABLE-2026-09-28   (peeled, unchanged)
+eeb367a798854892059b521e500c6dcdeccad209  W10.1-STABLE-2026-09-28 (peeled, unchanged)
+```
+
+The annotated tag object is `9332e6e` and it peels to the verified commit `2acf827`.
+
+`git branch` = `main`; `git log -1 --oneline` at the moment of the report is the documentation commit
+that carries this section, which is docs-only: `git diff --stat 2acf827..HEAD -- tv-app` is empty, so
+the harness and the product code at the tip are byte-identical to what the tag points at.
