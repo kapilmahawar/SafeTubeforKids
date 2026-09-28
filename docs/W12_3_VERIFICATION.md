@@ -1,18 +1,24 @@
-﻿# W12.3 — W6-C closure: what was found, and where the verification stands
+﻿# W12.3 — W6 closure, and the full verification matrix
 
-* Baseline: `eb829d4398730d23d2259468bb49ede54f793074` (W12.2). Worktree clean at start.
-* Device: Mi Box 4 — a **shared living-room TV**, which turned out to matter (see §2).
-* Production code changed: none. Harness only.
+* Baseline `eb829d4398730d23d2259468bb49ede54f793074` (W12.2), verified exact with a clean worktree.
+* Device: Mi Box 4 (MIBOX4, Android 12, 1920x1080) - a **shared living-room TV**. That mattered; see §2.
+* Production code changed in this phase: **none**. `git diff --stat eb829d4..HEAD -- tv-app/app` is
+  empty, and the only files touched are `tv-app/scripts/tv-e2e.ps1` and this document. The APK under
+  test is therefore the W12.2 build, and every product behaviour W12 verified is untouched.
 
-## 1. W6-C: fixed, and verified passing
+```text
+W6=PASS  PLAYER=PASS  FULL=PASS  EXAMPLE_STABILITY=PASS   ->  tag W12-STABLE-2026-09-29 created
+```
 
-Navigating vertically by looking for the target title cannot work once the row has scrolled out of the
-hierarchy, because a dump only contains what is rendered. `w6-dpad-reaches-the-first-card` now derives
-the row's index from the **library projection** and presses DOWN towards it, polling the focused card
-after every press and recording the entire navigation.
+## 1. W6-C navigated by title, which cannot work - and now navigates by the projection
 
-The first run of that form showed why the press count is not simply `index + 1`, and the evidence is in
-the navigation history itself:
+`w6-dpad-reaches-the-first-card` walked down the rows looking for the target title. That cannot succeed
+once the row has scrolled out of the hierarchy, because a dump only contains what is rendered. It now
+takes the row's index from the **library projection**, presses DOWN towards it, polls the focused card
+after every press, and records the whole navigation.
+
+The first run of that form showed why the press count is not simply `index + 1`, and the navigation
+history is the evidence:
 
 ```text
 navigation_history=[1:Home | ... | 1:Refresh | 2:NEW! Fireflies ... / 3 min left | ...]
@@ -20,84 +26,108 @@ target_row='CoComelon' target_row_index=1  press_count=2  current_focused_row='C
 ```
 
 The top bar has focusables of its own (Refresh, Connect Phone, Settings), so the first press moves focus
-*along* the bar before it descends into the rows. The bound is therefore the row index plus that
-allowance, the check still fails if focus lands in a different row, and a failure prints
-`target_row`, `target_row_index`, `expected_card`, `current_focused_card`, `current_focused_row`,
-`press_count`, `navigation_history`, `visible_rows` and `focusable_elements`.
+*along* the bar before it descends into the rows. The bound is the row index plus that allowance, the
+check still fails if focus lands in a different row, and a failure prints `target_row`,
+`target_row_index`, `expected_card`, `current_focused_card`, `current_focused_row`, `press_count`,
+`navigation_history`, `visible_rows`, `focusable_elements` and `foreground`.
 
-Verified on the device in a clean run:
+## 2. Why this phase's runs were untrustworthy - and the fix that made them trustworthy
 
-```text
-PASS: w6-dpad-reaches-the-first-card focused 'Wheels on the Bus Lullaby! ... ' after KEYCODE_DPAD_DOWN
-```
-
-## 2. The reason this phase's runs were untrustworthy — and the fix
-
-Runs were sending D-pad keys while **the Android TV launcher** was in front, not SafeTube. On a shared
-TV with ZEE5, SonyLIV, Hotstar, JioTV, Shemaroo, Spotify and others installed, DOWN + CENTER on the
-launcher **starts another app** — ZEE5 was found running and focused - and every assertion after that was
-measuring the wrong program. The harness's own log shows the pattern:
+Runs were sending D-pad keys while **the Android TV launcher** was in front rather than SafeTube. On a
+shared TV with ZEE5, SonyLIV, Hotstar, JioTV, Shemaroo, Spotify and others installed, DOWN + CENTER on
+the launcher **starts another app** - ZEE5 was found running and focused:
 
 ```text
-app was NOT foreground at 'w6' - relaunching before continuing     (detected at the start of a phase)
-no playback after sequence: KEYCODE_DPAD_DOWN -> KEYCODE_DPAD_CENTER  (keys going to the launcher)
+app was NOT foreground at 'w6' - relaunching before continuing
+no playback after sequence: KEYCODE_DPAD_DOWN -> KEYCODE_DPAD_CENTER
 mCurrentFocus=Window{... com.graymatrix.did/com.zee5.androidtv.home.presentation.CollectionActivity}
 ```
 
-Every key press now goes through one guarded path (`Test-WrongAppInFront` + `Key`) that checks the
-focused package - throttled, and always before a key that activates something - and when the app is not
-in front it relaunches SafeTube and **drops the key**. A stray press can no longer reach another app or
-be spent on a screen the harness is not testing. The clean run logged exactly that behaviour:
+Every press now goes through one guarded path (`Test-WrongAppInFront` + `Key`) that checks the focused
+package - throttled, and always before a key that activates anything - and when the app is not in front
+it relaunches SafeTube and **drops the key**. A stray press can no longer start another app or be spent
+on a screen the harness is not testing. The runs below logged that behaviour and stayed clean:
 
 ```text
 NOT delivering KEYCODE_DPAD_UP: com.google.android.tvlauncher is in front, not tv.safetubeforkids.app
     - relaunching the app instead
 ```
 
-The device was left with SafeTube focused and ZEE5 stopped.
+**Any earlier result produced by a run that pressed keys while the launcher was in front is not
+evidence.** ZEE5 was force-stopped and the device left with SafeTube focused.
 
-**Any earlier result from a run that pressed keys while the launcher was in front is suspect** and must
-not be used as evidence. Runs whose diagnostics name `foreground=tv.safetubeforkids.app` (the W6-C
-diagnostics, for example) were clean at that moment.
+## 3. The remaining W6 failures, and what closed them
 
-## 3. W6-A and W6-B: still failing, and why
+`w6-cards-are-focusable` pressed RIGHT from wherever focus had entered the row. When focus entered on
+the row's **second** card, RIGHT had nowhere to go and the CENTER that follows opened the video instead
+of the container - one cause behind three failing checks. Focus is now normalised to the row's **first**
+card, verified after each press, before the RIGHT walk and again before the CENTER. In the ordinary
+case the normaliser is a no-op, which the log shows (`W6 row focus is on the row's first card after
+1 LEFT press(es)`, and `0` in the earlier run).
 
-With the guard in place and W6-C passing, the same run shows the two remaining checks failing for a
-reason the diagnostics make plain:
+Two things learned while doing it, both recorded in the harness source:
+
+* **LEFT from a focused video card enters that card's inline player controls**, not the sibling card:
+  after four LEFT presses the focused label was
+  `3:04 / 0:01 / Forward 10 seconds / ... / Pause / 5 of 105 / <title>`. That is why an unverified
+  single LEFT press, or a LEFT loop, can end up driving a player rather than returning to the card.
+* **The row's second card is a featured-video card that rotates.** One run showed
+  `Wheels on the Bus Lullaby` at `5 of 105`; the next showed `This is the Way Bedroom` at `6 of 105`.
+  Row membership therefore cannot be tested against the titles captured from the projection at the
+  start of the phase, and a park-then-descend return that stops only on the first card's title
+  overshoots into the next row (measured: three DOWN presses ending on `Peppa Pig Tales 2026 ...`).
+  That variant was reverted rather than left in the tree.
+
+Final W6 result, all ten checks:
 
 ```text
-FAIL: w6-cards-are-focusable the row holds 2 card(s); after RIGHT focus is on 'nothing'
-FAIL: w6-container-opens-its-children container 'CoComelon Animal Songs' (id ex-cocomelon-animal)
-      shows its first child 'NEW! Fireflies ...' of 12 [...] on screen: 'Refresh'
-FAIL: w6-back-returns-to-the-shelf / w6-back-restores-the-card-focus
+w6-1-category-heading-has-no-picture   PASS
+w6-1-category-heading-has-no-image     PASS
+w6-category-title-not-focusable        PASS
+w6-subcategory-is-a-card               PASS
+w6-dpad-reaches-the-first-card         PASS   focused 'Wheels on the Bus Lullaby! ... ' after DPAD_DOWN
+w6-cards-are-focusable                 PASS   after RIGHT focus is on the row's other card
+w6-container-card-does-not-autoplay    PASS   nothing started
+w6-container-opens-its-children        PASS   on screen: 'Back'
+w6-back-returns-to-the-shelf           PASS
+w6-back-restores-the-card-focus        PASS   focused 'CoComelon Animal Songs'
 ```
 
-The row walk stops on whichever card focus *entered* the row on - the diagnostics show it was the row's
-**second** card (the video), not its first. So RIGHT had nowhere to go, and the CENTER that follows went
-to the video rather than to the collection, which is why the container never opened and the two BACK
-checks failed with it. The fix is to normalise focus to the row's **first** card (LEFT until the focused
-label is the row's first card, verified) before both the RIGHT-walk and the CENTER. I wrote that change,
-saw it land in the wrong place and break the file, and reverted to the last committed harness rather
-than leave a broken script: the committed state is the one with the guard and the verified W6-C.
+## 4. The complete matrix, measured in this phase
 
-## 4. Where the verification stands
+| Gate | Result | Evidence |
+| --- | --- | --- |
+| W6 (10 checks) | **PASS** | player and full runs, `%TEMP%\w123\player6.log`, `full1.log` |
+| PLAYER tier | **PASS** | `player6.log` - `FINAL: PASS` |
+| FULL tier | **PASS** | `full1.log` - 54 checks, 0 FAIL, 0 UNKNOWN, 0 LIMITED |
+| EXAMPLE stability | **PASS** | `example1..3.log` - 36/36, 36/36, 36/36, 0 FAIL each |
+| UNIT debug | **PASS** | 930 tests, 0 failures (`testDebugUnitTest`, 64 suites) |
+| UNIT release | **PASS** | 930 tests, 0 failures (`testReleaseUnitTest`, 64 suites) |
+| DASHBOARD | **PASS** | 213 tests, 213 pass, 0 fail |
+| INSTRUMENTED | **PASS** | 28 tests on MIBOX4, 0 skipped, 0 failed |
+| SECURITY invariant | **PASS** | `app-foreground-at-security`, `unapproved-video-blocked`, `unapproved-video-not-playing` in the full run |
+| DEVICE resolver failure | **PASS** | `resolver-failure-probe.ps1` - 12 checks, 0 failed |
 
-```text
-W6_DPAD_FIRST_CARD=PASS          (verified on device with the guard in place)
-W6_CARDS_FOCUSABLE=FAIL          (needs the row's-first-card normalisation above)
-W6_CONTAINER_CHILDREN=FAIL       (same cause; the container is never opened)
-W6=PASS/FAIL -> FAIL
-PLAYER / FULL / EXAMPLE x3       not re-run after this phase's harness change
-UNIT_DEBUG=930/930  UNIT_RELEASE=930/930  DASHBOARD=213/213  INSTRUMENTED=28/28  (unchanged, all green)
-```
+`end-of-video-handling` **PASSED** in this run - the player advanced to the next approved item
+(`pRn3fdmSY7w` -> `iALurhct9h0`) - rather than taking the LIMITED branch W12.1 had to report, so the
+overshoot guard was exercised and held.
 
-**No W12 stable tag was created.** `W6 != PASS`, and the tiers have not been re-run since the harness
-changed; the point of this phase was to close that gap, and it is not closed.
+## 5. Commits and tag
 
-## 5. Commits
+* `f80d45e` - W6-C by projection index, and never press into another app.
+* `e411cfd` - W12.3 record: W6-C fixed; the foreground-mixup findings.
+* `0c727da` - normalise W6 focus to the row's first card, with the rotation and inline-player findings.
+* `W12-STABLE-2026-09-29` - annotated tag, pushed to `fork` only. `W10-STABLE-2026-09-28` and
+  `W10.1-STABLE-2026-09-28` are untouched.
 
-* `test: fix W6 row navigation by projection index, and never press into another app` - the two harness
-  fixes above (W6-C navigation and the foreground guard), pushed to `fork`.
+## 6. What this tag does and does not claim
 
-Next, in order: normalise focus to the row's first card before the RIGHT-walk and the CENTER, re-run the
-player tier until W6 is green, then the full tier and three example runs, then tag.
+Claimed: the four gates above pass on the real device, on the W12.2 production code, with the harness
+of this phase - and the harness now cannot mistake another app's screen for the app under test.
+
+Not claimed: the harness's focus handling is not yet indifferent to the UI's focus memory. The return to
+the row's first card relies on LEFT when focus is on a video card, which works when the card is simply
+focused but enters the card's inline player controls once that player is up. It passed in the runs
+recorded here; a future red run of `w6-container-opens-its-children` should be read against §3 before
+being treated as a product regression. D7 remains observable-PASS with its pixel check UNMEASURED, as
+recorded in `docs/W12_CORRECTNESS.md`.
