@@ -2,6 +2,7 @@ package tv.safetubeforkids.app
 
 import android.content.Context
 import android.content.SharedPreferences
+import tv.safetubeforkids.app.auth.ParentGate
 import tv.safetubeforkids.app.auth.PinManager
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.auth.SharedPrefsParentCredentialStore
@@ -51,6 +52,22 @@ object ServiceLocator {
      * whichever database `init` or `initForTest` installed.
      */
     val catalogRepository: CatalogRepository by lazy { CatalogRepository(database) }
+
+    /**
+     * The one boundary in front of the TV's parent-only mutations.
+     *
+     * Lazy, like the rest, so it wraps whichever `pinManager`/`sessionManager` `init` installed. The
+     * two lambdas are the production bodies of the mutations themselves: the Settings screen no longer
+     * calls either of them, and this is the only place that does, behind the PIN check in
+     * [ParentGate.run].
+     */
+    val parentGate: ParentGate by lazy {
+        ParentGate(
+            pinManager = pinManager,
+            resetWatchTime = { PlayEventRecorder.clearAll() },
+            signOutParentSessions = { sessionManager.invalidateAll() },
+        )
+    }
 
     /**
      * The TV's own catalog sync against its own SafeTube server.

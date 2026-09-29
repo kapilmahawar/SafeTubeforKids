@@ -17,6 +17,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -45,6 +47,14 @@ fun PinKeypad(
     onChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    /**
+     * Where focus should land when the keypad appears.
+     *
+     * A prompt that is shown over another screen has to say where the remote is, or the first D-pad
+     * press goes to whatever was focused underneath - which, on the Settings screen, is the very button
+     * that opened the prompt. Optional, so the screens that already show a keypad keep their behaviour.
+     */
+    initialFocus: FocusRequester? = null,
 ) {
     Column(modifier = modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text(label, style = MaterialTheme.typography.bodyMedium, color = KidTextDim)
@@ -79,7 +89,16 @@ fun PinKeypad(
         listOf("123", "456", "789").forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 row.forEach { digit ->
-                    DigitButton(digit.toString(), enabled) { onChange(pin + digit) }
+                    DigitButton(
+                        digit = digit.toString(),
+                        enabled = enabled,
+                        // The first digit of the first row is the natural place for the remote.
+                        modifier = if (digit == '1' && initialFocus != null) {
+                            Modifier.focusRequester(initialFocus)
+                        } else {
+                            Modifier
+                        },
+                    ) { onChange(pin + digit) }
                 }
             }
             Spacer(modifier = Modifier.height(10.dp))
@@ -101,13 +120,18 @@ fun PinKeypad(
 }
 
 @Composable
-private fun DigitButton(digit: String, enabled: Boolean, onClick: () -> Unit) {
+private fun DigitButton(
+    digit: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
     Button(
         onClick = onClick,
         enabled = enabled,
         colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
         shape = RoundedCornerShape(8.dp),
-        modifier = Modifier.width(88.dp).height(52.dp),
+        modifier = modifier.width(88.dp).height(52.dp),
     ) {
         Text(
             digit,
