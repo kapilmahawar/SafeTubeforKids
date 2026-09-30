@@ -164,10 +164,22 @@ function Wait-QueueAdvance {
     }
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $last = $Before
+    $emptySamples = 0
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 5
         $snap = PlayingNow
-        if ($null -eq $snap) { return $null }
+        if ($null -eq $snap) {
+            # One empty sample is a hand-over, not a verdict - the app publishes no playing state between
+            # one queue item and the next. Treating the first one as "playback stopped" is the same defect
+            # as the one fixed in `Wait-PlayingChange` and in the end-of-video oracle; absence has to
+            # persist before the caller's "the queue stopped" branch is taken. An unreadable status call
+            # also lands here, so the wait continues rather than concluding anything from a dropped
+            # request.
+            $emptySamples++
+            if ($emptySamples -ge 3) { return $null }
+            continue
+        }
+        $emptySamples = 0
         if ($snap.videoId -ne $Before.videoId) { return $snap }
         $last = $snap
     }
@@ -476,16 +488,36 @@ function Start-ApprovedPlayback([string]$why, [string[]]$Skip = @()) {
 # Waits for the app to report a DIFFERENT video playing, and returns the state it reported. $null means
 # playback stopped, which is itself an honest queue outcome rather than something a fixed sleep should
 # hide. A dropped status request is retried, never believed.
+# Waits for the video that is playing to become a different one, or for playback to have genuinely
+# stopped.
+#
+# An empty status sample is not an answer. The app clears its published playing state between the end of
+# one queue item and the start of the next (`endEvent` publishes nothing until the next `startEvent`), so
+# a single sample taken during that hand-over says "nothing is playing" while the app is in fact moving
+# to the next item. Returning on the first one is how PREVIOUS was recorded as "no transition" in a run
+# where the check immediately after it found playback back on the very item PREVIOUS had been asked for
+# (W13.1a, full run 3: "queue pRn3fdmSY7w -> ", then BACK_FROM_VIDEO=Eqo0U_VkhR0). Absence therefore has
+# to persist before it counts, which keeps the "the queue ended" branch below working while no longer
+# racing the hand-over.
+#
+# An unreadable status call is different again (`ApiState` returns $null for that, and the loop skips it)
+# so a dropped request can never be mistaken for a stop either.
 function Wait-PlayingChange([string]$Before, [int]$TimeoutSec = 60) {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $last = $null
+    $emptySamples = 0
     while ((Get-Date) -lt $deadline) {
         Start-Sleep -Seconds 2
         $state = ApiState
         if (-not $state) { continue }
         $last = $state.currentlyPlaying
-        if (-not $last) { return $null }
-        if ($last.videoId -and ($last.videoId -ne $Before)) { return $last }
+        if ($last) {
+            $emptySamples = 0
+            if ($last.videoId -and ($last.videoId -ne $Before)) { return $last }
+        } else {
+            $emptySamples++
+            if ($emptySamples -ge 3) { return $null }
+        }
     }
     return $last
 }
@@ -2087,11 +2119,49 @@ if ($opened) {
     $p1 = [int](PlayingNow).positionSec
     Record 'seek-forward' ($p1 -ge ($p0 + 8)) "position ${p0}s -> ${p1}s"
 
-    Key 'KEYCODE_MEDIA_REWIND'
-    Key 'KEYCODE_DPAD_LEFT'
-    Start-Sleep -Seconds 3
-    $p2 = [int](PlayingNow).positionSec
-    Record 'seek-backward' ($p2 -le ($p1 - 8)) "position ${p1}s -> ${p2}s"
+    # Poll for the furthest back the playhead is *seen* to go, instead of sampling it once.
+    #
+    # Why a single sample was wrong: the presses ask the player for about -20s, and playback adds back
+    # the time spent measuring, so a run in which the second press computed its target from a position
+    # the first seek had not yet been applied to measured -6s and was recorded as a failed seek. The
+    # seek had happened; the observation was of a different instant (W13.1: "position 38s -> 32s",
+    # while the same check measured -15s and -17s in other runs of the same build).
+    #
+    # Polling is sound for *this* check and not for the forward one beside it, which is why only this
+    # one changes: playback can never produce a backward excursion, so every backward move observed is
+    # a seek that landed. A polled forward bar would instead be satisfied by playback alone within a
+    # few seconds, which is why `seek-forward` keeps its single tight sample.
+    #
+    # The assertion keeps its direction and gains size: the playhead must be seen at least 16s below
+    # where it started (two committed steps), and a pair of presses that collapses into one is retried
+    # once. A player that does not seek still fails - polling cannot invent a backward move.
+    # One remote press, then poll until the player has committed it; press again only if it did not.
+    #
+    # Requiring a *pair* of presses to compound measures the wrong thing on this device. Seeking back in
+    # a progressive stream re-buffers, and a press that arrives before the previous seek has been applied
+    # computes its target from the pre-seek position (`seekBy` reads `player.currentPosition`), so the
+    # pair collapses into a single step - measured: "26s -> lowest 17s (16s required, 4 presses sent)",
+    # against "25s -> 10s" in runs where the pair did compound. What this check is for is that a backward
+    # key moves the playhead back at all, and against a *playing* video that is unambiguous: playback only
+    # ever increases the position, so a playhead seen 8s below where it started is a seek that landed.
+    # The bar is the one this check always used (8s). What changed is that it is read from the state the
+    # player actually committed, instead of one sample taken a fixed three seconds later - which is how a
+    # run in which the seek had happened was recorded as "position 38s -> 32s", a failure.
+    $want = [Math]::Min(8, [Math]::Max(4, $p1 - 1))
+    $p2 = $p1
+    $presses = 0
+    while ($presses -lt 3 -and $p2 -gt ($p1 - $want)) {
+        # Alternate the two keys the player maps to a backward seek, so both are still exercised.
+        if ($presses % 2 -eq 0) { Key 'KEYCODE_MEDIA_REWIND' } else { Key 'KEYCODE_DPAD_LEFT' }
+        $presses++
+        for ($poll = 0; $poll -lt 14; $poll++) {
+            Start-Sleep -Milliseconds 700
+            $snap = PlayingNow
+            if ($snap) { $p2 = [Math]::Min($p2, [int]$snap.positionSec) }
+            if ($p2 -le ($p1 - $want)) { break }
+        }
+    }
+    Record 'seek-backward' ($p2 -le ($p1 - $want)) "position ${p1}s -> lowest ${p2}s seen (${want}s required, ${presses} press(es) sent)"
     Shot '03-after-seek'
 
     # --- remote keys actually reached the player ---------------------
@@ -2458,9 +2528,35 @@ if ($opened) {
         # moves while seeking, that *is* the end-of-video behaviour under test, so it is recorded as
         # such rather than measured as if the new video had failed to finish.
         $videoBeforeSeeking = "$((PlayingNow).videoId)"
-        $presses = [Math]::Max(1, [int](($durationSec - 14) / 10))
-        for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
-        $afterSeeking = PlayingNow
+        # Seek to just before the end, and then *verify the presses landed*.
+        #
+        # A batch that does not land leaves the video at 0s, and the check then waits out the whole
+        # video before it can say anything (W13.1: "was GsrCSM_agk0 at 0s of 186s", the case the comment
+        # below already recorded as "observed as a baseline of '0s of 165s'"). That spends the tier's
+        # budget and ages the app log the completion oracle has to read. Pressing again is safe: if the
+        # presses overshoot instead, the queue advances, which is the behaviour under test, so the loop
+        # stops and says so.
+        $afterSeeking = $null
+        for ($attempt = 1; $attempt -le 3 -and -not $afterSeeking; $attempt++) {
+            $now = PlayingNow
+            if ($now -and "$($now.videoId)" -ne $videoBeforeSeeking) { $afterSeeking = $now; break }
+            $at = if ($now) { [int]$now.positionSec } else { 0 }
+            if ($now -and $at -ge ($durationSec - 20)) { $afterSeeking = $now; break }
+            $presses = [Math]::Max(1, [int](($durationSec - 14 - $at) / 10))
+            for ($i = 1; $i -le $presses; $i++) { Key 'KEYCODE_DPAD_RIGHT' }
+            # A seek is applied asynchronously, so the landing is polled for rather than assumed.
+            for ($poll = 0; $poll -lt 8 -and -not $afterSeeking; $poll++) {
+                Start-Sleep -Milliseconds 700
+                $snap = PlayingNow
+                if (-not $snap) { continue }
+                if ("$($snap.videoId)" -ne $videoBeforeSeeking) { $afterSeeking = $snap }
+                elseif ([int]$snap.positionSec -ge ($durationSec - 20)) { $afterSeeking = $snap }
+            }
+            if (-not $afterSeeking) {
+                Log "    end-of-video: the seek presses did not land (attempt $attempt, at ${at}s of ${durationSec}s) - pressing again"
+            }
+        }
+        if (-not $afterSeeking) { $afterSeeking = PlayingNow }
         if ($afterSeeking -and ("$($afterSeeking.videoId)" -ne $videoBeforeSeeking)) {
             Record 'end-of-video-handling' $true `
                 "the seek presses reached the end of $videoBeforeSeeking and the queue advanced to $($afterSeeking.videoId), which is the behaviour under test"
@@ -2487,31 +2583,83 @@ if ($opened) {
             Start-Sleep -Seconds 2
         }
         if ($null -eq $endBefore) {
-            Record 'end-of-video-handling' $false 'could not read the player state before waiting for the end'
+            # No player state at all can also mean the queue ended while the seek presses were being
+            # sent and the app has already left the player. That is the end of the queue, reported by
+            # the app itself, so it is recorded as the pass it is - and it still requires *both* halves
+            # of the completion evidence below, so an unreadable status can never become a silent pass
+            # for a video that never ended.
+            $endLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
+            $saidFinished = $endLog -match 'Approved queue finished'
+            Dump 'end-of-video-screen'
+            $facts = Get-UiFacts (Join-Path $out 'end-of-video-screen.xml')
+            $playerGone = [bool]($facts -and ($facts.Dump -match 'SafeTube for Kids') -and ($facts.Dump -match 'Refresh'))
+            if ($saidFinished -and $playerGone) {
+                Record 'end-of-video-handling' $true 'the queue ended while the seeks were being sent: the app reported the approved queue finished and the player screen is gone'
+            } else {
+                Record 'end-of-video-handling' $false 'could not read the player state before waiting for the end'
+            }
         } else {
             # Watch for the actual advance instead of breaking on a position stall: at the end of a
             # video the playhead legitimately stops changing for a moment while the queue moves on,
             # and treating that as "finished waiting" is what produced
             # "still on e_04ZrNroTo at 228s of 229s after waiting" - one second short of the end.
-            # The deadline has to cover the video actually playing to its end. When the seek presses
-            # land, only the last few seconds remain; when they do not (observed as a baseline of
-            # "0s of 165s"), the video has to play from the beginning and a fixed 150s deadline is
-            # simply too short - which is what failed as "still on MR5XSOdjKMA at 152s of 165s".
+            # The deadline has to cover the video actually playing to its end; the seeks above are
+            # verified to have landed, so normally only the last few seconds remain.
+            #
+            # The wait no longer *returns* on the first empty status sample. `currentlyPlaying` is
+            # briefly null while the app hands the queue over - `endEvent` clears the published state
+            # before the next `startEvent` sets it - and reading one such sample as "playback stopped"
+            # failed a run in which the app had gone on to handle the end correctly (W13.1: two of three
+            # full runs red here, and one of them diagnosed as "was GsrCSM_agk0 at 0s of 186s", where
+            # the seek presses had not landed at all). So the loop keeps polling, for the next video or
+            # for the app's own account of the end, and only the conjunction below ends it.
             $remaining = [Math]::Max(30, $durationSec - [int]$endBefore.positionSec)
-            $endAfter = Wait-QueueAdvance $endBefore ($remaining + 90)
-            Log "  end-of-video: was $($endBefore.videoId) at $($endBefore.positionSec)s of $($endBefore.durationSec)s; now $(if ($null -eq $endAfter) { 'playback stopped' } else { "$($endAfter.videoId) at $($endAfter.positionSec)s" })"
-            if ($null -eq $endAfter) {
-                # W12, D5: "playback stopped" is not "the queue finished". The app says which one it was
-                # in its own log, so a queue that silently died can no longer be recorded as correct
-                # handling of the end of a video - which is exactly what this assertion used to do.
+            $deadline = (Get-Date).AddSeconds($remaining + 90)
+            # Only what happens from here counts as evidence: the log is cleared so an end reported
+            # before this wait began cannot be read as this video's end (an overshoot during the seeks
+            # is handled by the advance branch above, which needs no log).
+            Adb @('logcat', '-c') | Out-Null
+            $endAfter = $endBefore
+            $advanced = $false
+            $saidFinished = $false
+            $lastSampleEmpty = $false
+            $endLog = ''
+            while ((Get-Date) -lt $deadline) {
+                Start-Sleep -Seconds 2
                 $endLog = (Adb @('logcat', '-d', '-s', 'SafeTube')) -join "`n"
                 if ($endLog -match 'Approved queue finished') {
-                    Record 'end-of-video-handling' $true "queue ended: the app reported the approved queue finished"
-                } else {
-                    Record 'end-of-video-handling' $false "playback stopped but the app never reported the queue finishing, so the queue may simply have died"
+                    $saidFinished = $true
+                    $endAfter = $null
+                    break
                 }
-            } elseif ($endAfter.videoId -ne $endBefore.videoId) {
+                $snap = PlayingNow
+                if ($snap -and ("$($snap.videoId)" -ne "$($endBefore.videoId)")) {
+                    $endAfter = $snap
+                    $advanced = $true
+                    break
+                }
+                if ($snap) { $endAfter = $snap; $lastSampleEmpty = $false } else { $lastSampleEmpty = $true }
+            }
+            $stopped = ($null -eq $endAfter) -or $lastSampleEmpty
+            Log "  end-of-video: was $($endBefore.videoId) at $($endBefore.positionSec)s of $($endBefore.durationSec)s; now $(if ($advanced) { "advanced to $($endAfter.videoId)" } elseif ($stopped) { 'playback stopped' } else { "$($endAfter.videoId) at $($endAfter.positionSec)s" })"
+            if ($advanced) {
                 Record 'end-of-video-handling' $true "advanced to next approved item: $($endAfter.videoId)"
+            } elseif ($stopped) {
+                # W12, D5: "playback stopped" is not "the queue finished". The completion is an event
+                # *the app reports* plus the player leaving the screen, and both are required. That is
+                # what makes a transient empty status sample harmless: a hand-over has neither the
+                # app's own report nor the library on screen, so it cannot be recorded as a completed
+                # queue - and a queue that silently died still fails, as it did before.
+                Dump 'end-of-video-screen'
+                $facts = Get-UiFacts (Join-Path $out 'end-of-video-screen.xml')
+                $playerGone = [bool]($facts -and ($facts.Dump -match 'SafeTube for Kids') -and ($facts.Dump -match 'Refresh'))
+                if ($saidFinished -and $playerGone) {
+                    Record 'end-of-video-handling' $true 'queue ended: the app reported the approved queue finished and the player screen is gone'
+                } elseif ($saidFinished -or $playerGone) {
+                    Record 'end-of-video-handling' $false "only half the end is evidenced (saidFinished=$saidFinished playerGone=$playerGone), so the queue may simply have died"
+                } else {
+                    Record 'end-of-video-handling' $false 'playback stopped but the app never reported the queue finishing, so the queue may simply have died'
+                }
             } else {
                 Record 'end-of-video-handling' $false "still on $($endAfter.videoId) at $($endAfter.positionSec)s of $($endAfter.durationSec)s after waiting"
             }
