@@ -33,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -50,7 +51,12 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.ResetAuthorization
+import tv.safetubeforkids.app.auth.ResetAuthorizationResult
 import tv.safetubeforkids.app.reset.SafeTubeReset
+import tv.safetubeforkids.app.ui.components.PinKeypad
+import tv.safetubeforkids.app.ui.theme.KidAccent
 import tv.safetubeforkids.app.ui.theme.KidBackground
 import tv.safetubeforkids.app.ui.theme.KidSurface
 import tv.safetubeforkids.app.ui.theme.KidText
@@ -59,19 +65,30 @@ import tv.safetubeforkids.app.ui.theme.OverscanPadding
 import tv.safetubeforkids.app.ui.theme.StatusError
 
 /**
- * The last resort, on the TV, behind a phrase and a second question.
+ * The destructive reset, on the TV: a parent credential, then a phrase, then a second question.
  *
- * This screen exists because there is no third secret. A parent who has forgotten the Parent PIN and
- * lost the Recovery Code cannot be distinguished from anybody else holding the remote, so the only
- * honest way back in is to put the device back to new - and that means the library goes too, because
- * the library is what the forgotten PIN was protecting.
+ * **Why a credential comes first (W13.1b).** The phrase is printed on this screen, so it proves intent
+ * and nothing else: anyone who can read can copy it. On its own that left a child able to erase the
+ * family's configuration - and then to take ownership of the TV by choosing the next Parent PIN during
+ * onboarding. So the flow now opens with a Parent PIN or a Recovery Code, the two credentials the
+ * product already recognises, and only a verified one moves it on to the phrase. The check is not merely
+ * this screen's: `SafeTubeReset.wipe` will not accept a caller that has not proved itself.
+ * Documentation for the parent is in `docs/W10_PARENT_ACCESS.md`.
  *
- * **Why it is typed out rather than confirmed with OK.** The phrase is the only part of this screen a
- * person cannot get through by pressing a button twice. `I UNDERSTAND THIS ERASES EVERYTHING` is five
- * words of intent, and typing it means reading it; an `OK` dialog on a television is something a
- * thumb does while the eyes are elsewhere. Case and stray spaces are forgiven - the *reading* is what
- * matters, not the shift key - but a partial phrase is refused, and there is a second, separate
- * question afterwards, because "are you sure?" should not be the same gesture as "I am sure".
+ * **Why the phrase and the question stayed.** They are the second safeguard in front of an irreversible
+ * operation, and a credential does not make anyone less likely to press through a dialog: the phrase is
+ * the only part of this screen a person cannot get through by pressing a button twice.
+ * `I UNDERSTAND THIS ERASES EVERYTHING` is five words of intent, and typing it means reading it; an `OK`
+ * dialog on a television is something a thumb does while the eyes are elsewhere. Case and stray spaces
+ * are forgiven - the *reading* is what matters, not the shift key - but a partial phrase is refused, and
+ * there is a second, separate question afterwards, because "are you sure?" should not be the same
+ * gesture as "I am sure".
+ *
+ * **What happens to a parent who has lost both credentials.** Nothing on this television can tell them
+ * from anybody else holding the remote, so this screen is not their way back: the app's own state has to
+ * be removed from Android's side (Settings → Apps → SafeTube for Kids → Clear storage, or uninstall and
+ * reinstall), after which SafeTube starts at first-run setup. That is the documented path, and it is
+ * honest about its consequences: everything SafeTube stored goes, exactly as it would here.
  */
 @Composable
 fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
@@ -101,6 +118,45 @@ fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
     var confirming by remember { mutableStateOf(false) }
     var working by remember { mutableStateOf(false) }
 
+    /**
+     * The parent's authorization, or null while the screen still needs one.
+     *
+     * W13.1b put a credential in front of this screen, because the phrase below is printed on it: it is a
+     * reading of intent, not a secret, so on its own it left a child able to erase the family's
+     * configuration and then take ownership by choosing the next PIN. The screen now walks three stages,
+     * and this value is what moves it from the first to the second - and what the wipe requires, since
+     * `SafeTubeReset.wipe` will not accept a caller that has not proved itself. The phrase and the second
+     * question are deliberately kept: they are the second safeguard in front of an irreversible
+     * operation, and a credential does not make a person any less likely to press through a dialog.
+     */
+    var authorization by remember { mutableStateOf<ResetAuthorization?>(null) }
+    var method by remember { mutableStateOf<ResetAuthorization.Method?>(null) }
+    var pin by remember { mutableStateOf("") }
+    var code by remember { mutableStateOf("") }
+    var authError by remember { mutableStateOf<String?>(null) }
+    var checking by remember { mutableStateOf(false) }
+
+    /** Ask the gate, off the UI thread: PBKDF2 is slow on purpose, and slow on the main thread is an ANR. */
+    fun authorize(submit: suspend () -> ResetAuthorizationResult) {
+        checking = true
+        authError = null
+        scope.launch(Dispatchers.Default) {
+            val result = submit()
+            withContext(Dispatchers.Main) {
+                checking = false
+                when (result) {
+                    is ResetAuthorizationResult.Granted -> {
+                        authorization = result.authorization
+                        // The secret has done its job; it does not stay in the composition.
+                        pin = ""
+                        code = ""
+                    }
+                    is ResetAuthorizationResult.Refused -> authError = result.message
+                }
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -126,7 +182,166 @@ fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
         Spacer(modifier = Modifier.height(8.dp))
         Text("This cannot be undone.", style = MaterialTheme.typography.bodyLarge, color = StatusError)
 
-        if (confirming) {
+        when {
+            authorization == null -> {
+                // --- Stage 1: the parent's credential ------------------------------------------
+                Spacer(modifier = Modifier.height(28.dp))
+                Text(
+                    "A parent has to approve this.",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = KidText,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Entering the Parent PIN or the Recovery Code authorizes erasing everything " +
+                        "SafeTube stores on this TV. Nothing is erased until you also type the phrase " +
+                        "and answer the question after it.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = KidTextDim,
+                )
+                Spacer(modifier = Modifier.height(20.dp))
+
+                if (method == null) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = { method = ResetAuthorization.Method.PARENT_PIN; authError = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Use the Parent PIN", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                        Button(
+                            onClick = { method = ResetAuthorization.Method.RECOVERY_CODE; authError = null },
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Use the Recovery Code", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                } else if (method == ResetAuthorization.Method.PARENT_PIN) {
+                    PinKeypad(
+                        pin = pin,
+                        label = "Parent PIN",
+                        onChange = { entered -> pin = entered; authError = null },
+                        enabled = !checking,
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = { authorize { ServiceLocator.resetGate.authorizeWithPin(pin) } },
+                            enabled = pin.length == tv.safetubeforkids.app.auth.PinManager.PIN_LENGTH && !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidAccent),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text(
+                                if (checking) "Checking\u2026" else "Continue",
+                                color = Color.Black,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Button(
+                            onClick = { method = null; pin = ""; authError = null },
+                            enabled = !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Back", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                        Button(
+                            onClick = onBack,
+                            enabled = !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Cancel", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                } else {
+                    Text(
+                        "Recovery Code, in three groups of four.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = KidTextDim,
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = code,
+                        onValueChange = { code = it; authError = null },
+                        modifier = Modifier
+                            .fillMaxWidth(0.7f)
+                            // The same hand-off the phrase field needs, for the same measured reason: a
+                            // focused field opens the television's keyboard, which then owns the remote.
+                            .onPreviewKeyEvent { event ->
+                                if (event.type == KeyEventType.KeyDown &&
+                                    (event.key == Key.DirectionDown || event.key == Key.Enter)
+                                ) {
+                                    keyboard?.hide()
+                                    focusManager.moveFocus(FocusDirection.Down)
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                        singleLine = true,
+                        label = { Text("Recovery Code", color = KidTextDim) },
+                        keyboardOptions = KeyboardOptions(
+                            capitalization = KeyboardCapitalization.Characters,
+                            imeAction = ImeAction.Done,
+                        ),
+                        keyboardActions = KeyboardActions(onDone = {
+                            keyboard?.hide()
+                            focusManager.moveFocus(FocusDirection.Down)
+                        }),
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = KidSurface,
+                            unfocusedContainerColor = KidSurface,
+                            focusedTextColor = KidText,
+                            unfocusedTextColor = KidTextDim,
+                            focusedIndicatorColor = KidAccent,
+                            cursorColor = KidText,
+                        ),
+                    )
+                    Spacer(modifier = Modifier.height(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Button(
+                            onClick = {
+                                authorize { ServiceLocator.resetGate.authorizeWithRecoveryCode(code) }
+                            },
+                            enabled = code.isNotBlank() && !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidAccent),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text(
+                                if (checking) "Checking\u2026" else "Verify",
+                                color = Color.Black,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Button(
+                            onClick = { method = null; code = ""; authError = null },
+                            enabled = !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Back", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                        Button(
+                            onClick = onBack,
+                            enabled = !checking,
+                            colors = ButtonDefaults.buttonColors(containerColor = KidSurface),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("Cancel", color = KidText, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                }
+
+                authError?.let {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Text(it, style = MaterialTheme.typography.bodyMedium, color = StatusError)
+                }
+            }
+
+            confirming -> {
             Spacer(modifier = Modifier.height(28.dp))
             Text(
                 "Erase everything and reset SafeTube?",
@@ -148,12 +363,20 @@ fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
                         working = true
                         // The wipe is database and file work: off the UI thread, and only then does the
                         // screen say what happened.
+                        //
+                        // The authorization is passed rather than implied: the wipe takes a proof of a
+                        // verified parent credential, and this screen holds the one it obtained in stage
+                        // one. Reaching this button without it is not a state the composition can be in -
+                        // the first stage is chosen whenever it is null - and even if it were, the call
+                        // below would not have anything to pass.
+                        val proof = authorization
                         scope.launch(Dispatchers.IO) {
-                            SafeTubeReset.wipe(context)
+                            if (proof == null) return@launch
+                            SafeTubeReset.wipe(context, proof)
                             withContext(Dispatchers.Main) { onReset() }
                         }
                     },
-                    enabled = !working,
+                    enabled = !working && authorization != null,
                     colors = ButtonDefaults.buttonColors(containerColor = StatusError),
                     shape = RoundedCornerShape(8.dp),
                 ) {
@@ -164,7 +387,9 @@ fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
                     )
                 }
             }
-        } else {
+            }
+
+            else -> {
             Spacer(modifier = Modifier.height(28.dp))
             Text("Type:", style = MaterialTheme.typography.bodyMedium, color = KidTextDim)
             Spacer(modifier = Modifier.height(8.dp))
@@ -261,6 +486,7 @@ fun ResetSafeTubeScreen(onBack: () -> Unit, onReset: () -> Unit) {
                 ) {
                     Text("Cancel", color = KidText, fontWeight = FontWeight.SemiBold)
                 }
+            }
             }
         }
     }

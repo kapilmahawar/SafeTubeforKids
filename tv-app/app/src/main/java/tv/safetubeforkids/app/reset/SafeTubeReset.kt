@@ -3,6 +3,7 @@ package tv.safetubeforkids.app.reset
 import android.content.Context
 import tv.safetubeforkids.app.CrashHandler
 import tv.safetubeforkids.app.ServiceLocator
+import tv.safetubeforkids.app.auth.ResetAuthorization
 import tv.safetubeforkids.app.auth.SharedPrefsParentCredentialStore
 import tv.safetubeforkids.app.data.events.PlayEventRecorder
 import tv.safetubeforkids.app.server.FileCatalogStore
@@ -64,10 +65,19 @@ object SafeTubeReset {
      * Wipes SafeTube's own state. Suspending because the database work is, and because the caller must
      * not be able to report "reset" while rows are still on their way out.
      *
+     * **The parameter is the point.** Until W13.1b this took only a `Context`, which meant every caller
+     * was authorized by definition and the only thing standing between a child and the wiped television
+     * was a screen. It now requires a [ResetAuthorization], which can be obtained only from
+     * [tv.safetubeforkids.app.auth.ResetGate] after a Parent PIN or a Recovery Code has been verified, so
+     * a caller cannot reach the wipe without a credential even by accident. `authorization` is not
+     * decoration: which credential proved the parent's authority is written into the log line below,
+     * because "the television was wiped" is exactly the event a support conversation needs to date and
+     * attribute.
+     *
      * Returns what it removed, so the TV can say something true about what just happened, and so the
      * verification harness can check the wipe from the outside rather than trusting this function.
      */
-    suspend fun wipe(context: Context): Report {
+    suspend fun wipe(context: Context, authorization: ResetAuthorization): Report {
         val database = ServiceLocator.database
         val removed = mutableMapOf<String, Int>()
 
@@ -128,7 +138,8 @@ object SafeTubeReset {
         }
 
         AppLogger.log(
-            "SafeTube reset: wiped " + removed.entries.joinToString(", ") { "${it.key}=${it.value}" }
+            "SafeTube reset: wiped " + removed.entries.joinToString(", ") { "${it.key}=${it.value}" } +
+                " (authorized by ${authorization.method})"
         )
         return Report(removed)
     }

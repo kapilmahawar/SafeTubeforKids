@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import tv.safetubeforkids.app.auth.ParentGate
 import tv.safetubeforkids.app.auth.PinManager
+import tv.safetubeforkids.app.auth.ResetGate
 import tv.safetubeforkids.app.auth.SessionManager
 import tv.safetubeforkids.app.auth.SharedPrefsParentCredentialStore
 import tv.safetubeforkids.app.auth.SharedPrefsPinLockoutPersistence
@@ -68,6 +69,17 @@ object ServiceLocator {
             signOutParentSessions = { sessionManager.invalidateAll() },
         )
     }
+
+    /**
+     * The boundary in front of the destructive reset, which accepts either parent credential.
+     *
+     * Separate from [parentGate] rather than folded into it: that one performs a small mutation on the
+     * strength of a single six-digit secret, while this one authorizes an irreversible wipe and has to
+     * accept two different credential kinds, each with its own limiter. Forcing the Recovery Code into a
+     * class whose whole shape is "one PIN, one action" would have made the abstraction say something
+     * untrue about what it checks.
+     */
+    val resetGate: ResetGate by lazy { ResetGate(pinManager) }
 
     /**
      * The TV's own catalog sync against its own SafeTube server.

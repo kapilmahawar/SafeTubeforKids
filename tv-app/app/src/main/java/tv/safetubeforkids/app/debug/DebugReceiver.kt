@@ -6,6 +6,7 @@ import android.content.Intent
 import android.util.Log
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.auth.PinResult
+import tv.safetubeforkids.app.auth.ResetAuthorizationResult
 import tv.safetubeforkids.app.data.ContentSourceRepository
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import tv.safetubeforkids.app.data.catalog.CatalogSyncResult
@@ -104,7 +105,7 @@ class DebugReceiver : BroadcastReceiver() {
             "$PKG.DEBUG_WHITELIST_APP" -> handleWhitelistApp(intent)
 
             // --- Lifecycle ---
-            "$PKG.DEBUG_FULL_RESET" -> handleFullReset(context)
+            "$PKG.DEBUG_FULL_RESET" -> handleFullReset(context, intent)
             "$PKG.DEBUG_SIMULATE_OFFLINE" -> handleSimulateOffline()
             "$PKG.DEBUG_SET_BANDWIDTH" -> handleSetBandwidth(intent)
             "$PKG.DEBUG_GET_STATE_DUMP" -> handleGetStateDump(context)
@@ -714,16 +715,31 @@ class DebugReceiver : BroadcastReceiver() {
     /**
      * The destructive reset, as a test instrument.
      *
-     * The product's own reset is on the TV (typed phrase, then a second question) and there is no HTTP
-     * route that can trigger it. This exists so an automated run can put a device back into the state
-     * a fresh install is in without a robot typing on a television - and it calls the same
-     * [tv.safetubeforkids.app.reset.SafeTubeReset] the TV screen calls, so what a test verifies is
-     * what a parent gets.
+     * The product's own reset is on the TV: a Parent PIN or a Recovery Code, then the typed phrase, then
+     * a second question. There is no HTTP route that can trigger it. This exists so an automated run can
+     * put a device back into the state a fresh install is in without a robot typing on a television -
+     * and it calls the same [tv.safetubeforkids.app.reset.SafeTubeReset] the TV screen calls, so what a
+     * test verifies is what a parent gets.
+     *
+     * **Since W13.1b it presents a credential like any other caller**: the `pin` extra is verified
+     * through [tv.safetubeforkids.app.auth.ResetGate], and without a valid one nothing is wiped. A test
+     * instrument is not a reason to keep a way around the check this phase added, and a run knows the
+     * PIN anyway because it installs it (`DEBUG_SET_PIN`).
      */
-    private fun handleFullReset(context: Context) {
+    private fun handleFullReset(context: Context, intent: Intent) {
+        val pin = intent.getStringExtra("pin") ?: run {
+            logResult("""{"error":"missing pin extra - the reset requires a parent credential"}""")
+            return
+        }
         scope.launch {
             try {
-                val report = tv.safetubeforkids.app.reset.SafeTubeReset.wipe(context)
+                val authorized = ServiceLocator.resetGate.authorizeWithPin(pin)
+                if (authorized !is ResetAuthorizationResult.Granted) {
+                    val message = (authorized as ResetAuthorizationResult.Refused).message
+                    logResult("""{"error":"refused","message":"$message"}""")
+                    return@launch
+                }
+                val report = tv.safetubeforkids.app.reset.SafeTubeReset.wipe(context, authorized.authorization)
                 logResult("""{"success":true,"removed":${report.removed.entries.joinToString(",", "{", "}") { "\"${it.key}\":${it.value}" }}}""")
             } catch (e: Exception) {
                 logResult("""{"error":"${e.message}"}""")
