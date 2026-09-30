@@ -13,6 +13,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.RuntimeEnvironment
 import tv.safetubeforkids.app.ServiceLocator
 import tv.safetubeforkids.app.auth.ParentCredentialStore
+import tv.safetubeforkids.app.auth.ResetAuthorization
+import tv.safetubeforkids.app.auth.ResetAuthorizationResult
+import tv.safetubeforkids.app.auth.ResetGate
 import tv.safetubeforkids.app.auth.SharedPrefsParentCredentialStore
 import tv.safetubeforkids.app.auth.TEST_PIN
 import tv.safetubeforkids.app.auth.testPinManager
@@ -64,6 +67,22 @@ class SafeTubeResetTest {
             session = sessions,
             catalog = FileCatalogStore.inFilesDir(context.filesDir),
         )
+    }
+
+    /**
+     * A proof of parent authority, obtained the way the product obtains one.
+     *
+     * W13.1b gave the wipe a precondition: it takes a `ResetAuthorization`, and the only thing that can
+     * produce one is `ResetGate` after a credential has been verified. These tests are about what the
+     * wipe removes, so they present the credential a parent would - which also means every one of them
+     * would fail to compile if that boundary were ever removed.
+     */
+    private fun parentApproved(): ResetAuthorization {
+        val gate = ResetGate(
+            testPinManager(store = store, onPinValidated = { sessions.createSession() ?: "" })
+        )
+        val granted = gate.authorizeWithPin(TEST_PIN)
+        return (granted as ResetAuthorizationResult.Granted).authorization
     }
 
     @After
@@ -118,7 +137,7 @@ class SafeTubeResetTest {
         assertTrue("the crash log exists before the wipe", crashFile.exists())
         assertNotNull("and a credential exists", store.readPin())
 
-        SafeTubeReset.wipe(context)
+        SafeTubeReset.wipe(context, parentApproved())
 
         assertNull("approved sources are gone", db.channelDao().getBySourceId("PLxyz"))
         assertEquals("cached videos are gone", 0, db.videoDao().count())
@@ -153,7 +172,7 @@ class SafeTubeResetTest {
         val foreignFile = File(context.filesDir, "someones-notes.txt").apply { writeText("not SafeTube's") }
         writePrefs("someone_elses_prefs", "key", "value")
 
-        SafeTubeReset.wipe(context)
+        SafeTubeReset.wipe(context, parentApproved())
 
         assertTrue("a file this app did not write is untouched", foreignFile.exists())
         assertEquals("not SafeTube's", foreignFile.readText())
@@ -172,7 +191,7 @@ class SafeTubeResetTest {
     fun afterTheResetTheDeviceIsBackToFirstRun() = runBlocking {
         seedEverything()
 
-        SafeTubeReset.wipe(context)
+        SafeTubeReset.wipe(context, parentApproved())
 
         assertFalse("a wiped TV has no Parent PIN, so onboarding runs again", ServiceLocator.pinManager.isConfigured())
         val created = ServiceLocator.pinManager.setup(TEST_PIN, TEST_PIN)
@@ -184,7 +203,7 @@ class SafeTubeResetTest {
     fun theResetReportsWhatItRemoved() = runBlocking {
         seedEverything()
 
-        val report = SafeTubeReset.wipe(context)
+        val report = SafeTubeReset.wipe(context, parentApproved())
 
         assertTrue("the watchdog can see the counts", report.removed.containsKey("files"))
         assertEquals("one approved source was removed", 1, report.removed["play_events"])
@@ -214,8 +233,8 @@ class SafeTubeResetTest {
     fun wipingAnAlreadyEmptyDeviceIsHarmless() = runBlocking {
         // A parent who resets a TV that has nothing on it must not see a crash; the operation is
         // idempotent because everything it does is "delete if present".
-        SafeTubeReset.wipe(context)
-        SafeTubeReset.wipe(context)
+        SafeTubeReset.wipe(context, parentApproved())
+        SafeTubeReset.wipe(context, parentApproved())
 
         assertEquals(0, db.channelDao().count())
         assertFalse(store.isConfigured())

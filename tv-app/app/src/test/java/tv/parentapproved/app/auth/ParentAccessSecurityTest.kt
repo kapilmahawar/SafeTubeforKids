@@ -49,13 +49,21 @@ class ParentAccessSecurityTest {
 
     private lateinit var db: CacheDatabase
     private lateinit var pins: PinManager
+    private val sessions = SessionManager()
 
     @Before
     fun setUp() {
         db = Room.inMemoryDatabaseBuilder(RuntimeEnvironment.getApplication(), CacheDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        pins = PinManager(store = InMemoryParentCredentialStore(), hasher = TestHasher)
+        // Wired the way production wires it, so a verified PIN issues a session here too. The
+        // destructive-reset boundary needs exactly that: `ResetGate` authorizes through `validate`, the
+        // same call the dashboard signs in with.
+        pins = PinManager(
+            store = InMemoryParentCredentialStore(),
+            onPinValidated = { sessions.createSession() ?: "" },
+            hasher = TestHasher,
+        )
         pins.setup(TEST_PIN, TEST_PIN)
     }
 
@@ -264,7 +272,11 @@ class ParentAccessSecurityTest {
             session = SessionManager(),
             catalog = FileCatalogStore.inFilesDir(RuntimeEnvironment.getApplication().filesDir),
         )
-        tv.safetubeforkids.app.reset.SafeTubeReset.wipe(RuntimeEnvironment.getApplication())
+        // The wipe takes a proof of a verified parent credential (W13.1b), so this test presents one -
+        // which is also what makes it a statement about the product rather than about a helper.
+        val proof = (ResetGate(pins).authorizeWithPin(TEST_PIN) as ResetAuthorizationResult.Granted)
+            .authorization
+        tv.safetubeforkids.app.reset.SafeTubeReset.wipe(RuntimeEnvironment.getApplication(), proof)
 
         assertFalse("after a wipe, even the previously approved video plays nothing", mayPlay("approved-1"))
         assertFalse("and an unapproved one still plays nothing", mayPlay("unapproved-1"))
