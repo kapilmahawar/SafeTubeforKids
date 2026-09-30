@@ -113,12 +113,38 @@ invalidated and a new one is issued. The catalog and the approved sources are no
 
 ## 6. Forgotten both: the destructive reset
 
-The only place this exists is the TV: **Settings → Reset SafeTube** (and, on a TV with no credential,
-the setup path). There is deliberately **no HTTP route that can wipe a TV**, because an unauthenticated
-request must not be able to erase a child's library
-(`SafeTubeResetTest.noUnauthenticatedRouteCanTriggerTheWipe`).
+**Since W13.1b this needs a parent credential first: the Parent PIN or the Recovery Code.** It used to
+ask only for the phrase below, and that was a hole rather than a design: the phrase is *printed on the
+screen it is typed into*, so it proves intent and nothing else, and a child who could read it could
+erase the family's configuration and then take ownership of the TV by choosing the next Parent PIN.
+The credential is verified by the mechanisms that already exist - `PinManager.validate` for the PIN,
+`PinManager.verifyRecoveryCode` for the code, each with its own persisted attempt counter and its own
+lockout - and the wipe itself now requires the proof that verification returns
+(`SafeTubeReset.wipe(context, authorization)`), so a future caller cannot reach it without one.
 
-It asks for the phrase to be typed:
+```text
+Settings → Reset SafeTube
+   → Parent PIN   OR   Recovery Code      (verified; a wrong one is refused and counted)
+   → the phrase below, typed             (confirmation of intent, not authentication)
+   → "Erase everything and reset SafeTube?" → [ ERASE & RESET ]
+   → the wipe, and first-run setup
+```
+
+The only place this exists is the TV: **Settings → Reset SafeTube**. There is deliberately **no HTTP
+route that can wipe a TV**, because an unauthenticated request must not be able to erase a child's
+library (`SafeTubeResetTest.noUnauthenticatedRouteCanTriggerTheWipe`).
+
+### If the PIN *and* the Recovery Code are both lost
+
+Nothing on the television can tell that person from anybody else holding the remote, so this screen is
+not their way back in - it requires a credential like everything else that changes protected state. The
+honest path is Android's own: **Settings → Apps → SafeTube for Kids → Clear storage**, or uninstall and
+reinstall. SafeTube then starts at first-run setup, where a new Parent PIN is created. The consequence
+is the same as the reset below: everything SafeTube stored goes, because it is what the lost credential
+was protecting. (This is what the earlier version of this document meant by "last resort"; it is no
+longer a password-free button, and `docs/TESTING.md` no longer claims a script drives it.)
+
+Then the phrase is asked for, typed out:
 
 ```text
 I UNDERSTAND THIS ERASES EVERYTHING
@@ -249,3 +275,9 @@ cd tv-app/scripts && powershell -File tv-e2e.ps1 -Tier player -SkipBuild
 `DEBUG_GET_PIN` no longer returns a PIN — there is none to return. `DEBUG_SET_PIN` installs one for
 automated runs, `DEBUG_RESET_PIN` clears the credential, and `DEBUG_FULL_RESET` performs the same wipe
 the TV's reset screen does. All three are debug-build only.
+
+**Since W13.1b, `DEBUG_FULL_RESET` needs the credential too**, as an extra:
+`am broadcast -a tv.safetubeforkids.app.DEBUG_FULL_RESET -n tv.safetubeforkids.app/.debug.DebugReceiver
+--es pin 482913`. It verifies that PIN through the same `ResetGate` the screen uses and wipes nothing
+without it: a test instrument is not a reason to keep a way around the check the phase added, and the
+harness already knows the PIN because it installs it.

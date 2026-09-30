@@ -87,9 +87,25 @@ byte-identical before and after, and puts the original library back — verifyin
 W10's live harness works the same way for the parent credential, and W10 changed how a run signs in:
 the Parent PIN is no longer generated per process and readable from a debug intent, so a harness
 **installs** one it knows (`DEBUG_SET_PIN`, addressed to `.debug.DebugReceiver` by name), and
-`DEBUG_GET_PIN` now answers only whether a credential exists. The destructive reset is verified by a
-focused script that drives the TV's own screens — phrase, refusal, second question, wipe — checking
-after every gate that nothing has been erased yet.
+`DEBUG_GET_PIN` now answers only whether a credential exists.
+
+**The destructive reset is not driven by a script.** An earlier version of this paragraph claimed a
+focused script walked the TV's own screens — phrase, refusal, second question, wipe — and that was not
+true of anything in the repository: the two scripts that could have been meant (`ui-test.sh`,
+`test-suite.sh`) still target the pre-fork package id and contain no reset coverage at all. What
+actually covers the reset today:
+
+| Layer | What it holds |
+| --- | --- |
+| Unit — `SafeTubeResetTest` (8) | the phrase's exactness, the wipe's scope in both directions, idempotence, the first-run state afterwards, and that no HTTP route can wipe |
+| Unit — `ResetGateTest` (12) | the credential gate: no credential authorizes nothing, the right PIN and the right Recovery Code authorize, the wrong ones do not, both lockouts apply, a malformed credential is a typo rather than a guess, and a proof names which credential authorized it |
+| Unit — `ResetMutationBoundaryTest` (5) | source guards: the wipe's signature requires a proof, only the reset screen and the debug instrument call it, and only the gate can mint one |
+| Unit — `ParentAccessSecurityTest` (10) | a credential is not permission: every parent-access operation, including the reset, still approves nothing |
+| Instrumented — `FullFlowTest` | the credential, a source, the database and the reset on a real device |
+| Device, by hand | the screens themselves: the credential stage appears, a wrong credential is refused with nothing erased, the correct PIN reaches the phrase stage, a wrong phrase erases nothing, and the correct phrase plus the second question wipes and returns the TV to setup (`docs/W13_1B_VERIFICATION.md`) |
+
+If a script for this is wanted, it has to be written — the harness in `tv-app/scripts/tv-e2e.ps1` does
+not cover the Settings screen or the reset flow at all.
 
 CI (`.github/workflows/ci.yml`) runs `./gradlew --no-daemon --stacktrace assembleDebug
 testDebugUnitTest`, checks the dashboard scripts parse, runs the four dashboard suites, and uploads the
