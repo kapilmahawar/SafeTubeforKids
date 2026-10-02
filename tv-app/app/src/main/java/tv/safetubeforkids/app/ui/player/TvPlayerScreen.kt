@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
@@ -29,6 +32,7 @@ import androidx.compose.material.icons.rounded.Replay10
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -74,7 +78,9 @@ import tv.safetubeforkids.app.playback.PlaybackKeys
 import tv.safetubeforkids.app.playback.PlayerMenu
 import tv.safetubeforkids.app.playback.PlayerOption
 import tv.safetubeforkids.app.ui.theme.KidAccent
-import tv.safetubeforkids.app.ui.theme.KidFocusRing
+import tv.safetubeforkids.app.ui.theme.KidFocusRingBright
+import tv.safetubeforkids.app.ui.theme.KidFocusRingHalo
+import tv.safetubeforkids.app.ui.theme.KidSurface
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
 import tv.safetubeforkids.app.ui.theme.StatusError
@@ -84,6 +90,15 @@ import tv.safetubeforkids.app.util.AppLogger
 private const val CONTROLS_TIMEOUT_MS = 4_000L
 private const val SEEK_STEP_MS = 10_000L
 private const val TICK_MS = 300L
+
+/**
+ * The focus indicator, in one place: a bright ring with a dark halo, drawn around a control rather than
+ * inside it. The halo is what keeps the ring legible over bright video, and drawing outside means a fill,
+ * a clip or a parent can never composite over the indicator or cut it in half.
+ */
+private val FOCUS_RING_WIDTH = 3.dp
+private val FOCUS_RING_HALO_WIDTH = 2.dp
+private val FOCUS_RING_SPACE = FOCUS_RING_HALO_WIDTH + FOCUS_RING_WIDTH + 1.dp
 
 /**
  * The transport controls, in the order the D-pad walks them.
@@ -536,8 +551,20 @@ fun TvPlayerScreen(
                         color = StatusError,
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+                        // Focus is the accent fill here, the language the menu chips and menu options
+                        // already use. Material's own focus cue is a tonal elevation shift, and it measured
+                        // 1.08:1 on this screen - the focused Retry at (56,173,105) against the unfocused
+                        // Back at (34,165,89), with no ring on either button - so a child could not tell
+                        // which of the two OK would activate.
+                        val retryInteraction = remember { MutableInteractionSource() }
+                        val retryFocused by retryInteraction.collectIsFocusedAsState()
                         Button(
                             onClick = onRetry,
+                            interactionSource = retryInteraction,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (retryFocused) KidAccent else KidSurface,
+                                contentColor = if (retryFocused) Color.Black else KidText,
+                            ),
                             modifier = Modifier.focusRequester(retryFocus),
                         ) {
                             Text(
@@ -545,7 +572,16 @@ fun TvPlayerScreen(
                                 style = MaterialTheme.typography.titleMedium,
                             )
                         }
-                        Button(onClick = onBack) {
+                        val backInteraction = remember { MutableInteractionSource() }
+                        val backFocused by backInteraction.collectIsFocusedAsState()
+                        Button(
+                            onClick = onBack,
+                            interactionSource = backInteraction,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (backFocused) KidAccent else KidSurface,
+                                contentColor = if (backFocused) Color.Black else KidText,
+                            ),
+                        ) {
                             Text(
                                 text = "Back",
                                 style = MaterialTheme.typography.titleMedium,
@@ -731,9 +767,10 @@ private fun TransportRow(
 /**
  * One transport control: focusable, visibly focused, and activated by CENTER/ENTER.
  *
- * The focused state is a filled disc *and* a ring, the pair the library's cards use, because colour alone
- * is not a focus indicator across a living room. Activation is on key *up* for CENTER, as the cards do, so
- * a held key does not fire twice.
+ * The focused state is the disc's fill *plus* a ring drawn around it, because colour alone is not a focus
+ * indicator across a living room - and a ring drawn *on* the disc is not one either when the disc is the
+ * same colour, which is what the previous accent-on-accent ring measured (see [FOCUS_RING_WIDTH]).
+ * Activation is on key *up* for CENTER, as the cards do, so a held key does not fire twice.
  */
 @Composable
 private fun TransportButton(
@@ -753,15 +790,6 @@ private fun TransportButton(
     Box(
         modifier = Modifier
             .size(size)
-            .clip(CircleShape)
-            .background(
-                when {
-                    primary -> KidAccent
-                    focused -> KidAccent.copy(alpha = 0.30f)
-                    else -> Color.White.copy(alpha = 0.12f)
-                }
-            )
-            .then(if (focused) Modifier.border(3.dp, KidFocusRing, CircleShape) else Modifier)
             .focusRequester(focusRequester)
             .focusProperties {
                 left = leftRequester
@@ -782,12 +810,41 @@ private fun TransportButton(
             },
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = description,
-            tint = if (primary) Color.Black else KidText,
-            modifier = Modifier.size(iconSize),
-        )
+        if (focused) {
+            // Drawn *around* the disc, never on top of it. This used to be a 3dp border painted inside the
+            // disc in `KidFocusRing` - the accent at 60% - which over Play/Pause's opaque accent fill
+            // measured 1.00:1 against the fill: identical pixels, so focusing the most-used control changed
+            // nothing visible. The other four managed 1.12-1.43:1, which is no better from a sofa.
+            // `requiredSize` lets the ring overflow this focusable node, so the discs, the spacing and every
+            // focus target stay exactly where they were.
+            Box(
+                modifier = Modifier
+                    .requiredSize(size + FOCUS_RING_SPACE * 2)
+                    .border(FOCUS_RING_HALO_WIDTH, KidFocusRingHalo, CircleShape)
+                    .padding(FOCUS_RING_HALO_WIDTH)
+                    .border(FOCUS_RING_WIDTH, KidFocusRingBright, CircleShape),
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(
+                    when {
+                        primary -> KidAccent
+                        focused -> KidAccent.copy(alpha = 0.30f)
+                        else -> Color.White.copy(alpha = 0.12f)
+                    }
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = description,
+                tint = if (primary) Color.Black else KidText,
+                modifier = Modifier.size(iconSize),
+            )
+        }
     }
 }
 @Composable
