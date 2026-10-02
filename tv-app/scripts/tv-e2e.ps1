@@ -43,13 +43,39 @@ param(
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)   # repository root
 $apk = Join-Path $repoRoot 'tv-app\app\build\outputs\apk\debug\app-debug.apk'
-$adb = if ($Adb) {
-    $Adb
-} elseif ($env:ANDROID_HOME -and (Test-Path (Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'))) {
-    Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'
-} else {
-    'adb'
+
+# Resolve adb to an actual executable path, never to a bare command name.
+#
+# The bare name is a trap in this script specifically: it defines a function called `Adb`, and
+# PowerShell resolves a function before an application of the same name, so `& $adb` with $adb = 'adb'
+# called that function from inside itself and recursed until PowerShell aborted the whole run with
+# "The script failed due to call depth overflow" - before the first device check, and only when
+# ANDROID_HOME was unset (with it set, a full path was used and everything worked). A resolved path
+# cannot be shadowed by a function.
+function Resolve-AdbExecutable([string]$explicit) {
+    if ($explicit) {
+        if ($explicit -match '[\\/]') { return $explicit }
+        # An explicitly passed *name* has to be resolved too, or it re-opens the recursion above.
+        $named = Get-Command $explicit -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($named) { return $named.Source }
+        return ''
+    }
+    $roots = @()
+    if ($env:ANDROID_HOME) { $roots += $env:ANDROID_HOME }
+    if ($env:ANDROID_SDK_ROOT) { $roots += $env:ANDROID_SDK_ROOT }
+    foreach ($root in $roots) {
+        $candidate = Join-Path $root 'platform-tools\adb.exe'
+        if (Test-Path $candidate) { return $candidate }
+    }
+    # -CommandType Application cannot return this script's own function, so the result is always a path
+    # to a real program. The extension is spelled out because PATHEXT is not applied to every lookup.
+    foreach ($name in @('adb.exe', 'adb.cmd', 'adb.bat')) {
+        $found = Get-Command $name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($found) { return $found.Source }
+    }
+    return ''
 }
+$adb = Resolve-AdbExecutable $Adb
 $pkg = 'tv.safetubeforkids.app'
 # Where the dashboard answers: the TV's own address normally, or 127.0.0.1 when a remote
 # emulator's guest port has been tunnelled here with adb forward (a guest's 8080 is not exposed
@@ -77,6 +103,10 @@ function Record([string]$name, [bool]$ok, [string]$detail = '') {
 function Adb([string[]]$adbArgs) {
     # Android tools (monkey, logcat) routinely write progress to stderr; that must not be
     # treated as a terminating error under $ErrorActionPreference = 'Stop'.
+    #
+    # $adb is a resolved executable path (Resolve-AdbExecutable). It must stay that way: a bare 'adb'
+    # here would be resolved by PowerShell's command lookup, which prefers this very function over
+    # adb.exe, and the call would recurse until the run died with a call-depth overflow.
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
@@ -85,6 +115,22 @@ function Adb([string[]]$adbArgs) {
         $ErrorActionPreference = $previous
     }
 }
+# Validation of the adb resolution path, and the first thing the run reports about itself: prove the
+# resolved program answers before a single check depends on it, and record which binary was used. This is
+# deliberately cheap - one `version` call - and it turns "adb is broken" into a BLOCKED run with a reason
+# instead of a cascade of meaningless failures. It sits after Log/Adb are defined, because reporting the
+# problem is the whole point of it.
+if (-not $adb) {
+    Log 'ADB_TEST: BLOCKED - no adb executable found: set ANDROID_HOME (or ANDROID_SDK_ROOT) or put adb.exe on PATH'
+    exit 2
+}
+$adbVersion = ''
+try { $adbVersion = ((& $adb version 2>&1) | Select-Object -First 1) } catch { $adbVersion = "unusable: $($_.Exception.Message)" }
+if ("$adbVersion" -notmatch 'Android Debug Bridge') {
+    Log "ADB_TEST: BLOCKED - $adb did not answer 'version' ($adbVersion)"
+    exit 2
+}
+Log "adb: $adb [$adbVersion]"
 # Every key press goes through here, and a press is only delivered when SafeTube is the focused app.
 #
 # This is not defensive decoration. The TV this runs against is a real living-room device with ZEE5,
@@ -103,8 +149,18 @@ function Test-WrongAppInFront([string]$keyCode) {
         return $false
     }
     $script:lastForegroundCheck = Get-Date
-    if ((ForegroundPackage) -eq $pkg) { return $false }
-    Log "  NOT delivering ${keyCode}: $(ForegroundPackage) is in front, not $pkg - relaunching the app instead"
+    $front = ForegroundPackage
+    if ($front -eq $pkg) { return $false }
+    # A photo screen saver is not "the wrong app": relaunching the app behind it changes nothing and every
+    # later key keeps going to the photo frame. Waking the TV ends the dream, so that is done first.
+    if ($front -match 'screensaver|dream') {
+        Log "  the screen saver is in front ($front) - waking the TV before delivering the key"
+        Adb @('shell', 'input keyevent KEYCODE_WAKEUP') | Out-Null
+        Start-Sleep -Seconds 3
+        $front = ForegroundPackage
+        if ($front -eq $pkg) { return $false }
+    }
+    Log "  NOT delivering ${keyCode}: $front is in front, not $pkg - relaunching the app instead"
     Adb @('shell', "monkey -p $pkg -c android.intent.category.LEANBACK_LAUNCHER 1") | Out-Null
     Start-Sleep -Seconds 12
     $script:wrongAppDrops = $script:wrongAppDrops + 1
@@ -253,6 +309,40 @@ $deviceInfo = @("serial: $Serial") + ($props.GetEnumerator() | ForEach-Object { 
     @("wm size: $wmSize", "wm density: $wmDensity")
 $deviceInfo | Set-Content (Join-Path $out 'device.txt')
 $deviceInfo | ForEach-Object { Log "  $_" }
+
+# ---------------------------------------------------------------- screen saver
+# This TV runs a photo screen saver that takes the foreground when it is idle. A run against a device with
+# the screen saver up is not a run with a failing assertion, it is a run that cannot touch the app at all:
+# every key goes to the photo frame, `monkey` relaunches the app *behind* it, and the tier then dies with
+# "the app could not be returned to the library" followed by "PLAYER_FEATURE_TEST: BLOCKED" - observed on
+# the Mi Box in W13.2.1, where a 23:19 run was spent against `com.furnaghan.android.photoscreensaver` with
+# every dump showing the photo frame's weather text. A focus test in particular cannot work through it.
+# The switch is turned off for the run and put back exactly as found.
+$screenSaverOriginal = ((Adb @('shell', 'settings get secure screensaver_enabled')) -join '').Trim()
+if ($screenSaverOriginal -ne '0') {
+    Adb @('shell', 'settings put secure screensaver_enabled 0') | Out-Null
+    Log "screen saver: disabled for this run (was '$screenSaverOriginal')"
+} else {
+    Log "screen saver: already off ('$screenSaverOriginal')"
+}
+# Disabling it only stops the *next* activation, so a screen saver that is already up has to be dismissed:
+# WAKEUP ends the dream, and it is sent before any phase needs the foreground.
+$frontAtStart = ForegroundPackage
+if ($frontAtStart -match 'screensaver|dream') {
+    Log "  the screen saver is in front ($frontAtStart) - waking the TV so the app can take the foreground"
+    Adb @('shell', 'input keyevent KEYCODE_WAKEUP') | Out-Null
+    Start-Sleep -Seconds 3
+    Adb @('shell', 'input keyevent KEYCODE_BACK') | Out-Null
+    Start-Sleep -Seconds 3
+}
+
+# The screen saver is a preference of the household, not of the harness: put it back exactly as found.
+function Restore-ScreenSaver {
+    if ($screenSaverOriginal -and $screenSaverOriginal -ne '0') {
+        Adb @('shell', "settings put secure screensaver_enabled $screenSaverOriginal") | Out-Null
+        Log "screen saver: restored to '$screenSaverOriginal'"
+    }
+}
 
 $commit = (& git -C $repoRoot rev-parse HEAD 2>&1) -join ''
 "$commit" | Set-Content (Join-Path $out 'commit.txt')
@@ -729,6 +819,69 @@ function Get-UiFacts([string]$dumpPath) {
     }
     $facts.Focusable = $focusable
     return $facts
+}
+# The *deepest* focused node: the focus target, as opposed to an ancestor that also reports focused.
+#
+# uiautomator marks every ancestor of the focused node focused="true" as well, and on a Compose screen the
+# full-screen surface container is reported focused whenever any descendant holds focus. The last focused
+# node in document order therefore describes what a subtree contains rather than where the remote is -
+# during W13.2 it reported the surface with the transport row's label attached to it, which reads exactly
+# like "the row is focused" while the row is not. The target is the smallest focused rectangle, and its
+# label comes from the node itself or, for a Compose icon, from the child that carries the description.
+function Get-DeepestFocused([string]$dumpPath) {
+    if (-not (Test-Path $dumpPath)) { return $null }
+    $raw = Get-Content $dumpPath -Raw
+    $decoded = $raw -replace '&amp;', '&' -replace '&quot;', '"' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&apos;', "'"
+    try { [xml]$xml = $decoded } catch { return $null }
+    $best = $null
+    $bestArea = [int]::MaxValue
+    foreach ($node in $xml.SelectNodes('//node')) {
+        if ($node.focused -ne 'true') { continue }
+        $m = [regex]::Match("$($node.bounds)", '\[(\d+),(\d+)\]\[(\d+),(\d+)\]')
+        if (-not $m.Success) { continue }
+        $area = ([int]$m.Groups[3].Value - [int]$m.Groups[1].Value) * ([int]$m.Groups[4].Value - [int]$m.Groups[2].Value)
+        if ($area -ge $bestArea) { continue }
+        $bestArea = $area
+        $best = $node
+    }
+    if (-not $best) { return $null }
+    $label = "$($best.'content-desc')"
+    if (-not $label) { $label = "$($best.text)" }
+    if (-not $label) {
+        # A Compose icon is a child of the focusable wrapper, so the wrapper itself looks unlabelled.
+        $child = $best.SelectNodes('.//node') | Where-Object { $_.'content-desc' -or $_.text } | Select-Object -First 1
+        if ($child) {
+            $label = if ($child.'content-desc') { "$($child.'content-desc')" } else { "$($child.text)" }
+        }
+    }
+    return [pscustomobject]@{
+        Label  = $label
+        Bounds = "$($best.bounds)"
+        Area   = $bestArea
+        Class  = "$($best.class)"
+    }
+}
+# A focus test needs one dump per D-pad step, and a single uiautomator dump can come back empty or
+# unparseable. That has to be reported as unreadable, never as "focus is not on the row".
+function Get-FocusTarget([string]$name) {
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        $file = "$name-$attempt"
+        Dump $file
+        $target = Get-DeepestFocused (Join-Path $out "$file.xml")
+        if ($target) { return $target }
+        Log "    [$name] uiautomator dump attempt $attempt produced no focused node - retrying"
+    }
+    return $null
+}
+# What the transport row calls its controls, in D-pad order. The middle one is a single control that
+# labels itself after what pressing it does, so a playing video shows 'Pause' where a paused one shows
+# 'Play'; both are the toggle.
+$script:TransportLabels = @('Previous', 'Rewind 10 seconds', 'Play/Pause', 'Forward 10 seconds', 'Next')
+function Get-TransportLabel($target) {
+    if (-not $target) { return '' }
+    $label = "$($target.Label)"
+    if ($label -eq 'Play' -or $label -eq 'Pause') { return 'Play/Pause' }
+    return $label
 }
 # logcat keeps about 4 KB of a single log entry, so a dump of a whole 46-node library arrives cut
 # in half. Closing the brackets of the longest prefix that is still well-formed turns that into
@@ -1664,13 +1817,29 @@ if ($Tier -eq 'example') {
     $failed = @($script:results.GetEnumerator() | Where-Object { $_.Value -eq 'FAIL' })
     Log ("W11 EXAMPLE_LIBRARY_TEST: {0} ({1} checks, {2} failed)" -f $(if ($failed.Count) { 'FAIL' } else { 'PASS' }), $script:results.Count, $failed.Count)
     Log "artifacts: $out"
+    Restore-ScreenSaver
     if ($failed.Count) { exit 1 } else { exit 0 }
 }
 
 EnsureApp 'w6' | Out-Null
 if (Go-ToLibrary 'before the hierarchy checks') {
     Log '=== W6: categories are titles, sub-categories are cards ==='
+    # Deterministic fixture before reading the projection.
+    #
+    # The projection is dumped as ONE log entry, and logcat keeps only about 4 KB of one entry - so
+    # whichever shelf arrives first decides what this check is able to see. `shelf-continue-watching` is
+    # built from resumable videos, and on a device whose watch history has accumulated it holds enough
+    # cards to consume that entire budget: the payload then arrives cut before any shelf that has cards,
+    # and this check failed with "no shelf with cards to navigate" while the app's own projection was
+    # correct (W13.2: 9 shelf ids, all continue-watching, ~4 KB payload, first shelf 11 cards).
+    # Forgetting the saved playheads - the app's own debug action, whose purpose is reaching the state a
+    # fresh installation starts in - empties that shelf without destroying the parent's approved library,
+    # so the first shelf to arrive is a real one. The projection itself is untouched; only the fixture is
+    # pinned instead of depending on what happened to be watched on this TV.
+    $clearedResume = Get-DebugDump 'DEBUG_CLEAR_RESUME_POSITIONS'
+    Log "  resume positions cleared before the projection: $(if ($clearedResume) { $clearedResume } else { 'no result reported' })"
     $projection = Get-DebugDump 'DEBUG_DUMP_CATALOG_UI'
+    $projectionLength = if ($projection) { $projection.Length } else { 0 }
     $model = $null
     # Parsed with the tolerant reader, not a plain JSON parse: the projection of a library this size is
 # longer than one logcat entry, so it arrives cut and a strict parse turns that into "the app did not
@@ -1679,11 +1848,24 @@ if (Go-ToLibrary 'before the hierarchy checks') {
             $model = ConvertFrom-DumpJson $projection
 
     if (-not $model) {
-        Record 'w6-catalog-projection' $false 'the app did not report its catalogue projection'
+        Record 'w6-catalog-projection' $false "the app did not report its catalogue projection (payload $projectionLength chars)"
     } else {
+        # Evidence about the capture itself, so a truncated payload can never masquerade as a product
+        # problem: the app reports how many shelves exist, and the tolerant reader reports how many
+        # arrived. They differ exactly when logcat cut the entry.
+        $parsedShelves = @($model.shelves).Count
+        $reportedShelves = [int]$model.shelfCount
+        $shelfIds = (@($model.shelves) | ForEach-Object { "$($_.id)" }) -join ', '
+        $captureTruncated = $parsedShelves -lt $reportedShelves
+        Log "  projection payload $projectionLength chars; app reports $reportedShelves shelf(s), $parsedShelves arrived [$shelfIds]"
         $shelf = $model.shelves | Where-Object { $_.id -ne 'shelf-continue-watching' } | Select-Object -First 1
         if (-not $shelf -or $shelf.cards.Count -eq 0) {
-            Record 'w6-catalog-projection' $false 'no shelf with cards to navigate'
+            $why = if ($captureTruncated) {
+                "the projection arrived truncated ($parsedShelves of $reportedShelves shelves: $shelfIds) and no shelf with cards was captured"
+            } else {
+                "no shelf with cards to navigate (shelves: $shelfIds)"
+            }
+            Record 'w6-catalog-projection' $false $why
         } else {
             $first = $shelf.cards[0]
             $shelfLine = ($shelf.cards | ForEach-Object { "$($_.title)[$($_.kind)]" }) -join ' '
@@ -2723,7 +2905,7 @@ if ($opened) {
     Shot '18-security'
 
     # exported surface, recorded as an artifact for review
-    $aapt2 = Join-Path $env:ANDROID_HOME 'build-tools\36.0.0\aapt2.exe'
+    $aapt2 = if ($env:ANDROID_HOME) { Join-Path $env:ANDROID_HOME 'build-tools\36.0.0\aapt2.exe' } else { '' }
     if (Test-Path $aapt2) {
         & $aapt2 dump xmltree --file AndroidManifest.xml $apk 2>&1 | Set-Content (Join-Path $out 'manifest-tree.txt')
         Log '  exported component surface written to manifest-tree.txt'
@@ -3007,6 +3189,117 @@ if ($opened) {
     }
 }
 
+# ---------------------------------------------------------------- transport row D-pad focus (W13.2)
+# The transport controls are the only player UI reached through a *focus graph* instead of a key handler,
+# and both ways they were broken were invisible to every API-based check: the overlay hid the row out from
+# under the remote 4s after the last input, and the buttons lost focus to the full-screen surface. Only the
+# focused node on screen can witness that, which costs one uiautomator dump per D-pad step - and is why
+# this block sits after every API-based assertion in the tier (see the note on Dump above).
+if ($Tier -eq 'player' -or $Tier -eq 'full') {
+    Log '=== W13.2: transport row D-pad focus ==='
+    EnsureApp 'transport-focus' | Out-Null
+
+    # The video must outlast the walk. The walk costs tens of seconds of dumps and key presses, and a video
+    # that ends during it turns every later assertion into a pass against a stopped player - which is
+    # exactly how a 27s clip produced a vacuous "pause and resume" result during W13.2. The duration is
+    # read back from the app and asserted, never assumed, and candidates come from what is approved now.
+    $focusState = $null
+    $skipped = @()
+    for ($attempt = 1; $attempt -le 6; $attempt++) {
+        $candidate = Start-ApprovedPlayback 'transport-focus' $skipped
+        if (-not $candidate) { break }
+        $candidateDuration = [int]$candidate.durationSec
+        if ($candidateDuration -ge 180) { $focusState = $candidate; break }
+        Log "  [transport-focus] $($candidate.videoId) runs ${candidateDuration}s - too short for a walk of tens of seconds; trying another approved video"
+        $skipped += "$($candidate.videoId)"
+    }
+    $focusVideo = ''
+    if ($focusState) {
+        $focusVideo = "$($focusState.videoId)"
+        Record 'transport-focus-video' $true "$focusVideo runs $([int]$focusState.durationSec)s from source $($focusState.playlistId)"
+    } else {
+        Record 'transport-focus-video' $false "no approved video long enough (>=180s) could be started; candidates skipped: $($skipped -join ', ')"
+    }
+
+    if ($focusState) {
+        $observed = @()
+        Clear-ResumeOffer 'transport-focus'
+        # Let the overlay close itself, so the first DOWN is the documented entry press and not a press that
+        # merely reveals the controls - the state the manual verification used.
+        Start-Sleep -Seconds 6
+
+        # 1. Entry. DOWN hands the remote to the settings row, whose highlight is state and leaves focus on
+        #    the surface; the second DOWN descends into the transport row below it.
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_DOWN'
+        $target = Get-FocusTarget '20-transport-entry'
+        $entryLabel = Get-TransportLabel $target
+        Shot '20-transport-entry'
+        $observed += $entryLabel
+        if ($target) { Log "    entry: '$($target.Label)' class=$($target.Class) bounds=$($target.Bounds) area=$($target.Area)" }
+        Record 'transport-focus-entry' ($entryLabel -eq 'Previous') "DOWN,DOWN -> '$entryLabel' ($(if ($target) { $target.Bounds } else { 'no focused node' }))"
+
+        # 2. RIGHT across the row, one dump per press.
+        $rightExpected = @('Rewind 10 seconds', 'Play/Pause', 'Forward 10 seconds', 'Next')
+        for ($i = 0; $i -lt $rightExpected.Count; $i++) {
+            Key 'KEYCODE_DPAD_RIGHT'
+            $target = Get-FocusTarget "21-transport-right-$i"
+            $label = Get-TransportLabel $target
+            $observed += $label
+            Log "    RIGHT -> '$label' ($(if ($target) { $target.Bounds } else { 'no focused node' }))"
+        }
+        Shot '21-transport-right'
+        $rightSeen = @($observed[1..4])
+        Record 'transport-focus-right-sequence' (($rightSeen -join '|') -eq ($rightExpected -join '|')) ("Previous > " + ($rightSeen -join ' > '))
+
+        # 3. LEFT back through the same four.
+        $leftExpected = @('Forward 10 seconds', 'Play/Pause', 'Rewind 10 seconds', 'Previous')
+        for ($i = 0; $i -lt $leftExpected.Count; $i++) {
+            Key 'KEYCODE_DPAD_LEFT'
+            $target = Get-FocusTarget "22-transport-left-$i"
+            $label = Get-TransportLabel $target
+            $observed += $label
+            Log "    LEFT -> '$label' ($(if ($target) { $target.Bounds } else { 'no focused node' }))"
+        }
+        Shot '22-transport-left'
+        $leftSeen = @($observed[5..8])
+        Record 'transport-focus-left-sequence' (($leftSeen -join '|') -eq ($leftExpected -join '|')) ($leftSeen -join ' > ')
+
+        # 4. Idle. 6s is past the 4s auto-hide, which used to remove the focused control from the
+        #    composition and drop focus to the full-screen surface.
+        $beforeIdle = Get-TransportLabel (Get-FocusTarget '23-transport-before-idle')
+        Start-Sleep -Seconds 6
+        $idleTarget = Get-FocusTarget '24-transport-idle'
+        $afterIdle = Get-TransportLabel $idleTarget
+        Shot '24-transport-idle'
+        Record 'transport-focus-idle-retention' ((($script:TransportLabels -contains $afterIdle) -and ($afterIdle -eq $beforeIdle))) "'$beforeIdle' held through 6s idle (was '$afterIdle' after; bounds $(if ($idleTarget) { $idleTarget.Bounds } else { 'unreadable' }))"
+
+        # 5. Leaving and returning. Asserting the *surface* after UP is the point: "still focused on
+        #    something" would pass even if UP did nothing at all.
+        Key 'KEYCODE_DPAD_UP'
+        $upTarget = Get-FocusTarget '25-transport-after-up'
+        $upLabel = Get-TransportLabel $upTarget
+        $leftRow = -not ($script:TransportLabels -contains $upLabel)
+        Key 'KEYCODE_DPAD_DOWN'
+        Key 'KEYCODE_DPAD_DOWN'
+        $backTarget = Get-FocusTarget '26-transport-re-entry'
+        $backLabel = Get-TransportLabel $backTarget
+        Shot '26-transport-re-entry'
+        Record 'transport-focus-vertical-navigation' ($leftRow -and ($backLabel -eq 'Previous')) "UP -> '$upLabel' ($(if ($upTarget) { $upTarget.Bounds } else { 'unreadable' })); DOWN,DOWN -> '$backLabel'"
+
+        # 6. The walk must not have been a walk over a stopped or changed player.
+        $afterWalk = Get-PlaybackState 'transport-focus' 3
+        $aliveDetail = if ($null -eq $afterWalk) {
+            'GET /status reported nothing playing after the walk'
+        } else {
+            "video=$($afterWalk.videoId) playing=$($afterWalk.playing) at $($afterWalk.positionSec)s of $($afterWalk.durationSec)s"
+        }
+        $alive = ($null -ne $afterWalk) -and ("$($afterWalk.videoId)" -eq $focusVideo) -and ($afterWalk.playing -eq $true)
+        Record 'transport-focus-playback-alive' $alive $aliveDetail
+        Log "  transport focus sequence: $($observed -join ' > ')"
+    }
+}
+
 # ---------------------------------------------------------------- lifecycle
 Log "=== HOME -> return ==="
 Key 'KEYCODE_HOME'
@@ -3048,6 +3341,7 @@ $script:results.GetEnumerator() | ForEach-Object { Log ("  {0,-30} {1}" -f $_.Ke
 if ($script:blocked) { Log '  PLAYER_FEATURE_TEST           BLOCKED' }
 $script:results | ConvertTo-Json | Set-Content (Join-Path $out 'result.json')
 Log "artifacts: $out"
+Restore-ScreenSaver
 if ($script:blocked) { Log 'FINAL: BLOCKED (player features could not be exercised over the remote)'; exit 3 }
 if ($script:failures.Count -gt 0) { Log "FINAL: FAIL ($($script:failures -join ', '))"; exit 1 }
 Log 'FINAL: PASS'
