@@ -1870,6 +1870,10 @@ if (Go-ToLibrary 'before the hierarchy checks') {
             $first = $shelf.cards[0]
             $shelfLine = ($shelf.cards | ForEach-Object { "$($_.title)[$($_.kind)]" }) -join ' '
             Log "  shelf '$($shelf.title)': $shelfLine"
+            # Reported on both paths. This check used to record only failures, so a green run said nothing
+            # about the projection and the W13.2.1 fix for it could only be read out of the free-text line
+            # above.
+            Record 'w6-catalog-projection' $true "shelf '$($shelf.title)' with $($shelf.cards.Count) card(s); $parsedShelves of $reportedShelves shelf(s) arrived in $projectionLength chars$(if ($captureTruncated) { ' (the rest was cut by the log entry limit)' } else { '' })"
             # Remembered for the D-pad phase below, which then knows whether the first press of Enter
             # opens a container or starts a video - a guess about that route is what made it flaky.
             $script:w6FirstCardIsContainer = ($first.kind -eq 'CONTAINER')
