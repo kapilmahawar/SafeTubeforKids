@@ -2234,7 +2234,13 @@ if ($opened) {
 
     # Make sure a menu is genuinely open before asserting that BACK closes it: the idle timer may
     # already have closed the previous one, in which case BACK would leave the player instead.
-    Key 'KEYCODE_DPAD_DOWN'
+    # UP twice for the same reason as the speed phase below: the settings row is already active from
+    # the captions phase, and DOWN from an active row now descends into the transport row instead of
+    # re-entering the settings row. UP,UP lands on the row's first button from any state, so OK opens a
+    # menu in every case (it toggles playback if the row is not active, which is what makes this
+    # deterministic rather than hopeful).
+    Key 'KEYCODE_DPAD_UP'
+    Key 'KEYCODE_DPAD_UP'
     Key 'KEYCODE_DPAD_CENTER'
     Start-Sleep -Seconds 1
     Key 'KEYCODE_BACK'
@@ -2243,8 +2249,18 @@ if ($opened) {
     Record 'menu-back-closes-menu-only' $stillPlayingAfterBack
     Shot '12-after-menu-back'
 
-    # playback speed: DOWN into the row, RIGHT x3 to Speed, open, then 1.0x -> 1.25x
-    Key 'KEYCODE_DPAD_DOWN'
+    # playback speed: the row's first button, RIGHT x3 to Speed, open, then 1.0x -> 1.25x
+    #
+    # UP twice, not DOWN, is what returns the highlight to the row's first button. DOWN stopped being
+    # idempotent in W13.2: the settings row is the first stop from the video, and a second DOWN
+    # descends into the transport row below it (verified on the Mi Box). This phase inherits the row
+    # state from the BACK check just above, which already pressed DOWN, so a DOWN here landed on the
+    # transport controls: RIGHT walked them, OK toggled playback, the SPEED menu never opened - which
+    # is how this check failed while the same navigation passed in the aspect phase, where the video is
+    # reopened first. UP leaves the transport row when it holds focus and activates the settings row at
+    # its first button from every other state, so the highlight is deterministic either way.
+    Key 'KEYCODE_DPAD_UP'
+    Key 'KEYCODE_DPAD_UP'
     foreach ($i in 1..3) { Key 'KEYCODE_DPAD_RIGHT' }
     Key 'KEYCODE_DPAD_CENTER'
     Start-Sleep -Seconds 2

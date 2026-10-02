@@ -5,6 +5,7 @@ import android.view.ViewGroup
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,6 +26,8 @@ import androidx.compose.material.icons.rounded.Forward10
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Replay10
+import androidx.compose.material.icons.rounded.SkipNext
+import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -40,14 +43,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalContext
@@ -65,6 +74,7 @@ import tv.safetubeforkids.app.playback.PlaybackKeys
 import tv.safetubeforkids.app.playback.PlayerMenu
 import tv.safetubeforkids.app.playback.PlayerOption
 import tv.safetubeforkids.app.ui.theme.KidAccent
+import tv.safetubeforkids.app.ui.theme.KidFocusRing
 import tv.safetubeforkids.app.ui.theme.KidText
 import tv.safetubeforkids.app.ui.theme.KidTextDim
 import tv.safetubeforkids.app.ui.theme.StatusError
@@ -74,6 +84,21 @@ import tv.safetubeforkids.app.util.AppLogger
 private const val CONTROLS_TIMEOUT_MS = 4_000L
 private const val SEEK_STEP_MS = 10_000L
 private const val TICK_MS = 300L
+
+/**
+ * The transport controls, in the order the D-pad walks them.
+ *
+ * One list rather than five literals: the order is the contract - LEFT/RIGHT traverses them in this order
+ * and the harness reads these labels off the television - so a test pins it instead of a reader. "Play"
+ * becomes "Pause" while the video is playing.
+ */
+internal val TRANSPORT_CONTROL_LABELS = listOf(
+    "Previous",
+    "Rewind 10 seconds",
+    "Play",
+    "Forward 10 seconds",
+    "Next",
+)
 
 /**
  * A remote-first Android TV player.
@@ -112,8 +137,32 @@ fun TvPlayerScreen(
     var buttonIndex by remember { mutableIntStateOf(0) }
     var optionIndex by remember { mutableIntStateOf(0) }
 
+    /**
+     * Whether a transport control holds the focus.
+     *
+     * W13.2 made the five controls real focus targets. Two things depend on knowing when one of them has
+     * the remote: the screen must stop treating LEFT/RIGHT as seeking (or two mechanisms fight over the
+     * key), and the overlay must stop auto-hiding - hiding it removes the focused control from the
+     * composition, and the focus falls back to the video surface, which is what made the row lose the
+     * remote a few seconds after it was reached.
+     */
+    var transportFocused by remember { mutableStateOf(false) }
+
+    /** "The child asked for the transport row" - satisfied by the effect below, once the row exists. */
+    var wantsTransportFocus by remember { mutableStateOf(false) }
+
     val surfaceFocus = remember { FocusRequester() }
     val retryFocus = remember { FocusRequester() }
+
+    /**
+     * One requester per transport control, in [TRANSPORT_CONTROL_LABELS] order.
+     *
+     * They are linked to each other by `focusProperties` rather than merely requested: with explicit
+     * neighbours, the horizontal walk inside the row never consults the geometric search - and the
+     * geometric search is what handed LEFT/RIGHT to the full-screen surface, a focus target whose bounds
+     * contain every control, so it lies "to the right" of all of them.
+     */
+    val transportRequesters = remember { List(TRANSPORT_CONTROL_LABELS.size) { FocusRequester() } }
 
     // Poll the player for the state the overlay renders.
     LaunchedEffect(player) {
@@ -127,10 +176,16 @@ fun TvPlayerScreen(
         }
     }
 
-    // Auto-hide, but never while paused, buffering, in error, or showing the time-limit warning.
-    LaunchedEffect(controlsVisible, lastInteraction, isPlaying, isBuffering, errorMessage, warningText) {
+    // Auto-hide, but never while paused, buffering, in error, showing the time-limit warning, or - since
+    // W13.2 - while a transport control holds the focus. The last of those is not cosmetic: hiding the
+    // overlay removes the focused control from the composition, so the focus falls back to the video
+    // surface and the row loses the remote a few seconds after the child reached it.
+    LaunchedEffect(
+        controlsVisible, lastInteraction, isPlaying, isBuffering, errorMessage, warningText, transportFocused,
+    ) {
         if (!controlsVisible || !isPlaying || isBuffering) return@LaunchedEffect
         if (errorMessage != null || warningText != null) return@LaunchedEffect
+        if (transportFocused) return@LaunchedEffect
         delay(CONTROLS_TIMEOUT_MS)
         if (System.currentTimeMillis() - lastInteraction >= CONTROLS_TIMEOUT_MS) {
             controlsVisible = false
@@ -151,6 +206,18 @@ fun TvPlayerScreen(
     }
 
     LaunchedEffect(Unit) { surfaceFocus.requestFocus() }
+
+    // Asks for the row from a composition effect, not from the key handler: the handler runs before the
+    // row has been attached, and a request made then is dropped without an error. It keeps asking until
+    // the row reports the focus.
+    LaunchedEffect(wantsTransportFocus, controlsVisible, buttonRowActive) {
+        // One-shot, and never while the settings row is active: the flag is cleared wherever the row is
+        // left, so a stale request cannot pull focus into the row on the next reveal. Left stale it did:
+        // DOWN from the video landed on Previous instead of opening the settings row, and the speed menu
+        // then never opened because RIGHT and OK went to the transport controls.
+        if (!wantsTransportFocus || buttonRowActive) return@LaunchedEffect
+        runCatching { transportRequesters.first().requestFocus() }
+    }
 
     // A menu does not always open from the settings row - the resume prompt is raised by the
     // controller - so the highlight must follow whichever menu is open. Left stale, it pointed OK
@@ -220,6 +287,16 @@ fun TvPlayerScreen(
                     val consumed = when (keyCode) {
                         KeyEvent.KEYCODE_DPAD_UP -> {
                             buttonRowActive = false
+                            wantsTransportFocus = false
+                            true
+                        }
+                        // DOWN from the settings row hands the remote to the transport row, which is the
+                        // row *below* it on screen. The settings row stays the first stop, because the
+                        // harness and a child both expect DOWN to open the menus.
+                        KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            buttonRowActive = false
+                            transportFocused = true
+                            wantsTransportFocus = true
                             true
                         }
                         KeyEvent.KEYCODE_DPAD_LEFT -> {
@@ -243,6 +320,39 @@ fun TvPlayerScreen(
                         else -> false
                     }
                     if (consumed) return@onKeyEvent true
+                }
+
+                // The row owns the D-pad while a transport control has focus. UP and DOWN leave it and
+                // never re-open the settings row, so entering and leaving stay unambiguous; LEFT and
+                // RIGHT are returned *unconsumed* on purpose, so the focus graph - with the explicit
+                // neighbours above - moves between the five controls instead of the seek handler seeing
+                // them.
+                if (transportFocused) {
+                    val consumed = when (keyCode) {
+                        KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN -> {
+                            transportFocused = false
+                            buttonRowActive = false
+                            // The request is a one-shot: leaving the row must drop it, or it re-fires on
+                            // the next reveal and pulls focus back into the row.
+                            wantsTransportFocus = false
+                            runCatching { surfaceFocus.requestFocus() }
+                            true
+                        }
+                        // The focused control activates itself on key *up*, so the surface must not act on
+                        // OK as well: the key-down phase used to bubble up here, where OK also means
+                        // play/pause, and one press did both. Pressing Pause paused and instantly resumed,
+                        // and every other control toggled playback on top of its own action (the app log
+                        // showed TogglePause twice around a single press). Consuming OK here - the one
+                        // place all five controls pass through - leaves the press to the control alone.
+                        KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER,
+                        KeyEvent.KEYCODE_NUMPAD_ENTER, KeyEvent.KEYCODE_BUTTON_A,
+                        -> true
+                        else -> false
+                    }
+                    if (consumed) return@onKeyEvent true
+                    if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                        return@onKeyEvent false
+                    }
                 }
 
                 val action = PlaybackKeys.actionOf(keyCode)
@@ -285,6 +395,9 @@ fun TvPlayerScreen(
                         ) {
                             buttonRowActive = true
                             buttonIndex = 0
+                            // The settings row is taking the remote, so any pending transport request is
+                            // void. The transport row is reached from this row's DOWN, never from here.
+                            wantsTransportFocus = false
                         }
                         true
                     }
@@ -366,6 +479,18 @@ fun TvPlayerScreen(
                     isPlaying = isPlaying,
                     positionMs = positionMs,
                     durationMs = durationMs,
+                    transportRequesters = transportRequesters,
+                    onPrevious = onPreviousApproved,
+                    // The buttons ask for the same 10s step the arrow keys use on a single press; the
+                    // hold-to-accelerate ladder belongs to a repeating key, which a click is not.
+                    onRewind = { onSeekBy(-SEEK_STEP_MS); seekFeedback = "<< ${SEEK_STEP_MS / 1000}s" },
+                    onTogglePlayPause = onTogglePlayPause,
+                    onForward = { onSeekBy(SEEK_STEP_MS); seekFeedback = "${SEEK_STEP_MS / 1000}s >>" },
+                    onNext = onNextApproved,
+                    onTransportFocusChange = { focused ->
+                        transportFocused = focused
+                        if (focused) wantsTransportFocus = false
+                    },
                 )
             }
         }
@@ -473,6 +598,13 @@ private fun BottomBar(
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    transportRequesters: List<FocusRequester>,
+    onPrevious: () -> Unit,
+    onRewind: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    onForward: () -> Unit,
+    onNext: () -> Unit,
+    onTransportFocusChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     // One rounded deck instead of a full-width slab, so the video keeps its edges. Kept shallow
@@ -486,55 +618,178 @@ private fun BottomBar(
     ) {
         SeekBar(positionMs = positionMs, durationMs = durationMs)
         Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            // Play/pause is the control a child reaches for, so it is the only filled disc.
-            Box(
-                modifier = Modifier
-                    .size(46.dp)
-                    .background(KidAccent, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                    contentDescription = if (isPlaying) "Pause" else "Play",
-                    tint = Color.Black,
-                    modifier = Modifier.size(28.dp),
-                )
-            }
-            Spacer(Modifier.width(18.dp))
-            Icon(
-                imageVector = Icons.Rounded.Replay10,
-                contentDescription = "Rewind 10 seconds",
-                tint = KidText,
-                modifier = Modifier.size(30.dp),
-            )
-            Spacer(Modifier.width(16.dp))
-            Icon(
-                imageVector = Icons.Rounded.Forward10,
-                contentDescription = "Forward 10 seconds",
-                tint = KidText,
-                modifier = Modifier.size(30.dp),
-            )
-            Spacer(Modifier.width(22.dp))
-            Text(
-                text = formatTime(positionMs),
-                style = MaterialTheme.typography.titleMedium,
-                color = KidText,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = formatTime(durationMs),
-                style = MaterialTheme.typography.titleMedium,
-                color = KidTextDim,
-            )
-        }
+        TransportRow(
+            isPlaying = isPlaying,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            requesters = transportRequesters,
+            onPrevious = onPrevious,
+            onRewind = onRewind,
+            onTogglePlayPause = onTogglePlayPause,
+            onForward = onForward,
+            onNext = onNext,
+            onFocusChange = onTransportFocusChange,
+        )
     }
 }
 
+/**
+ * The transport controls: Previous, Rewind, Play/Pause, Forward, Next - then the times.
+ *
+ * W13.2 turned these from pictures of controls into controls. Before it, the play/pause disc and the
+ * rewind/forward icons were plain `Icon`s with a tint: they looked like buttons and could not be focused
+ * or pressed, so a child holding a remote with no media keys - which is the remote this product actually
+ * runs on - saw five things that did nothing and had to discover that the arrow keys are the transport.
+ *
+ * **Why the neighbours are written out.** Making them focusable was not enough. Compose's directional
+ * search is geometric, and the player's full-screen surface is itself a focus target whose bounds contain
+ * every control, so it lies in every direction from all of them; the first LEFT/RIGHT press from
+ * Previous therefore moved focus to the *surface* instead of to Rewind. Each control now names its own
+ * left and right neighbour and the two ends name themselves, which closes the row into a loop the surface
+ * cannot win. UP and DOWN are left to the screen's key handler, which consumes them to leave the row.
+ *
+ * These are not a second playback implementation: every control calls the same callback the remote's keys
+ * call, and those go to `PlaybackController`, where playback authorization, the approved queue and
+ * watch-time accounting live. A button here can do nothing the remote could not already do.
+ */
+@Composable
+private fun TransportRow(
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    requesters: List<FocusRequester>,
+    onPrevious: () -> Unit,
+    onRewind: () -> Unit,
+    onTogglePlayPause: () -> Unit,
+    onForward: () -> Unit,
+    onNext: () -> Unit,
+    onFocusChange: (Boolean) -> Unit,
+) {
+    var focusedIndex by remember { mutableIntStateOf(-1) }
+
+    // Reported from the row rather than from each control, so "the transport has focus" is one decision
+    // instead of five racing ones: a control losing focus to its neighbour must not read as leaving.
+    LaunchedEffect(focusedIndex) {
+        onFocusChange(focusedIndex >= 0)
+    }
+
+    Row(
+        // One focus group, so returning to the row restores the control that was left.
+        modifier = Modifier
+            .focusGroup()
+            .fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        TRANSPORT_CONTROL_LABELS.forEachIndexed { index, label ->
+            if (index > 0) Spacer(Modifier.width(10.dp))
+            val primary = index == 2
+            TransportButton(
+                description = if (primary && isPlaying) "Pause" else label,
+                icon = when (index) {
+                    0 -> Icons.Rounded.SkipPrevious
+                    1 -> Icons.Rounded.Replay10
+                    2 -> if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow
+                    3 -> Icons.Rounded.Forward10
+                    else -> Icons.Rounded.SkipNext
+                },
+                primary = primary,
+                focusRequester = requesters[index],
+                leftRequester = requesters[if (index == 0) 0 else index - 1],
+                rightRequester = requesters[if (index == TRANSPORT_CONTROL_LABELS.lastIndex) {
+                    TRANSPORT_CONTROL_LABELS.lastIndex
+                } else {
+                    index + 1
+                }],
+                onFocused = { focused ->
+                    focusedIndex = if (focused) index else if (focusedIndex == index) -1 else focusedIndex
+                },
+                onClick = when (index) {
+                    0 -> onPrevious
+                    1 -> onRewind
+                    2 -> onTogglePlayPause
+                    3 -> onForward
+                    else -> onNext
+                },
+            )
+        }
+        Spacer(Modifier.width(22.dp))
+        Text(
+            text = formatTime(positionMs),
+            style = MaterialTheme.typography.titleMedium,
+            color = KidText,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            text = formatTime(durationMs),
+            style = MaterialTheme.typography.titleMedium,
+            color = KidTextDim,
+        )
+    }
+}
+
+/**
+ * One transport control: focusable, visibly focused, and activated by CENTER/ENTER.
+ *
+ * The focused state is a filled disc *and* a ring, the pair the library's cards use, because colour alone
+ * is not a focus indicator across a living room. Activation is on key *up* for CENTER, as the cards do, so
+ * a held key does not fire twice.
+ */
+@Composable
+private fun TransportButton(
+    description: String,
+    icon: ImageVector,
+    primary: Boolean,
+    focusRequester: FocusRequester,
+    leftRequester: FocusRequester,
+    rightRequester: FocusRequester,
+    onClick: () -> Unit,
+    onFocused: (Boolean) -> Unit,
+) {
+    var focused by remember { mutableStateOf(false) }
+    val size = if (primary) 56.dp else 48.dp
+    val iconSize = if (primary) 30.dp else 26.dp
+
+    Box(
+        modifier = Modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(
+                when {
+                    primary -> KidAccent
+                    focused -> KidAccent.copy(alpha = 0.30f)
+                    else -> Color.White.copy(alpha = 0.12f)
+                }
+            )
+            .then(if (focused) Modifier.border(3.dp, KidFocusRing, CircleShape) else Modifier)
+            .focusRequester(focusRequester)
+            .focusProperties {
+                left = leftRequester
+                right = rightRequester
+            }
+            .onFocusChanged {
+                focused = it.isFocused
+                onFocused(it.isFocused)
+            }
+            .focusable()
+            .onKeyEvent { event ->
+                if (event.type == KeyEventType.KeyUp && event.key == Key.DirectionCenter) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = description,
+            tint = if (primary) Color.Black else KidText,
+            modifier = Modifier.size(iconSize),
+        )
+    }
+}
 @Composable
 private fun SeekBar(positionMs: Long, durationMs: Long, modifier: Modifier = Modifier) {
     val fraction = if (durationMs > 0) {
