@@ -138,6 +138,33 @@ class PlaybackController(
     var qualityLabel by mutableStateOf("Auto")
         private set
 
+    /**
+     * The height the player is actually rendering, taken from the decoder's own video size, or null when
+     * nothing has been rendered yet.
+     *
+     * [qualityLabel] reports what was *asked for*. That is not the same thing: a pinned rendition can be
+     * missing from the live manifest, or the tracks can be refreshed under a menu that is already open, and
+     * a request the stream cannot honour would then be presented as applied. This is the measured half of
+     * the answer, so the chip and the log can say both.
+     */
+    var renderedQualityHeight by mutableStateOf<Int?>(null)
+        private set
+
+    /** What the Quality chip says: the request, plus what is on screen when the two differ. */
+    val qualityDisplayLabel: String
+        get() {
+            val rendered = renderedQualityHeight
+            return when {
+                rendered == null -> qualityLabel
+                forcedQualityHeight != null && rendered != forcedQualityHeight ->
+                    "$qualityLabel (showing ${rendered}p)"
+                // Auto on DASH used to say only "Auto" because naming a rendition would have been a guess.
+                // This one is measured, not guessed, so it can be named.
+                autoQuality && !qualityLabel.contains('(') -> "Auto (${rendered}p)"
+                else -> qualityLabel
+            }
+        }
+
     val speedChoices = listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
 
     private var selectedCaptionTag: String? = null
@@ -216,6 +243,20 @@ class PlaybackController(
 
             override fun onIsPlayingChanged(nowPlaying: Boolean) {
                 AppLogger.log("Player isPlaying=$nowPlaying")
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                // The decoder reporting what it is actually showing. This is the only honest source for
+                // "what am I watching", and it is what lets a quality pin the stream cannot honour be
+                // visible rather than assumed. Logged as well as published: a device test can read the
+                // log, and the log is where "pinned 720p but rendering 540p" has to be readable.
+                val height = videoSize.height.takeIf { it > 0 }
+                // A 0x0 size is the surface being rebuilt between renditions, not a quality: reporting it
+                // as one produced a "0x0 (nullp)" line in the device log.
+                if (height != null && height != renderedQualityHeight) {
+                    AppLogger.log("Rendered video: ${videoSize.width}x${videoSize.height} (${height}p)")
+                }
+                renderedQualityHeight = height
             }
         })
 
@@ -326,6 +367,9 @@ class PlaybackController(
             return
         }
         resolved = media
+        // A menu describes the item it was opened on: the new item's options are different ones, and the
+        // resume offer opened below is the menu that belongs to it.
+        if (!isQualityReopen) closeMenuForNewItem()
         // The stall and recovery budgets belong to one video; reopening it is not a fresh start.
         if (!isQualityReopen) {
             stepDownsThisVideo = 0
@@ -630,6 +674,21 @@ class PlaybackController(
         menuOptions = emptyList()
     }
 
+    /**
+     * Drops a menu that belonged to the video that just ended, without [closeMenu]'s resume-offer side
+     * effect: the offer is about *this* item's saved position, which is read a few lines further down.
+     *
+     * `buildOptions` reads the current item's renditions and tracks, so a menu left open across a queue
+     * move would otherwise offer the previous video's choices - reachable by pressing NEXT while the
+     * quality menu is up.
+     */
+    private fun closeMenuForNewItem() {
+        if (activeMenu == null) return
+        menuAutoCloseJob?.cancel()
+        activeMenu = null
+        menuOptions = emptyList()
+    }
+
     private fun buildOptions(menu: PlayerMenu): List<PlayerOption> = when (menu) {
         PlayerMenu.RESUME -> listOf(
             PlayerOption("resume", "Resume from ${formatClock(resumePositionMs)}", true),
@@ -655,7 +714,9 @@ class PlaybackController(
         PlayerMenu.QUALITY -> {
             val group = adaptiveVideoGroup()
             if (group != null) {
-                val auto = player.trackSelectionParameters.overrides.isEmpty()
+                // The heights this item really has, so the menu cannot offer a rendition that is not there,
+                // and `auto` asks about the *video* override only (see [videoOverridePresent]).
+                val auto = !videoOverridePresent()
                 listOf(PlayerOption("auto", "Auto", auto)) + videoHeights(group).map { (height, trackIndex) ->
                     PlayerOption("h$height", "${height}p", isOverridden(group, trackIndex))
                 }
@@ -770,6 +831,17 @@ class PlaybackController(
             override.mediaTrackGroup == group && override.trackIndices.contains(trackIndex)
         }
 
+    /**
+     * Whether a *video* rendition is pinned.
+     *
+     * Overrides are keyed by track type and share one map, so `overrides.isEmpty()` answers the wrong
+     * question: a pinned subtitle language sits in the same map, and reading it as "a quality is pinned"
+     * left Auto looking unselected while Auto was exactly what was playing.
+     */
+    private fun videoOverridePresent(): Boolean =
+        player.trackSelectionParameters.overrides.values
+            .any { it.mediaTrackGroup.type == C.TRACK_TYPE_VIDEO }
+
     // --- auto quality -------------------------------------------------------
 
     /** Measured throughput in kbps, or null when nothing is known yet. */
@@ -845,24 +917,47 @@ class PlaybackController(
         scope.launch { prepare(currentVideoId, position, isQualityReopen = true) }
     }
 
+    /**
+     * Applies a quality choice on whichever path this video plays through.
+     *
+     * DASH exposes the renditions as real tracks, so a manual choice is a track-selection override and
+     * Automatic releases it. A progressive stream has the rendition baked in, so reopening the stream at
+     * the same playhead is the only honest way to change it.
+     */
     private fun applyQuality(id: String) {
         val media = resolved ?: return
         val group = adaptiveVideoGroup()
         if (group != null) {
             val builder = player.trackSelectionParameters.buildUpon()
             if (id == "auto") {
-                builder.clearOverrides()
+                // Only the video override is released. `clearOverrides()` also dropped the pinned caption
+                // language and any audio override, so returning to Automatic silently took the subtitles
+                // with it: a quality control that changes more than quality.
+                builder.clearOverridesOfType(C.TRACK_TYPE_VIDEO)
                 autoQuality = true
                 forcedQualityHeight = null
                 qualityCeilingHeight = null
                 qualityLabel = "Auto"
             } else {
                 val height = id.removePrefix("h").toIntOrNull() ?: return
-                val trackIndex = videoHeights(group).firstOrNull { it.first == height }?.second ?: return
+                val trackIndex = videoHeights(group).firstOrNull { it.first == height }?.second
+                if (trackIndex == null) {
+                    // The choice outlived the track it named. Saying so is the point: the alternative is a
+                    // chip claiming a rendition that nothing is rendering.
+                    AppLogger.warn(
+                        "Quality ${height}p is not in the current stream " +
+                            "(${videoHeights(group).joinToString { "${it.first}p" }}) - nothing pinned"
+                    )
+                    return
+                }
                 builder.setOverrideForType(TrackSelectionOverride(group, trackIndex))
                 autoQuality = false
                 forcedQualityHeight = height
                 qualityLabel = "${height}p"
+                AppLogger.log(
+                    "Quality pinned to ${height}p (track $trackIndex of ${group.length}; " +
+                        "${media.qualities.size} renditions resolved)"
+                )
             }
             player.trackSelectionParameters = builder.build()
             AppLogger.log("Quality set to $qualityLabel")
@@ -878,7 +973,13 @@ class PlaybackController(
             qualityCeilingHeight = null
         } else {
             val height = id.removePrefix("h").toIntOrNull() ?: return
-            if (media.qualities.none { it.height == height }) return
+            if (media.qualities.none { it.height == height }) {
+                AppLogger.warn(
+                    "Quality ${height}p is not offered by ${media.videoId} " +
+                        "(${media.qualities.joinToString { "${it.height}p" }}) - nothing pinned"
+                )
+                return
+            }
             autoQuality = false
             forcedQualityHeight = height
         }

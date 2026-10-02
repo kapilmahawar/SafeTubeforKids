@@ -2978,7 +2978,21 @@ if ($opened) {
             $qualityOptions = 0
             if ($qualityLog -match 'Menu opened: QUALITY \((\d+) options\)') { $qualityOptions = [int]$Matches[1] }
             Record 'quality-menu-lists-real-renditions' ($qualityOptions -gt 1) "$qualityOptions options offered"
-            Record 'quality-switch-applied' ($qualityLog -match 'Player menu QUALITY -> h\d+')
+            # What was *chosen* is not what was *applied*. `Player menu QUALITY -> h480` only says a menu item
+            # was picked, and W13.4 found that assertion able to pass while the player rendered whatever it
+            # liked. The evidence now required is the engine's own: the rendition the stream was reopened
+            # with, or the track it was pinned to, and separately the size the decoder reported.
+            $qualityChosen = if ($qualityLog -match 'Player menu QUALITY -> h(\d+)') { [int]$Matches[1] } else { 0 }
+            $qualityApplied = ($qualityChosen -gt 0) -and (
+                ($qualityLog -match "quality ${qualityChosen}p") -or
+                ($qualityLog -match "Quality pinned to ${qualityChosen}p")
+            )
+            Record 'quality-switch-applied' $qualityApplied "chose ${qualityChosen}p; applied=$(Format-Bool $qualityApplied)"
+            # $_.Groups, not $Matches: inside a ForEach-Object block $Matches is not the match's groups, and
+            # using it here silently produced an empty list - caught by running the pattern over the real log
+            # lines this phase captured.
+            $renderedHeights = @([regex]::Matches($qualityLog, 'Rendered video: \d+x(\d+)') | ForEach-Object { [int]$_.Groups[1].Value })
+            Record 'quality-render-measured' ($renderedHeights -contains $qualityChosen) "decoder reported: $($renderedHeights -join ', ')"
             Shot '19-quality'
 
             # No BACK here. The quality menu closes itself 5s after a choice and this phase waits 12s, so

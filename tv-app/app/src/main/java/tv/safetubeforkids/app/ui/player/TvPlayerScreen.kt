@@ -903,7 +903,7 @@ private fun labelFor(menu: PlayerMenu, controller: PlaybackController): String =
     // Not in the settings row: the resume prompt is shown automatically when relevant.
     PlayerMenu.RESUME -> "Continue"
     PlayerMenu.CAPTIONS -> "Subtitles: ${controller.captionsLabel}"
-    PlayerMenu.QUALITY -> "Quality: ${controller.qualityLabel}"
+    PlayerMenu.QUALITY -> "Quality: ${controller.qualityDisplayLabel}"
     PlayerMenu.AUDIO -> "Audio: ${controller.audioLabel}"
     PlayerMenu.SPEED -> "Speed: ${controller.speed}x"
     PlayerMenu.ASPECT -> when (controller.aspectId) {
