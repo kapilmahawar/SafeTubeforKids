@@ -6,7 +6,8 @@ fix is commit `e68ac86`, and this phase makes it verifiable by the harness inste
 - Baseline: `e68ac86`
 - Harness work: `e8c9828` (and the record commit that follows it)
 - Device: Mi Box 4 (MIBOX4), Android 12 / API 31, over `adb connect 172.16.1.2:5555`
-- Final PLAYER run: `test-results/tv/2026-10-03-001028` — **48 PASS, 0 FAIL, `FINAL: PASS`**
+- PLAYER runs, both green: `test-results/tv/2026-10-03-001028` (**48 PASS, 0 FAIL, `FINAL: PASS`**) and the
+  run after the projection PASS record was added below — both ended `FINAL: PASS` with no failures
 
 ## 1. Automated transport-focus regression
 
@@ -119,10 +120,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tv-app\scripts\tv-e2e.ps1 
 
 ## Follow-ups
 
-- The CI run for the harness commit failed in `Unit tests and debug build` (127s, the only failure in the
-  last 40 runs; the same Kotlin tree passed at 140s in the previous run, and every Kotlin unit test passes
-  locally). Nothing in the Gradle build reads this script, so the diff cannot explain it; the step's log
-  needs authentication to read. Re-running CI is the next step.
+- The CI run for the earlier harness commit failed in `Unit tests and debug build` (127s, the only failure
+  in the last 40 runs). Nothing in the Gradle build reads this script (checked), every Kotlin unit test
+  passes locally, and the same step passed on the next push (126s, `8f8dafc`, whole job green) — so that
+  failure was in the runner rather than in the diff. Its log needs authentication to read, so the exact
+  error was never seen; nothing has been changed to "fix" it.
 - The `Dump`/focus helpers add one `uiautomator` dump per D-pad step. The block sits after the API-based
   assertions because repeated dumps can destabilise the app's embedded server.
 - Not run in this phase, per scope: W6, FULL and EXAMPLE tiers.
