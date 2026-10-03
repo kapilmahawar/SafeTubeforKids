@@ -185,6 +185,21 @@ class PlaybackController(
     private var released = false
     private var menuAutoCloseJob: Job? = null
 
+    /**
+     * The id of the video the *player* is holding, which is not [currentVideoId] while a new item is being
+     * resolved: `prepare` records the new id first and only swaps the media source once the resolver
+     * answers. A save landing in that window wrote the new video's row with the previous video's playhead -
+     * and resolution is a network call, so the window can be seconds wide.
+     */
+    private var playerVideoId = ""
+
+    /**
+     * One writer for resume rows, so saves land in the order they were captured. Two coroutines on the IO
+     * pool could otherwise write an older capture - the periodic one - over a newer one from a seek or a
+     * pause, and the child would be offered a playhead they had already left.
+     */
+    private val saveDispatcher = Dispatchers.IO.limitedParallelism(1)
+
     private companion object {
         /** Below this, restarting is more natural than resuming. */
         const val RESUME_MIN_MS = 20_000L
@@ -243,6 +258,14 @@ class PlaybackController(
 
             override fun onIsPlayingChanged(nowPlaying: Boolean) {
                 AppLogger.log("Player isPlaying=$nowPlaying")
+            }
+
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                // Text tracks can arrive after the prepare() that installed them: the 600ms re-apply is a
+                // fixed guess. When a language is selected and the engine is not rendering it yet, this is
+                // the moment that actually applies it - without it a slow track list left the child with a
+                // chosen language and no subtitles. Idempotent, so this cannot loop.
+                if (selectedCaptionTag != null) applyCaptionSelection()
             }
 
             override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
@@ -467,6 +490,8 @@ class PlaybackController(
                 captions = media.captions,
             )
             player.setMediaSource(source)
+            // From here the player holds this item, so this is the id a playhead belongs to.
+            playerVideoId = videoId
             player.prepare()
             if (restorePositionMs > 0L) player.seekTo(restorePositionMs)
             player.play()
@@ -585,6 +610,10 @@ class PlaybackController(
         }
         player.seekTo(clamped)
         AppLogger.log("Seek ${deltaMs / 1000}s -> ${clamped / 1000}s")
+        // A seek is a deliberate move to a new place, so it is persisted at once. Saving only on pause and
+        // on the 10s timer meant a seek followed by the app dying - or the TV losing power - restored the
+        // playhead from before the seek, which can be minutes away.
+        savePosition(clamped)
     }
 
     fun cycleAspectRatio() {
@@ -785,14 +814,15 @@ class PlaybackController(
             id == "off" -> {
                 selectedCaptionTag = null
                 captionsLabel = "Off"
-                applyCaptionSelection()
+                // A child just chose this, so it is reported whether or not the engine state changes.
+                applyCaptionSelection(announce = true)
             }
 
             id.startsWith("cap:") -> {
                 selectedCaptionTag = id.removePrefix("cap:")
                 captionsLabel = resolved?.captions
                     ?.firstOrNull { it.languageTag == selectedCaptionTag }?.label ?: "On"
-                applyCaptionSelection()
+                applyCaptionSelection(announce = true)
             }
 
             menu == PlayerMenu.QUALITY || id == "auto" -> applyQuality(id)
@@ -870,6 +900,10 @@ class PlaybackController(
      */
     private fun stepDownAfterStall() {
         val media = resolved ?: return
+        // A paused player is not stalling. A seek while paused can sit in BUFFERING for as long as the child
+        // leaves it there, and stepping the rendition down reopens the stream - a quality change behind their
+        // back, in answer to a key press that asked for none.
+        if (!player.playWhenReady) return
         // DASH adapts by itself, and a pinned rendition is the viewer's explicit choice.
         if (!autoQuality || (useDash && media.isAdaptive)) return
         if (stepDownsThisVideo >= MAX_AUTO_STEP_DOWNS) return
@@ -1010,28 +1044,86 @@ class PlaybackController(
         }
     }
 
-    private fun applyCaptionSelection() {
-        val builder = player.trackSelectionParameters.buildUpon()
+    /**
+     * Applies the caption choice to the track selection.
+     *
+     * The *matching* track is pinned, not track 0 of whichever group happens to contain a match: a text
+     * group can hold several languages, so pinning its first track played the wrong language whenever a
+     * child chose anything other than the first one.
+     *
+     * @param announce true when a child just chose this in the menu, so the choice is reported even if the
+     *   engine already had it. The other callers stay quiet unless something actually changes, because they
+     *   run on every prepare and every track update.
+     */
+    private fun applyCaptionSelection(announce: Boolean = false) {
         val tag = selectedCaptionTag
         if (tag == null) {
-            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-        } else {
-            builder.setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
-            val match = player.currentTracks.groups.firstOrNull { group ->
-                group.type == C.TRACK_TYPE_TEXT && (0 until group.length).any { trackIndex ->
-                    val format = group.getTrackFormat(trackIndex)
-                    format.language == tag || format.label?.contains(tag, ignoreCase = true) == true
+            if (textIsDisabled()) {
+                if (announce) AppLogger.log("Captions selection: off")
+                return
+            }
+            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+                .build()
+            AppLogger.log("Captions selection: off")
+            return
+        }
+
+        val match = captionTrackFor(tag)
+        if (match == null) {
+            // The text tracks are not in the player's list yet: a side-loaded subtitle arrives with the
+            // media, and on this device that can be after the child has already chosen. Enabling the track
+            // *type* is what makes the engine select the configured subtitle when it appears, and the
+            // onTracksChanged re-apply pins that exact track then. Returning without touching anything - as
+            // this did - is how a chosen language ended up with no subtitles at all.
+            if (textIsDisabled()) {
+                player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+                    .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+                    .build()
+            }
+            AppLogger.log("Captions selection: $tag (track not loaded yet; applied when it arrives)")
+            return
+        }
+
+        val (group, trackIndex) = match
+        if (isCaptionPinned(group, trackIndex)) {
+            if (announce) AppLogger.log("Captions selection: $tag (already the selected track)")
+            return
+        }
+        val format = group.getFormat(trackIndex)
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
+            .setOverrideForType(TrackSelectionOverride(group, trackIndex))
+            .build()
+        AppLogger.log(
+            "Captions selection: $tag (track $trackIndex of ${group.length}: " +
+                "${format.label ?: format.language ?: tag})"
+        )
+    }
+
+    /** The text track carrying [tag], with the index it actually sits at inside its group. */
+    private fun captionTrackFor(tag: String): Pair<TrackGroup, Int>? {
+        for (group in player.currentTracks.groups) {
+            if (group.type != C.TRACK_TYPE_TEXT) continue
+            for (trackIndex in 0 until group.length) {
+                val format = group.getTrackFormat(trackIndex)
+                if (format.language == tag || format.label?.contains(tag, ignoreCase = true) == true) {
+                    return group.mediaTrackGroup to trackIndex
                 }
             }
-            if (match != null) {
-                builder.setOverrideForType(TrackSelectionOverride(match.mediaTrackGroup, 0))
-            } else {
-                AppLogger.warn("No caption track present for language '$tag'")
-            }
         }
-        player.trackSelectionParameters = builder.build()
-        AppLogger.log("Captions selection: ${tag ?: "off"}")
+        return null
     }
+
+    private fun textIsDisabled(): Boolean =
+        player.trackSelectionParameters.disabledTrackTypes.any { it == C.TRACK_TYPE_TEXT }
+
+    /** True when the engine already renders [group]'s [trackIndex], so re-applying changes nothing. */
+    private fun isCaptionPinned(group: TrackGroup, trackIndex: Int): Boolean =
+        !textIsDisabled() &&
+            player.trackSelectionParameters.overrides.values.any { override ->
+                override.mediaTrackGroup == group && override.trackIndices.contains(trackIndex)
+            }
 
     private fun handlePlaybackFailure(codeName: String) {
         // A failed DASH manifest is recoverable: fall back to the progressive renditions and
@@ -1074,19 +1166,28 @@ class PlaybackController(
         queueLabel = if (queue.isEmpty()) null else "${index + 1} of ${queue.size}"
     }
 
-    /** Persists the playhead for resume. Called periodically, on pause and on leaving. */
-    private fun savePosition() {
-        val videoId = currentVideoId
+    /**
+     * Persists the playhead for resume. Called periodically, on pause, on a seek and on leaving.
+     *
+     * @param positionMs the position to store, or null to read the player's own. A seek passes the value it
+     *   just asked for, so the row is written from that intent instead of racing the player's report.
+     */
+    private fun savePosition(positionMs: Long? = null) {
+        // The player's item, never the one being resolved: see [playerVideoId].
+        val videoId = playerVideoId
         if (videoId.isBlank()) return
-        val position = player.currentPosition
-        if (position <= 0L) return
+        val position = positionMs ?: player.currentPosition
+        // A row is only worth writing once the item has actually started. A position of zero *after* playing
+        // is a real place - a child who rewound to the beginning - and leaving the older row behind would
+        // offer them a playhead they had deliberately left.
+        if (position <= 0L && playStartTime <= 0L) return
         val reported = player.duration
         val durationMs = if (reported == C.TIME_UNSET || reported < 0) {
             resolved?.durationMs ?: 0L
         } else {
             reported
         }
-        scope.launch(Dispatchers.IO) {
+        scope.launch(saveDispatcher) {
             try {
                 db.playbackPositionDao().upsert(
                     PlaybackPositionEntity(
