@@ -119,17 +119,19 @@ before. The only protection for data is choosing a disposable target.
 testReleaseUnitTest`, the static checks, and uploads the debug APK. It has no emulator, no device and no
 `connected*` step, so no CI job can reach the family device or any other.
 
-**Not executed, by design.** The refusal was not exercised by running a connected task: this phase forbids
-executing an instrumentation task against the family device to test these protections, and no other device is
-attached. Open item: confirm on a disposable emulator that `./gradlew :app:connectedDebugAndroidTest` fails
-with the message above and that the APK is left installed on that emulator.
+**Executed since (W13.10).** The refusal has now been observed at runtime: `./gradlew
+:app:connectedDebugAndroidTest` fails with the message above, and the device it was pointed at is left
+untouched — same installation timestamp, same running process, no instrumentation APK, no test-platform
+output. See `docs/W13_10_GUARD_VERIFICATION.md`. The opted-in path, and what the task does to an app when it
+does run, remain unverified: no disposable emulator can boot on this host and no spare device exists.
 
 ## E. What remains open
 
 - The family TV is unprovisioned until the owner completes section C. Every provisioning check — five approved
   sources, parent authentication, approved playback, unapproved blocking — stays `BLOCKED` until then; no
   earlier run's results are substituted for it.
-- The guard's refusal has not been observed on a disposable target (section D).
+- The guard's refusal has been observed at runtime (W13.10), but never on a disposable target, and the
+  opted-in path has not been executed anywhere (section D).
 - Whether the uninstall also happens on a failed or cancelled run is untested (section A).
 - Carried from earlier phases: DASH adaptive switching unverified (every approved source is progressive);
   automatic quality upgrade not demonstrated on the TV; caption cue rendering not pixel-verified;

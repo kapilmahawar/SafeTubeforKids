@@ -16,6 +16,9 @@
  * a test, so the app module refuses to run a connected or uninstall task at all unless the run opts in
  * explicitly. These checks hold that refusal in place, and hold it to the two properties that make it
  * real rather than decorative: it must run before the task does its work, and it must name no device.
+ *
+ * W13.10 added the parts of that policy that live outside the build file: CI itself must stay unable to run
+ * a device task or hold a signing credential, and the opt-in must not be persistable in the project files.
  */
 
 const test = require('node:test');
@@ -26,6 +29,8 @@ const path = require('node:path');
 const appDir = path.join(__dirname, '..', 'app');
 const androidTestDir = path.join(appDir, 'src', 'androidTest');
 const appBuildFile = path.join(appDir, 'build.gradle.kts');
+const gradlePropertiesFile = path.join(__dirname, '..', 'gradle.properties');
+const workflowFile = path.join(__dirname, '..', '..', '.github', 'workflows', 'ci.yml');
 const guardedName = 'CredentialTokenInstrumentedTest.kt';
 const optInArgument = 'runDestructiveCredentialTests';
 const optInEnvironmentVariable = 'SAFETUBE_ALLOW_DEVICE_INSTRUMENTATION';
@@ -49,6 +54,7 @@ function kotlinSources(dir) {
 const sources = kotlinSources(androidTestDir);
 const guarded = sources.find((file) => file.name === guardedName);
 const appBuild = fs.readFileSync(appBuildFile, 'utf8');
+const workflow = fs.readFileSync(workflowFile, 'utf8');
 
 test('the instrumentation sources are where this check expects them', () => {
   assert.ok(sources.length > 0, `no Kotlin instrumentation sources under ${androidTestDir}`);
@@ -137,5 +143,46 @@ test('the guard does not depend on a device identity', () => {
   assert.ok(
     !/deviceSerial|ANDROID_SERIAL/.test(guard),
     'the guard must not key off a serial: undocumented identity is not a safety property',
+  );
+});
+
+test('CI runs no device instrumentation and never sets the opt-in', () => {
+  assert.ok(
+    !workflow.includes(optInEnvironmentVariable),
+    `CI must never set ${optInEnvironmentVariable}: a pipeline that can opt in can erase a device`,
+  );
+  const gradleInvocations = workflow.split('\n').filter((line) => line.includes('gradlew'));
+  assert.ok(gradleInvocations.length > 0, 'the workflow must still run Gradle');
+  for (const line of gradleInvocations) {
+    assert.ok(
+      !/connected|deviceAndroidTest|uninstall/.test(line),
+      `CI must not run a device task: ${line.trim()}`,
+    );
+  }
+});
+
+test('CI keeps this check wired in', () => {
+  assert.ok(
+    workflow.includes('check-destructive-instrumentation.test.js'),
+    'a check that CI no longer runs protects nothing',
+  );
+});
+
+test('CI holds no production signing credentials and builds no signed artifact', () => {
+  for (const name of ['RELEASE_STORE_FILE', 'RELEASE_STORE_PASSWORD', 'RELEASE_KEY_ALIAS', 'RELEASE_KEY_PASSWORD']) {
+    assert.ok(!workflow.includes(name), `CI must not hold ${name}`);
+  }
+  assert.ok(!/secrets\./.test(workflow), 'CI must not consume repository secrets');
+  assert.ok(
+    !/assembleRelease|bundleRelease|signingReport/.test(workflow),
+    'CI must not build or inspect a signed release artifact',
+  );
+});
+
+test('the opt-in cannot be persisted in the project files', () => {
+  const properties = fs.readFileSync(gradlePropertiesFile, 'utf8');
+  assert.ok(
+    !properties.includes(optInEnvironmentVariable),
+    'a file that can carry the opt-in turns a per-run decision into a permanent one',
   );
 });
