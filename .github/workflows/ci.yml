@@ -33,6 +33,13 @@ jobs:
           # itself needs a keystore that is deliberately not in this repository, so only the tests run here.
           ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest testReleaseUnitTest
 
+      # A device-free assertion that the two instrumentation tests which replace or clear a parent credential
+      # stay inside the class that is skipped unless it is opted into (W13.8-A). It runs before the Android
+      # steps so it fails fast on a runner with no device attached.
+      - name: Instrumentation safety check
+        working-directory: tv-app
+        run: node --test scripts/check-destructive-instrumentation.test.js
+
       - name: Check the dashboard JavaScript parses
         run: |
           node --check tv-app/app/src/main/assets/app.js

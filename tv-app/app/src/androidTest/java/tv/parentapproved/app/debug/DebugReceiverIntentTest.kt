@@ -13,6 +13,13 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 
+/**
+ * The debug receiver's ordinary intents: everything that reads state or toggles a simulator.
+ *
+ * The two intents that *replace* or *clear* a parent credential are deliberately not here - they live in
+ * [CredentialTokenInstrumentedTest], which is skipped unless a caller opts in explicitly (W13.8). This class
+ * is the one that is safe to run against a provisioned family TV.
+ */
 @RunWith(AndroidJUnit4::class)
 class DebugReceiverIntentTest {
 
@@ -27,7 +34,7 @@ class DebugReceiverIntentTest {
     fun setup() {
         val db = CacheDatabase.getInMemoryInstance(context)
         // W10: a credential is created, not generated. The instrument tests install one they know,
-        // exactly as the e2e harness does through DEBUG_SET_PIN.
+        // exactly as the e2e harness does when it installs one.
         //
         // The session issuer is part of the fixture, and leaving it out is what made
         // debugSetPin_installsAKnownCredential fail - not any shared state between tests. `validate`
@@ -54,33 +61,6 @@ class DebugReceiverIntentTest {
         // Nothing to read back any more: the intent that used to return the PIN now answers whether one
         // exists. There is no plaintext PIN in the process to return.
         assertTrue(ServiceLocator.pinManager.isConfigured())
-    }
-
-    @Test
-    fun debugSetPin_installsAKnownCredential() {
-        val intent = Intent("tv.safetubeforkids.app.DEBUG_SET_PIN").apply { putExtra("pin", "135790") }
-        receiver.onReceive(context, intent)
-
-        assertTrue(ServiceLocator.pinManager.isConfigured())
-        // The result is named in the message: an earlier version of this test failed with a bare
-        // AssertionError, which left the actual answer - no session issuer in the fixture - to be guessed
-        // at twice.
-        val result = ServiceLocator.pinManager.validate("135790")
-        assertTrue(
-            "the PIN the receiver installed should sign in, but validate answered $result",
-            result is tv.safetubeforkids.app.auth.PinResult.Success,
-        )
-    }
-
-    @Test
-    fun debugResetPin_clearsTheCredentialAndReturnsTheTvToSetup() {
-        val intent = Intent("tv.safetubeforkids.app.DEBUG_RESET_PIN")
-        receiver.onReceive(context, intent)
-
-        assertFalse("a reset leaves nothing to sign in with", ServiceLocator.pinManager.isConfigured())
-        assertTrue(
-            ServiceLocator.pinManager.validate(TEST_PIN) is tv.safetubeforkids.app.auth.PinResult.NotSetUp,
-        )
     }
 
     @Test
