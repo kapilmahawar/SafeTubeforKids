@@ -79,6 +79,38 @@ android {
     }
 }
 
+// W13.9 - instrumentation on a real device is destructive to the app it instruments.
+//
+// The connected-test tasks do not merely install the app and run the tests. The Unified Test Platform
+// installs both APKs with uninstall_after_test = true and then removes tv.safetubeforkids.app, data and all.
+// That is how the family TV lost its parent PIN and its approved library in W13.8 - with both credential
+// tests skipped and nothing failing (docs/W13_9_RECOVERY_AND_TEST_SAFETY.md, section A).
+//
+// So a connected-device run has to be opted into for that run, and the opt-in exists to send the run at a
+// disposable emulator or a spare device. This check runs in doFirst, before the task does any of its work:
+// the uninstall is part of that work, so a guard that ran after it would be false confidence rather than
+// protection. It names no device, address or serial - what a build script cannot know is not something it
+// should pretend to check.
+//
+// The opt-in is a gate on a human, not a way to keep app data through the uninstall. Nothing here makes the
+// task stop uninstalling.
+val deviceInstrumentationOptIn = "SAFETUBE_ALLOW_DEVICE_INSTRUMENTATION"
+
+tasks.matching {
+    it.name.startsWith("connected") || it.name.startsWith("device") || it.name.startsWith("uninstall")
+}.configureEach {
+    doFirst {
+        if (System.getenv(deviceInstrumentationOptIn) != "1") {
+            throw GradleException(
+                "Refusing to run $name: it installs and then uninstalls tv.safetubeforkids.app on the " +
+                    "attached device, which erases the parent PIN and the approved library. Point it at a " +
+                    "disposable emulator or a spare device and opt in for that run only: " +
+                    "${'$'}env:$deviceInstrumentationOptIn = '1'",
+            )
+        }
+    }
+}
+
 dependencies {
     val composeBom = platform("androidx.compose:compose-bom:2026.02.01")
     implementation(composeBom)

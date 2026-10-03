@@ -9,6 +9,13 @@
  * that clears a credential. This check is the assertion that does not need a device: it fails the moment a
  * credential-replacing intent appears somewhere the default test path would execute, and it also fails if the
  * opt-in guard or the isolated fixture is removed from the guarded class.
+ *
+ * W13.9 added the second half of the same concern. The credential tests were never what erased the family
+ * TV's provisioning: the connected-test task uninstalls the app it instruments when it finishes, whatever
+ * ran inside it (docs/W13_9_RECOVERY_AND_TEST_SAFETY.md, section A). That uninstall is not preventable from
+ * a test, so the app module refuses to run a connected or uninstall task at all unless the run opts in
+ * explicitly. These checks hold that refusal in place, and hold it to the two properties that make it
+ * real rather than decorative: it must run before the task does its work, and it must name no device.
  */
 
 const test = require('node:test');
@@ -16,9 +23,12 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const androidTestDir = path.join(__dirname, '..', 'app', 'src', 'androidTest');
+const appDir = path.join(__dirname, '..', 'app');
+const androidTestDir = path.join(appDir, 'src', 'androidTest');
+const appBuildFile = path.join(appDir, 'build.gradle.kts');
 const guardedName = 'CredentialTokenInstrumentedTest.kt';
 const optInArgument = 'runDestructiveCredentialTests';
+const optInEnvironmentVariable = 'SAFETUBE_ALLOW_DEVICE_INSTRUMENTATION';
 
 /** Intents that install or clear a parent credential. */
 const destructiveIntents = ['DEBUG_SET_PIN', 'DEBUG_RESET_PIN'];
@@ -38,6 +48,7 @@ function kotlinSources(dir) {
 
 const sources = kotlinSources(androidTestDir);
 const guarded = sources.find((file) => file.name === guardedName);
+const appBuild = fs.readFileSync(appBuildFile, 'utf8');
 
 test('the instrumentation sources are where this check expects them', () => {
   assert.ok(sources.length > 0, `no Kotlin instrumentation sources under ${androidTestDir}`);
@@ -81,4 +92,50 @@ test('the opt-in class still isolates the credential it mutates', () => {
   assert.match(guarded.text, /getInMemoryInstance/, 'the database must be the in-memory one');
   assert.match(guarded.text, /InMemoryParentCredentialStore/, 'the credential store must be the in-memory one');
   assert.match(guarded.text, /initForTest/, 'the fixture must install those through ServiceLocator.initForTest');
+});
+
+test('the app module refuses a connected or uninstall task unless the run opts in', () => {
+  assert.ok(
+    appBuild.includes(optInEnvironmentVariable),
+    `build.gradle.kts must gate device instrumentation on ${optInEnvironmentVariable}`,
+  );
+  assert.match(appBuild, /tasks\.matching\s*\{/, 'the refusal must be attached to the tasks it protects');
+  assert.match(appBuild, /startsWith\("connected"\)/, 'connected-test tasks must be guarded');
+  assert.match(appBuild, /startsWith\("uninstall"\)/, 'uninstall tasks must be guarded');
+  assert.match(
+    appBuild,
+    /startsWith\("device"\)/,
+    'deviceAndroidTest runs instrumentation through the device providers and must be guarded too',
+  );
+});
+
+test('the refusal happens before the device work and fails the build', () => {
+  const guard = appBuild.indexOf('tasks.matching');
+  const doFirst = appBuild.indexOf('doFirst', guard);
+  const readEnv = appBuild.indexOf('System.getenv', guard);
+  assert.ok(doFirst > guard, 'doFirst is what puts the check ahead of the task own actions');
+  assert.ok(
+    readEnv > doFirst,
+    'the opt-in must be read while the task runs, not baked into the configuration',
+  );
+  assert.match(appBuild.slice(guard), /GradleException/, 'a guard that only warns is not a guard');
+  for (const weakener of ['logger.warn', 'println(', 'logger.lifecycle']) {
+    assert.ok(
+      !appBuild.slice(guard).includes(weakener),
+      `${weakener} inside the guard means it reports trouble instead of preventing it`,
+    );
+  }
+});
+
+test('the guard does not depend on a device identity', () => {
+  const guard = appBuild.slice(appBuild.indexOf('tasks.matching'));
+  assert.ok(
+    !/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(guard),
+    'the guard must not recognize a device by its address',
+  );
+  assert.ok(!guard.includes(':5555'), 'the guard must not recognize a device by a serial or port');
+  assert.ok(
+    !/deviceSerial|ANDROID_SERIAL/.test(guard),
+    'the guard must not key off a serial: undocumented identity is not a safety property',
+  );
 });
