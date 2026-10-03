@@ -11,7 +11,9 @@ The verification below was run against the family Mi Box **after** the disposabl
 absent, so the guard is expected to stop it before it does anything. No opted-in run — the one that installs
 and then uninstalls the app — was performed on the family device. Before the first run the device reported
 `/auth/state` = `{"success":true,"configured":false,"recoveryCodePending":false}`: setup is still incomplete,
-so there is no provisioned credential or library on it to lose.
+so there is no provisioned credential or library on it to lose. The owner completed setup on the TV *after*
+these runs: the device reported `configured:false` while they were made and `configured:true` when it was
+checked again later, so the sentence above describes the device at the time of the runs, not now.
 
 ```
 $env:SAFETUBE_ALLOW_DEVICE_INSTRUMENTATION   # absent
@@ -114,4 +116,8 @@ mentions a connected, device or uninstall task; the opt-in appears nowhere in it
 
 - No runtime verification of the opted-in path, and none of the uninstall behaviour on success, failure or
   cancellation, until a disposable target exists (a host with virtualization, or a spare device).
-- The owner still has to complete setup on the TV; until then every provisioning check stays `BLOCKED`.
+- The owner completed setup on the TV after the runs in this file. The checks that need the parent's
+  credentials — parent authentication, the five approved sources, approved playback, unapproved blocking, and
+  whether a probe source or bandwidth override is left behind — cannot be observed from outside the parent
+  session, so they belong to the owner or to a run the owner asks for. No attempt was made to authenticate on
+  the owner's behalf, and no fixture or probe content was inserted into the newly configured library.
