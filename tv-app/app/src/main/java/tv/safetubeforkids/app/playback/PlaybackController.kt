@@ -401,6 +401,10 @@ class PlaybackController(
         // Every load restarts the clean-playback clock, so a climb back up is never credited with
         // time that was earned before the reopen.
         cleanSinceMs = 0L
+        // The rendered size belongs to the item that produced it. Left behind, the quality chip reported the
+        // previous video's picture for the new one - "720p (showing 1080p)" - before it had rendered
+        // anything at all.
+        if (!isQualityReopen) renderedQualityHeight = null
 
         // Drop any menu selection the new video cannot honour.
         if (forcedQualityHeight != null && media.qualities.none { it.height == forcedQualityHeight }) {
