@@ -173,11 +173,24 @@ class AdaptiveQualityTest {
         return controller
     }
 
-    /** Waits for the loaded rendition to be the one the chip reports, which is what a choice produces. */
-    private fun awaitLabel(controller: PlaybackController, expected: String) =
+    /**
+     * Waits for the loaded rendition to be the one the chip reports, and - where a reopen is expected - for
+     * that stream to have reached the player.
+     *
+     * Both halves matter. `prepare()` publishes the quality label *before* it hands the source to the
+     * player, so waiting on the label alone can capture a reopen count one revision too early; that race made
+     * the stall test fail in the release variant, where the load is slower.
+     */
+    private fun awaitLabel(controller: PlaybackController, expected: String, reopensBefore: Int? = null) {
         awaitCondition("the quality chip to read '$expected' (it reads '${controller.qualityLabel}')") {
             controller.qualityLabel == expected
         }
+        if (reopensBefore != null) {
+            awaitCondition("the stream for '$expected' to reach the player") {
+                player.mediaSourceCount > reopensBefore
+            }
+        }
+    }
 
     private fun awaitCondition(what: String, timeoutMs: Long = 5_000, condition: () -> Boolean) {
         val deadline = System.currentTimeMillis() + timeoutMs
@@ -233,8 +246,9 @@ class AdaptiveQualityTest {
     fun `a manual rendition is not replaced by the adaptive chooser`() {
         val controller = playing()
         controller.openMenu(PlayerMenu.QUALITY)
+        val reopensBeforePin = player.mediaSourceCount
         controller.selectMenuOption("h720")
-        awaitLabel(controller, "720p")
+        awaitLabel(controller, "720p", reopensBeforePin)
         val reopensAfterPin = player.mediaSourceCount
 
         // A connection that could carry much more: Auto would climb, a pin must not.
@@ -249,8 +263,9 @@ class AdaptiveQualityTest {
     fun `a stall does not override a manual rendition`() {
         val controller = playing()
         controller.openMenu(PlayerMenu.QUALITY)
+        val reopensBeforePin = player.mediaSourceCount
         controller.selectMenuOption("h720")
-        awaitLabel(controller, "720p")
+        awaitLabel(controller, "720p", reopensBeforePin)
         val reopensAfterPin = player.mediaSourceCount
 
         // Eight seconds of buffering is what Auto treats as a stall worth downgrading for.

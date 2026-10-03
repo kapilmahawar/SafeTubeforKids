@@ -28,7 +28,10 @@ jobs:
         working-directory: tv-app
         run: |
           chmod +x ./gradlew
-          ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest
+          # Both variants: the release unit suite exists and is what caught a timing race in a W13.6 test
+          # (it passed in debug and failed in release, where the load is slower). Building the release APK
+          # itself needs a keystore that is deliberately not in this repository, so only the tests run here.
+          ./gradlew --no-daemon --stacktrace assembleDebug testDebugUnitTest testReleaseUnitTest
 
       - name: Check the dashboard JavaScript parses
         run: |
