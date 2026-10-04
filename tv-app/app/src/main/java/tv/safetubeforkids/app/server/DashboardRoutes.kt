@@ -50,6 +50,7 @@ fun Route.dashboardRoutes() {
         "catalog-editor.js" to ContentType("application", "javascript"),
         "catalog-yaml.js" to ContentType("application", "javascript"),
         "parent-access.js" to ContentType("application", "javascript"),
+        "source-add.js" to ContentType("application", "javascript"),
         "style.css" to ContentType.Text.CSS,
         "favicon.svg" to ContentType("image", "svg+xml"),
     )

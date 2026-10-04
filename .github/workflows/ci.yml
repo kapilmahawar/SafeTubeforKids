@@ -61,6 +61,7 @@ jobs:
           scripts/dashboard-catalog-ui.test.js
           scripts/dashboard-catalog-yaml.test.js
           scripts/dashboard-parent-access.test.js
+          scripts/dashboard-asset-routes.test.js
           scripts/dashboard-source-add.test.js
 
       - name: Upload the debug APK
