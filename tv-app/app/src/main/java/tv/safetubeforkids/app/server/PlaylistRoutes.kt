@@ -31,7 +31,14 @@ data class PlaylistResponse(
     val status: String,
 )
 
-private const val MAX_SOURCES = 20
+/**
+ * There is deliberately no cap on how many sources a parent may allow.
+ *
+ * A source is one small row; what actually costs the TV is the number of *videos* one source pulls,
+ * and that is bounded where it is spent (`MAX_VIDEOS_PER_SOURCE`, `MAX_VIDEOS_PER_IMPORT`). Source
+ * resolution is sequential, so more sources means more rows, not more concurrent work. The old cap
+ * of 20 refused a parent with a larger curated library for no measured reason (W13.12).
+ */
 
 fun Route.playlistRoutes(sessionManager: SessionManager, database: CacheDatabase) {
     get("/playlists") {
@@ -74,11 +81,6 @@ fun Route.playlistRoutes(sessionManager: SessionManager, database: CacheDatabase
             return@post
         }
 
-        // Check max
-        if (dao.count() >= MAX_SOURCES) {
-            call.respond(HttpStatusCode.BadRequest, mapOf("error" to "Maximum of $MAX_SOURCES sources reached"))
-            return@post
-        }
 
         val entity = ChannelEntity(
             sourceType = source.type.name.lowercase(),
@@ -159,10 +161,7 @@ fun Route.sourceTransferRoutes(sessionManager: SessionManager, database: CacheDa
         val failed = failures.toMutableList()
 
         for (source in candidates) {
-            if (dao.count() >= MAX_SOURCES) {
-                failed += ImportFailure(source.sourceId, "source limit of $MAX_SOURCES reached")
-                continue
-            }
+
             if (dao.getBySourceId(source.sourceId) != null) {
                 skipped += source.sourceId
                 continue

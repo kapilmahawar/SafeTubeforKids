@@ -2458,7 +2458,9 @@
 
         if (fields.addAllow && fields.addAllow.checked) {
             var allowed = await apiCall('POST', '/playlists', { url: url });
-            if (allowed.status !== 200 && allowed.status !== 409) {
+            // 201 Created is the ordinary answer for a first add; only a real refusal stops this.
+            if (SourceAdd.uncertain(allowed.status)) await loadPlaylists();
+            if (SourceAdd.outcome(allowed.status) === 'failed') {
                 toast(humanError(allowed.data, 'That source could not be allowed'), 'error');
                 return;
             }
@@ -3278,17 +3280,35 @@
             return;
         }
 
-        var result = await apiCall('POST', '/playlists', { url: url });
-        if (result.status !== 200 && result.status !== 409) {
-            toast(humanError(result.data, 'That link could not be allowed'), 'error');
-            return;
-        }
+        // One add at a time. A second click while the first is still in flight is not a second add:
+        // it is a second write whose outcome the page could not attribute to either click.
+        if (!SourceAdd.begin()) return;
 
-        fields.sourceUrl.value = '';
-        await loadPlaylists();
-        await refreshTv();
-        toast(result.status === 409 ? 'That was already allowed.' : 'Allowed. It will be ready in a moment.', 'ok');
-        render();
+        var before = (state.playlists || []).length;
+        try {
+            var result = await apiCall('POST', '/playlists', { url: url });
+
+            // An answer that says nothing about whether the source is stored is not a failure. Read
+            // the source list back and report what is actually there.
+            if (SourceAdd.uncertain(result.status)) await loadPlaylists();
+
+            var outcome = SourceAdd.outcome(result.status);
+            if (outcome === 'failed' && (state.playlists || []).length > before) outcome = 'allowed';
+
+            if (outcome === 'failed') {
+                toast(humanError(result.data, 'That link could not be allowed'), 'error');
+                render();
+                return;
+            }
+
+            fields.sourceUrl.value = '';
+            await loadPlaylists();
+            await refreshTv();
+            toast(outcome === 'already' ? 'That was already allowed.' : 'Allowed. It will be ready in a moment.', 'ok');
+            render();
+        } finally {
+            SourceAdd.end();
+        }
     }
 
     async function removeSource(id) {
@@ -3599,7 +3619,7 @@
                 ? 'https://www.youtube.com/watch?v=' + ids[i]
                 : 'https://www.youtube.com/playlist?list=' + ids[i];
             var result = await apiCall('POST', '/playlists', { url: url });
-            if (result.status === 200 || result.status === 409) allowed++;
+            if (SourceAdd.accepted(result.status)) allowed++;
         }
 
         await loadPlaylists();

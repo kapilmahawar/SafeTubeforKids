@@ -1,7 +1,9 @@
 package tv.safetubeforkids.app.server
 
 import tv.safetubeforkids.app.auth.SessionManager
+import tv.safetubeforkids.app.data.ExportedSource
 import tv.safetubeforkids.app.data.FakeChannelDao
+import tv.safetubeforkids.app.data.SourceTransfer
 import tv.safetubeforkids.app.data.cache.CacheDatabase
 import tv.safetubeforkids.app.data.cache.ChannelEntity
 import io.ktor.client.request.*
@@ -139,12 +141,44 @@ class PlaylistRoutesTest {
         assertEquals(HttpStatusCode.Conflict, response.status)
     }
 
+    private fun transferApp(
+        block: suspend ApplicationTestBuilder.(token: String) -> Unit,
+    ) = testApplication {
+        val sessionManager = SessionManager(clock = { currentTime })
+        val fakeDao = FakeChannelDao()
+        val mockDb = mockk<CacheDatabase>()
+        every { mockDb.channelDao() } returns fakeDao
+
+        application {
+            install(ContentNegotiation) { json() }
+            routing {
+                sourceTransferRoutes(sessionManager, mockDb)
+            }
+        }
+
+        val token = sessionManager.createSession()!!
+        block(token)
+    }
+
+    private suspend fun ApplicationTestBuilder.listedSources(token: String): kotlinx.serialization.json.JsonArray =
+        Json.parseToJsonElement(
+            client.get("/playlists") { header("Authorization", "Bearer $token") }.bodyAsText()
+        ).jsonArray
+
+    /**
+     * W13.12: the cap of 20 sources is gone.
+     *
+     * The count of sources was never the resource that costs the TV - a source is one small row, and
+     * resolution is sequential. What costs the TV is how many videos one source pulls, and that stays
+     * bounded where it is spent. These tests cover the twenty-first source, a substantially larger
+     * catalog, the duplicate rule at scale, and the import path that carried the same cap.
+     */
     @Test
-    fun postPlaylist_at20Max_returns400() = testApp(
+    fun postPlaylist_twentyFirstSource_isCreated() = testApp(
         setupDao = {
             kotlinx.coroutines.runBlocking {
                 repeat(20) { i ->
-                    insert(ChannelEntity(sourceType = "yt_playlist", sourceId = "PL$i", sourceUrl = "url$i", displayName = "P$i"))
+                    insert(ChannelEntity(sourceType = "yt_playlist", sourceId = "PLfill$i", sourceUrl = "url$i", displayName = "P$i"))
                 }
             }
         }
@@ -152,9 +186,95 @@ class PlaylistRoutesTest {
         val response = client.post("/playlists") {
             header("Authorization", "Bearer $token")
             contentType(ContentType.Application.Json)
-            setBody("""{"url":"PLnew123456"}""")
+            setBody("""{"url":"PLtwentyfirst000000000000000000"}""")
         }
-        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertEquals(HttpStatusCode.Created, response.status)
+        assertEquals(21, listedSources(token).size)
+    }
+
+    @Test
+    fun postPlaylist_sixtySources_allCreatedAndListedInOrder() = testApp { token ->
+        val started = System.nanoTime()
+        repeat(60) { i ->
+            val response = client.post("/playlists") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody("""{"url":"PLbulk${i.toString().padStart(4, '0')}"}""")
+            }
+            assertEquals("source $i", HttpStatusCode.Created, response.status)
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        println("W13.12 measured: 60 sources added over HTTP in ${elapsedMs}ms")
+
+        val listed = listedSources(token)
+        assertEquals(60, listed.size)
+        assertEquals("the source list is stable", listed.toString(), listedSources(token).toString())
+    }
+
+    @Test
+    fun postPlaylist_twoHundredSources_areAllCreatedWithinBudget() = testApp { token ->
+        val started = System.nanoTime()
+        repeat(200) { i ->
+            val response = client.post("/playlists") {
+                header("Authorization", "Bearer $token")
+                contentType(ContentType.Application.Json)
+                setBody("""{"url":"PLlarge${i.toString().padStart(4, '0')}"}""")
+            }
+            assertEquals("source $i", HttpStatusCode.Created, response.status)
+        }
+        val elapsedMs = (System.nanoTime() - started) / 1_000_000
+        println("W13.12 measured: 200 sources added over HTTP in ${elapsedMs}ms")
+
+        assertEquals(200, listedSources(token).size)
+        // A budget rather than a benchmark: the work measured is the route's own per-request cost
+        // against the fake DAO. Exceeding it would mean something had become accidentally quadratic.
+        assertTrue("200 adds took ${elapsedMs}ms", elapsedMs < 60_000)
+    }
+
+    @Test
+    fun postPlaylist_duplicateAmongMany_isStillRejected() = testApp(
+        setupDao = {
+            kotlinx.coroutines.runBlocking {
+                repeat(25) { i ->
+                    insert(ChannelEntity(sourceType = "yt_playlist", sourceId = "PLdup$i", sourceUrl = "url$i", displayName = "D$i"))
+                }
+            }
+        }
+    ) { token ->
+        val response = client.post("/playlists") {
+            header("Authorization", "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody("""{"url":"PLdup7"}""")
+        }
+        assertEquals(HttpStatusCode.Conflict, response.status)
+        assertEquals(25, listedSources(token).size)
+    }
+
+    @Test
+    fun sourceImport_pastTwenty_isNotRefused() = transferApp { token ->
+        val sources = java.util.ArrayList<ExportedSource>()
+        for (index in 0 until 25) {
+            val id = "PLimport" + index.toString().padStart(3, '0')
+            sources.add(
+                ExportedSource(
+                    sourceType = "yt_playlist",
+                    sourceId = id,
+                    sourceUrl = "https://www.youtube.com/playlist?list=" + id,
+                    displayName = "Imported " + index,
+                    videoCount = 0,
+                )
+            )
+        }
+        val payload = SourceTransfer.export(sources, 1_700_000_000_000L)
+        val response = client.post("/sources/import") {
+            header("Authorization", "Bearer $token")
+            contentType(ContentType.Application.Json)
+            setBody(payload)
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        val body = Json.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals(25, body["added"]!!.jsonArray.size)
+        assertEquals(0, body["failed"]!!.jsonArray.size)
     }
 
     @Test
