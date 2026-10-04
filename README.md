@@ -9,7 +9,7 @@ phone; the child sees those videos and nothing else. There is no search box, no 
 videos", and no route back into YouTube itself. SafeTube is not an official YouTube product and is not
 affiliated with YouTube.
 
-![The SafeTube library on Android TV](docs/screenshots/w10/tv-child-library.png)
+![The SafeTube library on Android TV](docs/screenshots/current/library-home.png)
 
 ## What it is, and who it is for
 
@@ -81,12 +81,12 @@ it is not a substitute for the television's own parental controls.
 
 ## Screenshots
 
-Captured from the app running on a Mi Box 4 (Android 12, 1920×1080) during the W10 parent-access
+Captured from the app running on a Mi Box 4 (Android 12, 1920×1080). The library capture is current and was retaken against the live library; the rest date from the W10 parent-access
 milestone. They are the images already published in this repository.
 
 | | |
 |---|---|
-| ![The child's library on the TV](docs/screenshots/w10/tv-child-library.png) | ![A collection opened, showing its videos](docs/screenshots/w10/tv-collection-videos.png) |
+| ![The child's library on the TV](docs/screenshots/current/library-home.png) | ![A collection opened, showing its videos](docs/screenshots/w10/tv-collection-videos.png) |
 | **The library on the TV.** One row per category the parent created, in the parent's order, using the parent's names. A card is a collection or a single video; nothing is recommended or sorted. | **A collection opened.** The videos inside it, in the parent's order, and only videos SafeTube is allowed to play. |
 | ![First-run setup: creating the Parent PIN on the TV](docs/screenshots/w10/tv-first-run-create-pin.png) | ![Parent access on the TV](docs/screenshots/w10/tv-settings-parent-access.png) |
 | **First-run setup.** Welcome, connect a phone, create the Parent PIN on the TV's own keypad, save the Recovery Code. | **Parent access on the TV.** Where the PIN and the Recovery Code are managed, and a last-resort reset lives. |
