@@ -103,7 +103,7 @@ function Key {
 # with no nodes at all - which reads exactly like "the app is not there". It is retried, and a dump with
 # no nodes is treated as a failed dump rather than as an empty screen.
 function DumpXml {
-    param([string]$Name, [int]$Attempts = 3)
+    param([string]$Name, [int]$Attempts = 5)
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         $remote = "/sdcard/safe-$Name.xml"
         $local = Join-Path $OutDir "$Name.xml"
@@ -112,15 +112,17 @@ function DumpXml {
         Adb @('shell', "rm -f $remote") | Out-Null
         if ($output -match 'could not get idle state|ERROR') {
             Note "dump $Name attempt $attempt did not reach an idle state"
-            Start-Sleep -Milliseconds 900
+            Start-Sleep -Milliseconds 1500
             continue
         }
         if (-not (Test-Path $local)) { Start-Sleep -Milliseconds 900; continue }
-        $raw = Get-Content $local -Raw
-        # uiautomator escapes XML entities; decode so a card title can be compared with what it says.
-        $decoded = $raw -replace '&amp;', '&' -replace '&quot;', '"' -replace '&lt;', '<' -replace '&gt;', '>' -replace '&apos;', "'"
+        # Read as UTF-8 (this library is full of Devanagari titles) and parse the *raw* text. Decoding the
+        # XML entities first - as this did - turns every title containing an ampersand into invalid XML, so
+        # a dump of a shelf like "Nursery Rhymes & Kids Songs" could never parse and every dump looked
+        # empty. The parser decodes entities itself; only matching needs them expanded.
+        $raw = Get-Content $local -Raw -Encoding UTF8
         $parsed = $null
-        try { $parsed = [xml]$decoded } catch { $parsed = $null }
+        try { $parsed = [xml]$raw } catch { $parsed = $null }
         if ($parsed -and $parsed.SelectNodes('//node').Count -gt 1) { return $parsed }
         Note "dump $Name attempt $attempt produced no usable hierarchy"
         Start-Sleep -Milliseconds 900
@@ -288,7 +290,10 @@ $devices = Adb @('devices')
 if (-not ($devices | Select-String ([regex]::Escape($Serial) + '\s+device'))) {
     Log "connecting to $Serial"
     Adb @('connect', $Serial) | Out-Null
-    Start-Sleep -Seconds 2
+    Start-Sleep -Seconds 3
+    # Re-read: the list above was taken before the connection existed, and testing it again would abort a
+    # run whose device is now perfectly reachable.
+    $devices = Adb @('devices')
 }
 if (-not ($devices | Select-String ([regex]::Escape($Serial) + '\s+device'))) {
     Log 'the family TV is not connected; nothing can be verified. Run adb connect first.'
@@ -296,6 +301,14 @@ if (-not ($devices | Select-String ([regex]::Escape($Serial) + '\s+device'))) {
     Record 'SAFE_PLAYER_ENTRY' 'BLOCKED' 'device not connected'
     exit 2
 }
+
+# uiautomator's accessibility connection wedges on this device after a session of dumps, and every dump
+# then returns a hierarchy with no nodes - which reads exactly like "the app is not there" and cost two
+# runs. Restarting the helper process is a device-side reset of a test tool, not application state:
+# nothing about SafeTube changes. It is done once, before the first dump.
+Log 'resetting the uiautomator helper (test tool only; no application state changes)'
+Adb @('shell', 'pkill -f uiautomator') | Out-Null
+Start-Sleep -Seconds 2
 
 WakeAndLaunch
 $foreground = ForegroundActivity
