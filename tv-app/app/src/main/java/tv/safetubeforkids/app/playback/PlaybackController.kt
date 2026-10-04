@@ -524,10 +524,28 @@ class PlaybackController(
         }
     }
 
-    /** Retry the current video on the same path; degradation is handled on failure. */
+    /**
+     * Retry the current video on the same path; degradation is handled on failure.
+     *
+     * W14.1: a retry asks the authorization boundary again before it resolves anything. It used to call
+     * [prepare] directly, which skips the check that [boot] performs - and an approved queue is not a
+     * permission slip, as [refreshQueue] already says. A parent can withdraw a source while the child is
+     * looking at the error screen, and with the old code pressing Retry resolved that video's stream and
+     * handed it to the player: the cached row is not authorization, so nothing but this check refuses it.
+     */
     fun retry() {
         scope.launch {
-            if (currentVideoId.isNotBlank()) prepare(currentVideoId)
+            val videoId = currentVideoId
+            if (videoId.isBlank()) return@launch
+            if (PlaybackAuthorization.authorize(db, videoId) !is PlaybackApproval.Approved) {
+                AppLogger.warn("Retry refused for a video that is no longer approved: $videoId")
+                errorMessage = "This video can't be played"
+                currentVideoId = ""
+                resolved = null
+                PlayEventRecorder.endEvent(0, 0)
+                return@launch
+            }
+            prepare(videoId)
         }
     }
 

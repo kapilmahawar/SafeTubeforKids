@@ -405,6 +405,30 @@ class SeekResumeCaptionTest {
         )
     }
 
+    @Test
+    fun `choosing the same caption language again leaves the same track pinned`() {
+        player.tracks = tracksOf(videoGroup, textGroup)
+        val controller = playing(listOf(englishCaption, spanishCaption))
+        controller.openMenu(PlayerMenu.CAPTIONS)
+        assertEquals(
+            "the menu offers off plus every language the item has, in the resolver's order",
+            listOf("off", "cap:en", "cap:es"),
+            controller.menuOptions.map { it.id },
+        )
+
+        controller.selectMenuOption("cap:es")
+        awaitCondition("the Spanish track to be pinned") { textOverride()?.trackIndices?.toList() == listOf(1) }
+        val reopensAfterFirst = player.mediaSourceCount
+
+        // Idempotent: the same track stays pinned, captions stay on, and nothing is reopened to say so.
+        controller.selectMenuOption("cap:es")
+
+        Thread.sleep(250)
+        assertEquals("the same track is still pinned", listOf(1), textOverride()?.trackIndices?.toList())
+        assertTrue("captions are still enabled", !textDisabled())
+        assertEquals("and re-choosing must not reopen the stream", reopensAfterFirst, player.mediaSourceCount)
+    }
+
     // ------------------------------------------------------------------ the stand-in player
 
     private class FakePlayer {

@@ -64,6 +64,13 @@ jobs:
           scripts/dashboard-asset-routes.test.js
           scripts/dashboard-source-add.test.js
 
+      # The player's key contract, which no JVM test can reach: LEFT/RIGHT mean seek on the surface, move
+      # between the settings buttons in that row, and are left unconsumed inside the transport row so the
+      # explicit focus graph walks the five controls. The order of those branches is the contract.
+      - name: Player key-contract check
+        working-directory: tv-app
+        run: node --test scripts/player-key-contract.test.js
+
       - name: Upload the debug APK
         uses: actions/upload-artifact@v4
         with:
