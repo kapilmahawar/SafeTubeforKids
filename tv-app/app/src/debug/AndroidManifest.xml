@@ -2,6 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application>
+        <!--
+            W14.14: passive layout-wedge diagnostic bootstrap.
+
+            Debug builds only. It exists so the 0x0 ComposeView failure can be caught in the act
+            without editing a single production file: a provider is created at process start, and it
+            only registers activity lifecycle callbacks and read-only view listeners. It observes; it
+            never repairs. See LayoutWedgeProbe for the safety rules it follows.
+        -->
+        <provider
+            android:name="tv.safetubeforkids.app.diag.LayoutWedgeInitProvider"
+            android:authorities="tv.safetubeforkids.app.layoutwedge"
+            android:exported="false" />
+
         <receiver
             android:name="tv.safetubeforkids.app.debug.DebugReceiver"
             android:exported="true">
