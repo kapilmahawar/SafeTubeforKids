@@ -145,6 +145,30 @@ finished`, or the app no longer in front).
 What remains unverified for exactly this reason: the checks have not been *run* against those sources yet.
 The sources are established, not the results.
 
+### Getting focus back to the surface before a seek (W14.6)
+
+A device session on the Mi Box reached the player and identified it from the logs alone — `Rendered video:
+640x360 (360p)` and `Player isPlaying=true` — but then sent 25 LEFT and 25 RIGHT presses for the seek
+boundaries and produced **no `Seek` log lines at all**. The dump said why: the deepest focused node was
+`[112,932][208,1028]`, which is the transport row's *Previous* control, not the surface. Left and Right
+were therefore doing what the W13.2a contract says they do there — walking the transport graph — and no
+seek was ever asked for. The lesson is worth keeping in both directions: the absent log line is the proof
+that no seek happened, which is exactly why the log rather than the seek bar is the evidence to trust.
+
+So the order matters, and it is:
+
+1. identify the player (log lines, with the transport descriptions as confirmation);
+2. look at the deepest focused bounds. Anything in the bottom deck — roughly `y` 920–1040, the transport
+   row — means a transport control holds focus;
+3. press UP or DOWN once to leave the row. The product requests surface focus when the row is left, so
+   this is a product behaviour, not a workaround;
+4. confirm the deepest focused node is the full-screen surface `[0,0][1920,1080]`;
+5. only then send LEFT/RIGHT, and verify each seek by its own `Seek <delta>s -> <clamped>s` line.
+
+Never press RIGHT to walk toward a setting chip without first proving where focus is: the same key is a
+seek from the surface, a settings move from the settings row, and a transport move inside the transport
+row. A walk that skips step 4 is a blind walk, whatever the intention behind it.
+
 ## Rules for a contributor
 
 1. Never run a destructive tier or an instrumentation task against a device that is not yours to erase.
