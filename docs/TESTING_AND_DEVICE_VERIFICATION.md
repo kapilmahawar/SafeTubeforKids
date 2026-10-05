@@ -110,6 +110,41 @@ approved source is adaptive), automatic quality upgrades, and caption rendering 
 **Not covered anywhere:** other Android TV hardware, other Android versions and other resolutions. The
 verified target is the Mi Box 4 on Android 12, and nothing in this repository claims more.
 
+## Reading playback state without touching the app (W14.5)
+
+The player checks that stayed BLOCKED were blocked by *observation*, not by the product. The playback
+clock is a Compose text node that exists only while the overlay is composed, the transport controls
+likewise, and the same activity hosts both the library and the player — so a dump alone cannot always say
+which screen is up, and the overlay auto-hides four seconds after the last input.
+
+Two read-only sources already exist. Neither is a debug endpoint, neither needs a product change, and
+neither writes anything.
+
+**1. The app's own log lines** (`adb logcat -d`, filtered to the app's tag). The controller already logs
+what a device check needs:
+
+| Line | What it proves |
+|---|---|
+| `Rendered video: WxH (Hp)` | a video is actually rendering, so the player is up with no overlay needed |
+| `Player isPlaying=true|false` | playback state |
+| `Menu opened: <MENU> (N options)` | which menu is open — the fact that stops a chip walk from walking into the wrong one |
+| `Player menu <MENU> -> <id>`, `Captions selection: …`, `Audio track selected: …` | what a menu choice actually applied, rather than what a menu looked like |
+| `Seek <delta>s -> <clamped>s` | the controller's own clamped result: the number a seek-boundary check is about |
+| `Approved queue finished` | the player is leaving the queue |
+
+**2. The persisted playback position.** `playback_positions(videoId, positionMs, durationMs, updatedAt)`
+in the app's own database, and a seek persists the *clamped* position. A read-only copy — taken through
+the app's own debuggable sandbox with the copy deleted afterwards, never a write — therefore answers both
+boundaries directly: zero at the start, the recorded duration at the end.
+
+With those two, the four states are distinguishable without guessing: library (no recent playback lines,
+library dump), player with the overlay hidden (`Rendered video` / `isPlaying` lines and no transport
+labels), player with the overlay visible (transport labels present), and player exited (`Approved queue
+finished`, or the app no longer in front).
+
+What remains unverified for exactly this reason: the checks have not been *run* against those sources yet.
+The sources are established, not the results.
+
 ## Rules for a contributor
 
 1. Never run a destructive tier or an instrumentation task against a device that is not yours to erase.
