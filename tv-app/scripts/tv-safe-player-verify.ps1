@@ -371,10 +371,20 @@ Record 'SAFE_PLAYER_FOCUS' (Verdict ($entry.Bounds -eq '[0,0][1920,1080]') 'PASS
 # ------------------------------------------------------------------ seek boundaries on the surface
 # MENU/INFO reveal the overlay without taking the remote into the settings row, so focus stays on the
 # surface and LEFT/RIGHT remain seek - the W13.2a contract, exercised from the outside.
+# MENU is not guaranteed to have been accepted, and an overlay that is not visible has no clock to read.
+# Reveal, verify, and try the other reveal keys before giving up - then report honestly rather than
+# reading a position out of a screen that is not showing one.
 function ShowClock {
-    Key 'KEYCODE_MENU' 700
-    $xml = DumpXml 'clock'
-    return @{ Xml = $xml; Clock = ClockTextsIn $xml }
+    foreach ($reveal in @('KEYCODE_MENU', 'KEYCODE_INFO', 'KEYCODE_MENU')) {
+        Key $reveal 800
+        $xml = DumpXml 'clock'
+        $clock = ClockTextsIn $xml
+        # Either the clock or the setting chips prove the overlay is on screen; the clock alone is the thing
+        # the seek check needs, so it is still reported separately by the caller.
+        $chips = @(TextsIn $xml | Where-Object { $_ -match '^(Subtitles|Quality|Speed|Audio|Fit):' })
+        if ($clock.Count -ge 2 -or $chips.Count -ge 1) { return @{ Xml = $xml; Clock = $clock } }
+    }
+    return @{ Xml = (DumpXml 'clock-final'); Clock = @() }
 }
 
 $clock = ShowClock
@@ -403,14 +413,58 @@ if ($beforeSeek.Count -ge 2) {
 }
 
 # ------------------------------------------------------------------ the settings row, menus and speed
+# Reaching a settings chip safely, and proving which menu opened.
+#
+# Two things went wrong in W14.3 and both are handled here. First, an earlier check can leave a menu open,
+# and then every later chip walk is nonsense - so the state is normalised first, bounded, and the player is
+# required to still be the screen afterwards. Second, the label used to match was gathered from the focused
+# node's *descendants*: the settings row is one large node whose descendants carry every chip label, so a
+# match could succeed while focus sat on the row itself, and OK then activated whatever chip the row
+# considered current. That is how the caption check opened the aspect menu. The chip must now be the
+# focused node itself, and chip-sized, and the menu it opens must be identified from its own labels.
 function OpenChipMenu {
-    param([string]$ChipPrefix, [int]$MaxPresses = 6)
+    param([string]$ChipPrefix, [int]$MaxPresses = 8)
+    for ($close = 1; $close -le 3; $close++) {
+        # Reveal first: the transport controls and the setting chips exist only while the overlay is up, so
+        # asking a dump whether they are present before revealing it answers "no" on a player that is
+        # perfectly fine. That false negative is what stopped every chip check in the first W14.4 run. The
+        # screen is judged by the foreground, which is not affected by the overlay auto-hiding.
+        Key 'KEYCODE_MENU' 800
+        $probe = DumpXml "pre-$ChipPrefix-$close"
+        if (-not $probe) { return $null }
+        if (-not (ForegroundIsApp)) { Note "the app is no longer in front while preparing the $ChipPrefix chip"; return $null }
+        $menuish = @(TextsIn $probe | Where-Object { $_ -match '^\s*(Fit screen|Crop to fill|Stretch|Off|On|[0-9.]+x)\s*$' })
+        if ($menuish.Count -eq 0) { break }
+        Note "a menu was open before the $ChipPrefix chip; closing it"
+        Key 'KEYCODE_BACK' 900
+    }
     Key 'KEYCODE_DPAD_DOWN' 900          # into the settings row
     for ($i = 0; $i -le $MaxPresses; $i++) {
-        $target = DumpLabel "chip-$ChipPrefix-$i"
-        if ($target -and $target.Label -match [regex]::Escape($ChipPrefix)) {
+        $xml = DumpXml "chip-$ChipPrefix-$i"
+        if (-not $xml) { return $null }
+        $node = FocusedNode $xml
+        $own = ''
+        if ($node) {
+            if ("$($node.text)") { $own = "$($node.text)" }
+            elseif ("$($node.'content-desc')") { $own = "$($node.'content-desc')" }
+        }
+        $chipSized = $false
+        if ($node -and "$($node.bounds)" -match '\[(\d+),(\d+)\]\[(\d+),(\d+)\]') {
+            $w = [int]$Matches[3] - [int]$Matches[1]
+            $h = [int]$Matches[4] - [int]$Matches[2]
+            $chipSized = ($w -gt 0 -and $w -lt 700 -and $h -gt 0 -and $h -lt 200)
+        }
+        if ($own -match [regex]::Escape($ChipPrefix) -and $chipSized) {
             Key 'KEYCODE_DPAD_CENTER' 1500
-            return (DumpXml "menu-$ChipPrefix")
+            $menu = DumpXml "menu-$ChipPrefix"
+            $labels = @(TextsIn $menu)
+            $isAspect = @($labels | Where-Object { $_ -match 'Fit screen|Crop to fill|Stretch' }).Count -gt 0
+            $isLanguage = @($labels | Where-Object { $_ -match '^(Off|On)$' -or $_ -match 'English|Hindi|Spanish|Tamil|Telugu|Arabic|Portuguese|Indonesian|Japanese|Korean' }).Count -gt 0
+            if ($ChipPrefix -match 'Subtitles' -and $isAspect -and -not $isLanguage) {
+                Note "the Subtitles chip opened an aspect menu ($($labels -join ' | ')); refusing to treat that as captions"
+                return $null
+            }
+            return $menu
         }
         Key 'KEYCODE_DPAD_RIGHT' 400
     }
@@ -426,7 +480,7 @@ function MenuOptionIds {
 if (-not $SkipMenuChecks) {
     $captionsMenu = OpenChipMenu 'Subtitles'
     if (-not $captionsMenu) {
-        Record 'CAPTION_LANGUAGE_DEVICE' 'BLOCKED' 'the Subtitles chip could not be reached in the settings row'
+        Record 'CAPTION_LANGUAGE_DEVICE' 'INCONCLUSIVE' 'the Subtitles chip could not be positively identified, or the menu it opened was not a captions menu; no option was chosen'
     } else {
         $options = MenuOptionIds $captionsMenu
         Log "captions menu offers: $($options -join ' | ')"
